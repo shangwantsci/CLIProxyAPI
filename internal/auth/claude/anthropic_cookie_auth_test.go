@@ -192,9 +192,11 @@ func TestCookieOrganizationUUIDUsesClaudeAIChromeClientFactory(t *testing.T) {
 	var hits int
 	var factoryCalls int
 	var cookieValue string
+	var orgHeaders http.Header
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits++
+		orgHeaders = r.Header.Clone()
 		if cookie, err := r.Cookie("sessionKey"); err == nil {
 			cookieValue = cookie.Value
 		}
@@ -231,5 +233,17 @@ func TestCookieOrganizationUUIDUsesClaudeAIChromeClientFactory(t *testing.T) {
 	}
 	if cookieValue != "session-value" {
 		t.Fatalf("cookie = %q, want session-value", cookieValue)
+	}
+	if got := orgHeaders.Get("Accept"); got != "application/json, text/plain, */*" {
+		t.Fatalf("organization Accept = %q, want application/json, text/plain, */*", got)
+	}
+	if got := orgHeaders.Get("Referer"); got != "https://claude.ai/new" {
+		t.Fatalf("organization Referer = %q, want https://claude.ai/new", got)
+	}
+	if got := orgHeaders.Get("Sec-Fetch-Site"); got != "same-origin" {
+		t.Fatalf("organization Sec-Fetch-Site = %q, want same-origin", got)
+	}
+	if got := orgHeaders.Get("User-Agent"); !strings.Contains(got, "Mozilla/5.0") {
+		t.Fatalf("organization User-Agent = %q, want browser-like UA", got)
 	}
 }

@@ -509,6 +509,9 @@ func newClaudeAIChromeClient(proxyURL string) (*req.Client, error) {
 		SetTimeout(60 * time.Second).
 		ImpersonateChrome().
 		SetCookieJar(nil)
+	client.GetClient().CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 
 	setting, err := proxyutil.Parse(proxyURL)
 	if err != nil {
@@ -613,6 +616,15 @@ func (o *ClaudeAuth) getCookieOrganizationUUID(ctx context.Context, sessionKey s
 		resp, err := client.R().
 			SetContext(ctx).
 			SetCookies(&http.Cookie{Name: "sessionKey", Value: sessionKey}).
+			SetHeader("Accept", "application/json, text/plain, */*").
+			SetHeader("Accept-Language", "en-US,en;q=0.9").
+			SetHeader("Cache-Control", "no-cache").
+			SetHeader("Pragma", "no-cache").
+			SetHeader("Referer", claudePlatformHTTPOrigin+"/new").
+			SetHeader("Sec-Fetch-Dest", "empty").
+			SetHeader("Sec-Fetch-Mode", "cors").
+			SetHeader("Sec-Fetch-Site", "same-origin").
+			SetHeader("User-Agent", claudeAIBrowserUA).
 			Get(strings.TrimRight(claudeAIBaseURL, "/") + "/api/organizations")
 		if err != nil {
 			return "", fmt.Errorf("organizations request failed: %w", err)
@@ -675,9 +687,14 @@ func (o *ClaudeAuth) getCookieAuthorizationCode(ctx context.Context, sessionKey,
 			SetHeader("Accept", "application/json").
 			SetHeader("Accept-Language", "en-US,en;q=0.9").
 			SetHeader("Cache-Control", "no-cache").
+			SetHeader("Pragma", "no-cache").
 			SetHeader("Origin", claudePlatformHTTPOrigin).
 			SetHeader("Referer", claudePlatformHTTPOrigin+"/new").
+			SetHeader("Sec-Fetch-Dest", "empty").
+			SetHeader("Sec-Fetch-Mode", "cors").
+			SetHeader("Sec-Fetch-Site", "same-origin").
 			SetHeader("Content-Type", "application/json").
+			SetHeader("User-Agent", claudeAIBrowserUA).
 			SetBody(reqBody).
 			Post(authURL)
 		if err != nil {

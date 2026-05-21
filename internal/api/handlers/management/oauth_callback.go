@@ -101,5 +101,9 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	c.JSON(http.StatusOK, gin.H{
+		"status":   "ok",
+		"provider": canonicalProvider,
+		"state":    state,
+	})
 }

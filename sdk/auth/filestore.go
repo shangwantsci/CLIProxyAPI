@@ -52,6 +52,7 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 	if path == "" {
 		return "", fmt.Errorf("auth filestore: missing file path attribute for %s", auth.ID)
 	}
+	s.attachResolvedPath(auth, path)
 
 	if auth.Disabled {
 		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
@@ -115,6 +116,13 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 		return "", fmt.Errorf("auth filestore: nothing to persist for %s", auth.ID)
 	}
 
+	return path, nil
+}
+
+func (s *FileTokenStore) attachResolvedPath(auth *cliproxyauth.Auth, path string) {
+	if auth == nil {
+		return
+	}
 	if auth.Attributes == nil {
 		auth.Attributes = make(map[string]string)
 	}
@@ -123,8 +131,6 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 	if strings.TrimSpace(auth.FileName) == "" {
 		auth.FileName = auth.ID
 	}
-
-	return path, nil
 }
 
 // List enumerates all auth JSON files under the configured directory.
