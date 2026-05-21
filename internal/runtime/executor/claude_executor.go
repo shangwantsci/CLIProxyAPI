@@ -892,6 +892,15 @@ var claudeBlockedUpstreamHeaderPrefixes = []string{
 	"x-cpa-",
 	"x-cliproxy-",
 	"x-sub2api-",
+	"x-newapi-",
+	"x-oneapi-",
+	"x-openrouter-",
+	"x-lobe-",
+	"x-cherry-",
+	"x-fastapi-",
+	"x-chatnio-",
+	"x-aigateway-",
+	"x-llm-",
 }
 
 func filterClaudeBetaHeader(header string) string {

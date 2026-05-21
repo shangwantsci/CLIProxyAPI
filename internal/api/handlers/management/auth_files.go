@@ -260,6 +260,37 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 	c.JSON(200, gin.H{"files": files})
 }
 
+func (h *Handler) ListClaudeAuthHealth(c *gin.Context) {
+	if h == nil {
+		c.JSON(500, gin.H{"error": "handler not initialized"})
+		return
+	}
+	if h.authManager == nil {
+		c.JSON(200, gin.H{"accounts": []gin.H{}})
+		return
+	}
+	now := time.Now()
+	auths := h.authManager.List()
+	accounts := make([]gin.H, 0, len(auths))
+	for _, auth := range auths {
+		if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "claude") {
+			continue
+		}
+		entry := h.buildAuthFileEntry(auth)
+		if entry == nil {
+			continue
+		}
+		addClaudeAuthHealthFields(entry, auth, now)
+		accounts = append(accounts, entry)
+	}
+	sort.Slice(accounts, func(i, j int) bool {
+		nameI, _ := accounts[i]["name"].(string)
+		nameJ, _ := accounts[j]["name"].(string)
+		return strings.ToLower(nameI) < strings.ToLower(nameJ)
+	})
+	c.JSON(200, gin.H{"accounts": accounts})
+}
+
 // GetAuthFileModels returns the models supported by a specific auth file
 func (h *Handler) GetAuthFileModels(c *gin.Context) {
 	name := c.Query("name")
@@ -500,8 +531,79 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		entry["cloak_strict_mode"] = authBoolSetting(auth, "cloak_strict_mode", false)
 		entry["cloak_cache_user_id"] = authBoolSetting(auth, "cloak_cache_user_id", true)
 		entry["cloak_sensitive_words"] = authStringListSetting(auth, "cloak_sensitive_words")
+		addClaudeAuthHealthFields(entry, auth, time.Now())
 	}
 	return entry
+}
+
+func addClaudeAuthHealthFields(entry gin.H, auth *coreauth.Auth, now time.Time) {
+	if entry == nil || auth == nil {
+		return
+	}
+	healthStatus := claudeAuthHealthStatus(auth, now)
+	entry["health_status"] = healthStatus
+	if expiresAt, ok := auth.ExpirationTime(); ok {
+		entry["expires_at"] = expiresAt
+		seconds := int64(expiresAt.Sub(now).Seconds())
+		if seconds < 0 {
+			seconds = 0
+		}
+		entry["seconds_until_expiration"] = seconds
+	}
+	if auth.LastError != nil {
+		lastError := gin.H{
+			"message": auth.LastError.Message,
+		}
+		if auth.LastError.Code != "" {
+			lastError["code"] = auth.LastError.Code
+		}
+		if auth.LastError.HTTPStatus != 0 {
+			lastError["http_status"] = auth.LastError.HTTPStatus
+		}
+		entry["last_error"] = lastError
+	}
+	if auth.Metadata != nil {
+		if profile, ok := auth.Metadata["claude_device_profile"]; ok && profile != nil {
+			entry["claude_device_profile"] = profile
+			entry["has_device_profile"] = true
+		} else {
+			entry["has_device_profile"] = false
+		}
+		if updatedAt, ok := auth.Metadata["claude_device_profile_updated_at"]; ok && updatedAt != nil {
+			entry["claude_device_profile_updated_at"] = updatedAt
+		}
+	}
+}
+
+func claudeAuthHealthStatus(auth *coreauth.Auth, now time.Time) string {
+	if auth == nil {
+		return "unknown"
+	}
+	if auth.Disabled || auth.Status == coreauth.StatusDisabled {
+		return "disabled"
+	}
+	if expiresAt, ok := auth.ExpirationTime(); ok {
+		if !expiresAt.After(now) {
+			return "expired"
+		}
+		if expiresAt.Sub(now) <= 24*time.Hour {
+			return "expiring_soon"
+		}
+	}
+	if auth.Unavailable {
+		return "unavailable"
+	}
+	if auth.Status == coreauth.StatusError || auth.LastError != nil {
+		return "error"
+	}
+	switch auth.Status {
+	case "", coreauth.StatusUnknown, coreauth.StatusActive:
+		return "healthy"
+	case coreauth.StatusPending, coreauth.StatusRefreshing:
+		return string(auth.Status)
+	default:
+		return string(auth.Status)
+	}
 }
 
 func authProjectID(auth *coreauth.Auth) string {

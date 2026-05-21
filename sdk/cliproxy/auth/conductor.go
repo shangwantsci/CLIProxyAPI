@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -51,7 +52,9 @@ type ExecutionSessionCloser interface {
 }
 
 const (
-	homeAuthCountMetadataKey = "__cliproxy_home_auth_count"
+	homeAuthCountMetadataKey                = "__cliproxy_home_auth_count"
+	claudeDeviceProfileMetadataKey          = "claude_device_profile"
+	claudeDeviceProfileUpdatedAtMetadataKey = "claude_device_profile_updated_at"
 	// CloseAllExecutionSessionsID asks an executor to release all active execution sessions.
 	// Executors that do not support this marker may ignore it.
 	CloseAllExecutionSessionsID = "__all_execution_sessions__"
@@ -866,6 +869,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		execReq := req
 		execReq.Model = execModel
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, opts)
+		m.persistRuntimeMetadata(ctx, auth)
 		if errStream != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
 				return nil, errCtx
@@ -1371,6 +1375,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execReq := req
 			execReq.Model = upstreamModel
 			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
+			m.persistRuntimeMetadata(execCtx, auth)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
@@ -1459,6 +1464,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execReq := req
 			execReq.Model = upstreamModel
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
+			m.persistRuntimeMetadata(execCtx, auth)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
@@ -3764,6 +3770,61 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	}
 	_, err := m.store.Save(ctx, auth)
 	return err
+}
+
+func extractPersistableRuntimeMetadata(auth *Auth) map[string]any {
+	if auth == nil || auth.Metadata == nil {
+		return nil
+	}
+	out := make(map[string]any, 2)
+	if profile, ok := auth.Metadata[claudeDeviceProfileMetadataKey]; ok && profile != nil {
+		out[claudeDeviceProfileMetadataKey] = profile
+	}
+	if updatedAt, ok := auth.Metadata[claudeDeviceProfileUpdatedAtMetadataKey]; ok && updatedAt != nil {
+		out[claudeDeviceProfileUpdatedAtMetadataKey] = updatedAt
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func (m *Manager) persistRuntimeMetadata(ctx context.Context, auth *Auth) {
+	if m == nil || auth == nil || strings.TrimSpace(auth.ID) == "" {
+		return
+	}
+	metadata := extractPersistableRuntimeMetadata(auth)
+	if len(metadata) == 0 {
+		return
+	}
+
+	var updated *Auth
+	now := time.Now().UTC()
+	m.mu.Lock()
+	current := m.auths[auth.ID]
+	if current != nil {
+		if current.Metadata == nil {
+			current.Metadata = make(map[string]any, len(metadata))
+		}
+		changed := false
+		for key, value := range metadata {
+			if !reflect.DeepEqual(current.Metadata[key], value) {
+				current.Metadata[key] = value
+				changed = true
+			}
+		}
+		if changed {
+			current.UpdatedAt = now
+			updated = current.Clone()
+		}
+	}
+	m.mu.Unlock()
+	if updated == nil {
+		return
+	}
+	if err := m.persist(ctx, updated); err != nil {
+		logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).Warnf("failed to persist runtime metadata: %v", err)
+	}
 }
 
 // StartAutoRefresh launches a background loop that evaluates auth freshness

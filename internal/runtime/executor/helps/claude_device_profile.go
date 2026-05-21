@@ -16,13 +16,18 @@ import (
 )
 
 const (
-	defaultClaudeFingerprintUserAgent      = "claude-cli/2.1.114 (external, cli)"
+	defaultClaudeFingerprintUserAgent      = "claude-cli/2.1.92 (external, cli)"
 	defaultClaudeFingerprintPackageVersion = "0.70.0"
 	defaultClaudeFingerprintRuntimeVersion = "v24.13.0"
-	defaultClaudeFingerprintOS             = "Linux"
+	defaultClaudeFingerprintOS             = "MacOS"
 	defaultClaudeFingerprintArch           = "arm64"
 	claudeDeviceProfileTTL                 = 7 * 24 * time.Hour
 	claudeDeviceProfileCleanupPeriod       = time.Hour
+)
+
+const (
+	ClaudeDeviceProfileMetadataKey          = "claude_device_profile"
+	ClaudeDeviceProfileUpdatedAtMetadataKey = "claude_device_profile_updated_at"
 )
 
 var (
@@ -256,6 +261,100 @@ func claudeDeviceProfileCacheKey(auth *cliproxyauth.Auth, apiKey string) string 
 	return hex.EncodeToString(sum[:])
 }
 
+func metadataString(raw any, key string) string {
+	switch value := raw.(type) {
+	case map[string]any:
+		if v, ok := value[key]; ok {
+			return strings.TrimSpace(anyString(v))
+		}
+	case map[string]string:
+		return strings.TrimSpace(value[key])
+	}
+	return ""
+}
+
+func anyString(raw any) string {
+	switch value := raw.(type) {
+	case string:
+		return value
+	case []byte:
+		return string(value)
+	default:
+		return ""
+	}
+}
+
+func claudeDeviceProfileFromMetadata(auth *cliproxyauth.Auth, baseline ClaudeDeviceProfile) (ClaudeDeviceProfile, bool) {
+	if auth == nil || auth.Metadata == nil {
+		return ClaudeDeviceProfile{}, false
+	}
+	raw, ok := auth.Metadata[ClaudeDeviceProfileMetadataKey]
+	if !ok || raw == nil {
+		return ClaudeDeviceProfile{}, false
+	}
+	userAgent := metadataString(raw, "user_agent")
+	version, hasVersion := parseClaudeCLIVersion(userAgent)
+	if userAgent == "" || !hasVersion {
+		return ClaudeDeviceProfile{}, false
+	}
+	profile := ClaudeDeviceProfile{
+		UserAgent:      userAgent,
+		PackageVersion: metadataString(raw, "package_version"),
+		RuntimeVersion: metadataString(raw, "runtime_version"),
+		OS:             metadataString(raw, "os"),
+		Arch:           metadataString(raw, "arch"),
+		version:        version,
+		hasVersion:     true,
+	}
+	if profile.PackageVersion == "" {
+		profile.PackageVersion = baseline.PackageVersion
+	}
+	if profile.RuntimeVersion == "" {
+		profile.RuntimeVersion = baseline.RuntimeVersion
+	}
+	if profile.OS == "" {
+		profile.OS = baseline.OS
+	}
+	if profile.Arch == "" {
+		profile.Arch = baseline.Arch
+	}
+	return normalizeClaudeDeviceProfile(profile, baseline), true
+}
+
+func claudeDeviceProfileMetadata(profile ClaudeDeviceProfile) map[string]any {
+	return map[string]any{
+		"user_agent":      profile.UserAgent,
+		"package_version": profile.PackageVersion,
+		"runtime_version": profile.RuntimeVersion,
+		"os":              profile.OS,
+		"arch":            profile.Arch,
+	}
+}
+
+func claudeDeviceProfileMetadataMatches(raw any, profile ClaudeDeviceProfile) bool {
+	expected := claudeDeviceProfileMetadata(profile)
+	for key, expectedValue := range expected {
+		if metadataString(raw, key) != expectedValue {
+			return false
+		}
+	}
+	return true
+}
+
+func persistClaudeDeviceProfileToAuthMetadata(auth *cliproxyauth.Auth, profile ClaudeDeviceProfile) {
+	if auth == nil || profile.UserAgent == "" {
+		return
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any, 2)
+	}
+	if claudeDeviceProfileMetadataMatches(auth.Metadata[ClaudeDeviceProfileMetadataKey], profile) {
+		return
+	}
+	auth.Metadata[ClaudeDeviceProfileMetadataKey] = claudeDeviceProfileMetadata(profile)
+	auth.Metadata[ClaudeDeviceProfileUpdatedAtMetadataKey] = time.Now().UTC().Format(time.RFC3339)
+}
+
 func startClaudeDeviceProfileCacheCleanup() {
 	go func() {
 		ticker := time.NewTicker(claudeDeviceProfileCleanupPeriod)
@@ -290,11 +389,26 @@ func ResolveClaudeDeviceProfile(auth *cliproxyauth.Auth, apiKey string, headers 
 	if hasCandidate && !shouldUpgradeClaudeDeviceProfile(candidate, baseline) {
 		hasCandidate = false
 	}
+	metadataProfile, hasMetadataProfile := claudeDeviceProfileFromMetadata(auth, baseline)
 
 	claudeDeviceProfileCacheMu.RLock()
 	entry, hasCached := claudeDeviceProfileCache[cacheKey]
 	cachedValid := hasCached && entry.expire.After(now) && entry.profile.UserAgent != ""
 	claudeDeviceProfileCacheMu.RUnlock()
+	if !cachedValid && hasMetadataProfile {
+		entry = claudeDeviceProfileCacheEntry{
+			profile: metadataProfile,
+			expire:  now.Add(claudeDeviceProfileTTL),
+		}
+		cachedValid = true
+		claudeDeviceProfileCacheMu.Lock()
+		claudeDeviceProfileCache[cacheKey] = entry
+		claudeDeviceProfileCacheMu.Unlock()
+		if !hasCandidate {
+			persistClaudeDeviceProfileToAuthMetadata(auth, metadataProfile)
+			return metadataProfile
+		}
+	}
 
 	if hasCandidate {
 		if ClaudeDeviceProfileBeforeCandidateStore != nil {
@@ -311,6 +425,7 @@ func ResolveClaudeDeviceProfile(auth *cliproxyauth.Auth, apiKey string, headers 
 			entry.expire = now.Add(claudeDeviceProfileTTL)
 			claudeDeviceProfileCache[cacheKey] = entry
 			claudeDeviceProfileCacheMu.Unlock()
+			persistClaudeDeviceProfileToAuthMetadata(auth, entry.profile)
 			return entry.profile
 		}
 
@@ -319,6 +434,7 @@ func ResolveClaudeDeviceProfile(auth *cliproxyauth.Auth, apiKey string, headers 
 			expire:  now.Add(claudeDeviceProfileTTL),
 		}
 		claudeDeviceProfileCacheMu.Unlock()
+		persistClaudeDeviceProfileToAuthMetadata(auth, candidate)
 		return candidate
 	}
 
@@ -330,6 +446,7 @@ func ResolveClaudeDeviceProfile(auth *cliproxyauth.Auth, apiKey string, headers 
 			entry.expire = now.Add(claudeDeviceProfileTTL)
 			claudeDeviceProfileCache[cacheKey] = entry
 			claudeDeviceProfileCacheMu.Unlock()
+			persistClaudeDeviceProfileToAuthMetadata(auth, entry.profile)
 			return entry.profile
 		}
 		claudeDeviceProfileCacheMu.Unlock()
@@ -358,14 +475,14 @@ func ApplyClaudeDeviceProfileHeaders(r *http.Request, profile ClaudeDeviceProfil
 	r.Header.Set("X-Stainless-Arch", profile.Arch)
 }
 
-// DefaultClaudeVersion returns the version string (e.g. "2.1.114") from the
+// DefaultClaudeVersion returns the version string (e.g. "2.1.92") from the
 // current baseline device profile. It extracts the version from the User-Agent.
 func DefaultClaudeVersion(cfg *config.Config) string {
 	profile := defaultClaudeDeviceProfile(cfg)
 	if version, ok := parseClaudeCLIVersion(profile.UserAgent); ok {
 		return strconv.Itoa(version.major) + "." + strconv.Itoa(version.minor) + "." + strconv.Itoa(version.patch)
 	}
-	return "2.1.114"
+	return "2.1.92"
 }
 
 func ApplyClaudeLegacyDeviceHeaders(r *http.Request, ginHeaders http.Header, cfg *config.Config) {

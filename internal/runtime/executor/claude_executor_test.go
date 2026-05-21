@@ -165,20 +165,42 @@ func TestApplyClaudeHeaders_DropsContext1MBetaFromClientAndBody(t *testing.T) {
 }
 
 func TestApplyClaudeHeaders_StripsKnownRelayClientHeaders(t *testing.T) {
-	auth := &cliproxyauth.Auth{
-		Attributes: map[string]string{
-			"api_key":                     "key-relay-headers",
-			"header:X-OpenClaw-Client":    "openclaw",
-			"header:X-Hermes-Version":     "hermes",
-			"header:Acp-Session-Id":       "acp",
-			"header:X-Claude-Relay-Token": "relay",
-			"header:X-App":                "cli",
-		},
+	leakyHeaders := []string{
+		"X-OpenClaw-Client",
+		"X-Hermes-Version",
+		"Acp-Session-Id",
+		"X-Claude-Relay-Token",
+		"X-Litellm-Trace",
+		"Helicone-Auth",
+		"X-Portkey-Config",
+		"Cf-Aig-Metadata",
+		"X-Kong-Request-Id",
+		"X-Bt-Trace",
+		"X-Cpa-Version",
+		"X-Cliproxy-Route",
+		"X-Sub2api-Account",
+		"X-Newapi-User",
+		"X-Oneapi-Channel",
+		"X-Openrouter-Provider",
+		"X-Lobe-Trace",
+		"X-Cherry-Studio",
+		"X-Fastapi-Request-Id",
+		"X-Chatnio-Client",
+		"X-Aigateway-Route",
+		"X-Llm-Proxy",
 	}
+	attrs := map[string]string{
+		"api_key":      "key-relay-headers",
+		"header:X-App": "cli",
+	}
+	for _, headerName := range leakyHeaders {
+		attrs["header:"+headerName] = "leak"
+	}
+	auth := &cliproxyauth.Auth{Attributes: attrs}
 	req := newClaudeHeaderTestRequest(t, nil)
 	applyClaudeHeaders(req, auth, "key-relay-headers", false, nil, &config.Config{})
 
-	for _, headerName := range []string{"X-OpenClaw-Client", "X-Hermes-Version", "Acp-Session-Id", "X-Claude-Relay-Token"} {
+	for _, headerName := range leakyHeaders {
 		if got := req.Header.Get(headerName); got != "" {
 			t.Fatalf("%s leaked upstream as %q", headerName, got)
 		}
@@ -186,6 +208,17 @@ func TestApplyClaudeHeaders_StripsKnownRelayClientHeaders(t *testing.T) {
 	if got := req.Header.Get("X-App"); got != "cli" {
 		t.Fatalf("X-App = %q, want cli", got)
 	}
+}
+
+func TestApplyClaudeHeaders_DefaultDeviceProfileUsesCoherentBaseline(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+
+	req := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent": []string{"CherryStudio/1.0"},
+	})
+	applyClaudeHeaders(req, &cliproxyauth.Auth{}, "key-default-fingerprint", false, nil, &config.Config{})
+
+	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.92 (external, cli)", "0.70.0", "v24.13.0", "MacOS", "arm64")
 }
 
 func TestApplyClaudeHeaders_TracksHighestClaudeCLIFingerprint(t *testing.T) {
@@ -494,6 +527,57 @@ func TestResolveClaudeDeviceProfile_RechecksCacheBeforeStoringCandidate(t *testi
 	if cached.OS != "MacOS" || cached.Arch != "arm64" {
 		t.Fatalf("cached platform = %s/%s, want %s/%s", cached.OS, cached.Arch, "MacOS", "arm64")
 	}
+}
+
+func TestApplyClaudeHeaders_PersistsLearnedDeviceProfileToAuthMetadata(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+	stabilize := true
+
+	cfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			StabilizeDeviceProfile: &stabilize,
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ID: "auth-metadata-profile",
+		Attributes: map[string]string{
+			"api_key": "key-metadata-profile",
+		},
+		Metadata: map[string]any{},
+	}
+
+	officialReq := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent":                  []string{"claude-cli/2.1.93 (external, cli)"},
+		"X-Stainless-Package-Version": []string{"0.71.0"},
+		"X-Stainless-Runtime-Version": []string{"v24.14.0"},
+		"X-Stainless-Os":              []string{"Linux"},
+		"X-Stainless-Arch":            []string{"x64"},
+	})
+	applyClaudeHeaders(officialReq, auth, "key-metadata-profile", false, nil, cfg)
+
+	profileMeta, ok := auth.Metadata["claude_device_profile"].(map[string]any)
+	if !ok {
+		t.Fatalf("metadata.claude_device_profile = %T, want map[string]any", auth.Metadata["claude_device_profile"])
+	}
+	if got, _ := profileMeta["user_agent"].(string); got != "claude-cli/2.1.93 (external, cli)" {
+		t.Fatalf("metadata.claude_device_profile.user_agent = %q, want learned official UA", got)
+	}
+	if got, _ := profileMeta["os"].(string); got != "MacOS" {
+		t.Fatalf("metadata.claude_device_profile.os = %q, want pinned baseline OS", got)
+	}
+	if got, _ := profileMeta["arch"].(string); got != "arm64" {
+		t.Fatalf("metadata.claude_device_profile.arch = %q, want pinned baseline arch", got)
+	}
+	if got, _ := auth.Metadata["claude_device_profile_updated_at"].(string); got == "" {
+		t.Fatalf("metadata.claude_device_profile_updated_at is empty")
+	}
+
+	resetClaudeDeviceProfileCache()
+	thirdPartyReq := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent": []string{"CherryStudio/1.0"},
+	})
+	applyClaudeHeaders(thirdPartyReq, auth, "key-metadata-profile", false, nil, cfg)
+	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.93 (external, cli)", "0.71.0", "v24.14.0", "MacOS", "arm64")
 }
 
 func TestApplyClaudeHeaders_ThirdPartyBaselineThenOfficialUpgradeKeepsPinnedPlatform(t *testing.T) {
