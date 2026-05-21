@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
 func TestCookieAuthExchangesSessionKeyForToken(t *testing.T) {
@@ -14,10 +16,13 @@ func TestCookieAuthExchangesSessionKeyForToken(t *testing.T) {
 	var authorizeCookie string
 	var authorizeOrg string
 	var tokenRedirectURI string
+	var orgHeaders http.Header
+	var authorizeHeaders http.Header
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/organizations":
+			orgHeaders = r.Header.Clone()
 			if cookie, err := r.Cookie("sessionKey"); err == nil {
 				orgCookie = cookie.Value
 			}
@@ -27,6 +32,7 @@ func TestCookieAuthExchangesSessionKeyForToken(t *testing.T) {
 				{"uuid":"team-org","name":"Team","raven_type":"team"}
 			]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/oauth/team-org/authorize":
+			authorizeHeaders = r.Header.Clone()
 			if cookie, err := r.Cookie("sessionKey"); err == nil {
 				authorizeCookie = cookie.Value
 			}
@@ -79,6 +85,24 @@ func TestCookieAuthExchangesSessionKeyForToken(t *testing.T) {
 	if orgCookie != "session-value" || authorizeCookie != "session-value" {
 		t.Fatalf("cookies = org %q authorize %q, want session-value", orgCookie, authorizeCookie)
 	}
+	if got := orgHeaders.Get("User-Agent"); !strings.Contains(got, "Mozilla/5.0") {
+		t.Fatalf("organization User-Agent = %q, want browser-like UA", got)
+	}
+	if got := orgHeaders.Get("Accept"); got != "application/json, text/plain, */*" {
+		t.Fatalf("organization Accept = %q, want application/json, text/plain, */*", got)
+	}
+	if got := orgHeaders.Get("Referer"); got != "https://claude.ai/new" {
+		t.Fatalf("organization Referer = %q, want https://claude.ai/new", got)
+	}
+	if got := orgHeaders.Get("Sec-Fetch-Site"); got != "same-origin" {
+		t.Fatalf("organization Sec-Fetch-Site = %q, want same-origin", got)
+	}
+	if got := authorizeHeaders.Get("Content-Type"); got != "application/json" {
+		t.Fatalf("authorize Content-Type = %q, want application/json", got)
+	}
+	if got := authorizeHeaders.Get("Origin"); got != "https://claude.ai" {
+		t.Fatalf("authorize Origin = %q, want https://claude.ai", got)
+	}
 	if authorizeOrg != "team-org" {
 		t.Fatalf("organization_uuid = %q, want team-org", authorizeOrg)
 	}
@@ -102,5 +126,63 @@ func TestCookieAuthExchangesSessionKeyForToken(t *testing.T) {
 	}
 	if !strings.HasPrefix(bundle.TokenData.Expire, "20") {
 		t.Fatalf("expired timestamp = %q, want RFC3339-like future timestamp", bundle.TokenData.Expire)
+	}
+}
+
+func TestCookieOrganizationUUIDReportsHTMLResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/organizations" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte("<!doctype html><html><body>login required</body></html>"))
+	}))
+	defer server.Close()
+
+	oldClaudeAIBaseURL := claudeAIBaseURL
+	defer func() {
+		claudeAIBaseURL = oldClaudeAIBaseURL
+	}()
+	claudeAIBaseURL = server.URL
+
+	auth := &ClaudeAuth{httpClient: server.Client()}
+	_, err := auth.getCookieOrganizationUUID(context.Background(), "session-value")
+	if err == nil {
+		t.Fatal("getCookieOrganizationUUID returned nil error for HTML response")
+	}
+	if !strings.Contains(err.Error(), "organizations response was not JSON") {
+		t.Fatalf("error = %q, want explicit non-JSON diagnostic", err)
+	}
+	if strings.Contains(err.Error(), "session-value") {
+		t.Fatalf("error leaked session key: %q", err)
+	}
+}
+
+func TestCookieAuthInvalidProxyURLFailsClosed(t *testing.T) {
+	var hits int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"uuid":"org","name":"Org","raven_type":null}]`))
+	}))
+	defer server.Close()
+
+	oldClaudeAIBaseURL := claudeAIBaseURL
+	defer func() {
+		claudeAIBaseURL = oldClaudeAIBaseURL
+	}()
+	claudeAIBaseURL = server.URL
+
+	auth := NewClaudeAuthWithProxyURL(&config.Config{}, "ftp://proxy.example.com:21")
+	_, err := auth.getCookieOrganizationUUID(context.Background(), "session-value")
+	if err == nil {
+		t.Fatal("getCookieOrganizationUUID returned nil error for invalid proxy-url")
+	}
+	if !strings.Contains(err.Error(), "invalid proxy-url") {
+		t.Fatalf("error = %q, want invalid proxy-url", err)
+	}
+	if hits != 0 {
+		t.Fatalf("invalid proxy-url should fail closed before upstream request, got %d hits", hits)
 	}
 }

@@ -34,6 +34,7 @@ const (
 	claudeRefreshMinBackoff = 5 * time.Second
 	claudeRefreshMaxBackoff = 5 * time.Minute
 	claudeCookieScopeAPI    = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
+	claudeAIBrowserUA       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 
 var (
@@ -200,8 +201,7 @@ func NewClaudeAuthWithProxyURL(cfg *config.Config, proxyURL string) *ClaudeAuth 
 		sdkCfg = &sdkCfgCopy
 	}
 
-	// Use custom HTTP client with Firefox TLS fingerprint to bypass
-	// Cloudflare's bot detection on Anthropic domains
+	// Use custom HTTP client with Chrome TLS fingerprint for Anthropic domains.
 	return &ClaudeAuth{
 		httpClient: NewAnthropicHttpClient(sdkCfg),
 	}
@@ -454,6 +454,40 @@ func generateClaudeOAuthState() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(bytes), nil
 }
 
+func applyClaudeAIBrowserHeaders(req *http.Request) {
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Cache-Control", "no-cache")
+	req.Header.Set("Pragma", "no-cache")
+	req.Header.Set("Referer", claudePlatformHTTPOrigin+"/new")
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("User-Agent", claudeAIBrowserUA)
+}
+
+func decodeClaudeAIJSONResponse(name string, resp *http.Response, body []byte, target any) error {
+	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+	trimmedBody := strings.TrimSpace(string(body))
+	if strings.HasPrefix(trimmedBody, "<") || (contentType != "" && !strings.Contains(contentType, "json")) {
+		return fmt.Errorf("%s response was not JSON: status %d, content-type %q, body prefix %q", name, resp.StatusCode, resp.Header.Get("Content-Type"), truncateClaudeAIResponseForError(trimmedBody, 180))
+	}
+	if err := json.Unmarshal(body, target); err != nil {
+		return fmt.Errorf("failed to parse %s response: %w", name, err)
+	}
+	return nil
+}
+
+func truncateClaudeAIResponseForError(body string, limit int) string {
+	body = strings.ReplaceAll(body, "\r", " ")
+	body = strings.ReplaceAll(body, "\n", " ")
+	body = strings.Join(strings.Fields(body), " ")
+	if len(body) <= limit {
+		return body
+	}
+	return body[:limit] + "..."
+}
+
 // CookieAuth completes Claude OAuth using a claude.ai sessionKey cookie.
 func (o *ClaudeAuth) CookieAuth(ctx context.Context, sessionKey string) (*ClaudeAuthBundle, error) {
 	sessionKey = strings.TrimSpace(sessionKey)
@@ -493,6 +527,7 @@ func (o *ClaudeAuth) getCookieOrganizationUUID(ctx context.Context, sessionKey s
 		return "", fmt.Errorf("failed to create organizations request: %w", err)
 	}
 	req.AddCookie(&http.Cookie{Name: "sessionKey", Value: sessionKey})
+	applyClaudeAIBrowserHeaders(req)
 
 	resp, err := o.httpClient.Do(req)
 	if err != nil {
@@ -513,8 +548,8 @@ func (o *ClaudeAuth) getCookieOrganizationUUID(ctx context.Context, sessionKey s
 		Name      string  `json:"name"`
 		RavenType *string `json:"raven_type"`
 	}
-	if err = json.Unmarshal(body, &orgs); err != nil {
-		return "", fmt.Errorf("failed to parse organizations response: %w", err)
+	if err = decodeClaudeAIJSONResponse("organizations", resp, body, &orgs); err != nil {
+		return "", err
 	}
 	if len(orgs) == 0 {
 		return "", fmt.Errorf("no organizations found")
@@ -552,12 +587,10 @@ func (o *ClaudeAuth) getCookieAuthorizationCode(ctx context.Context, sessionKey,
 		return "", fmt.Errorf("failed to create authorize request: %w", err)
 	}
 	req.AddCookie(&http.Cookie{Name: "sessionKey", Value: sessionKey})
+	applyClaudeAIBrowserHeaders(req)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	req.Header.Set("Cache-Control", "no-cache")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", claudePlatformHTTPOrigin)
-	req.Header.Set("Referer", claudePlatformHTTPOrigin+"/new")
 
 	resp, err := o.httpClient.Do(req)
 	if err != nil {
@@ -576,8 +609,8 @@ func (o *ClaudeAuth) getCookieAuthorizationCode(ctx context.Context, sessionKey,
 	var result struct {
 		RedirectURI string `json:"redirect_uri"`
 	}
-	if err = json.Unmarshal(body, &result); err != nil {
-		return "", fmt.Errorf("failed to parse authorize response: %w", err)
+	if err = decodeClaudeAIJSONResponse("authorize", resp, body, &result); err != nil {
+		return "", err
 	}
 	if strings.TrimSpace(result.RedirectURI) == "" {
 		return "", fmt.Errorf("no redirect_uri in authorize response")

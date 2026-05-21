@@ -44,13 +44,15 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 
 	// If we have a proxy URL configured, set up the transport
 	if proxyURL != "" {
-		transport := buildProxyTransport(proxyURL)
+		transport, errBuild := buildProxyTransport(proxyURL)
+		if errBuild != nil {
+			httpClient.Transport = failingRoundTripper{err: proxyConfigurationError(proxyURL, errBuild)}
+			return httpClient
+		}
 		if transport != nil {
 			httpClient.Transport = transport
 			return httpClient
 		}
-		// If proxy setup failed, log and fall through to context RoundTripper
-		log.Debugf("failed to setup proxy from URL: %s, falling back to context transport", proxyutil.Redact(proxyURL))
 	}
 
 	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor)
@@ -69,11 +71,11 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 //
 // Returns:
 //   - *http.Transport: A configured transport, or nil if the proxy URL is invalid
-func buildProxyTransport(proxyURL string) *http.Transport {
+func buildProxyTransport(proxyURL string) (*http.Transport, error) {
 	transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyURL)
 	if errBuild != nil {
 		log.Errorf("%v", errBuild)
-		return nil
+		return nil, errBuild
 	}
-	return transport
+	return transport, nil
 }

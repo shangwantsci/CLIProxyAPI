@@ -25,12 +25,13 @@ type utlsRoundTripper struct {
 	dialer      proxy.Dialer
 }
 
-func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
+func newUtlsRoundTripper(proxyURL string) (*utlsRoundTripper, error) {
 	var dialer proxy.Dialer = proxy.Direct
 	if proxyURL != "" {
 		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
 		if errBuild != nil {
 			log.Errorf("utls: failed to configure proxy dialer for %q: %v", proxyutil.Redact(proxyURL), errBuild)
+			return nil, errBuild
 		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
 			dialer = proxyDialer
 		}
@@ -39,7 +40,7 @@ func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 		connections: make(map[string]*http2.ClientConn),
 		pending:     make(map[string]*sync.Cond),
 		dialer:      dialer,
-	}
+	}, nil
 }
 
 func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (*http2.ClientConn, error) {
@@ -161,7 +162,14 @@ func NewUtlsHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeout time
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
 
-	utlsRT := newUtlsRoundTripper(proxyURL)
+	utlsRT, errBuildDialer := newUtlsRoundTripper(proxyURL)
+	if errBuildDialer != nil {
+		client := &http.Client{Transport: failingRoundTripper{err: proxyConfigurationError(proxyURL, errBuildDialer)}}
+		if timeout > 0 {
+			client.Timeout = timeout
+		}
+		return client
+	}
 
 	var standardTransport http.RoundTripper = &http.Transport{
 		DialContext: (&net.Dialer{
@@ -170,7 +178,15 @@ func NewUtlsHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeout time
 		}).DialContext,
 	}
 	if proxyURL != "" {
-		if transport := buildProxyTransport(proxyURL); transport != nil {
+		transport, errBuildTransport := buildProxyTransport(proxyURL)
+		if errBuildTransport != nil {
+			client := &http.Client{Transport: failingRoundTripper{err: proxyConfigurationError(proxyURL, errBuildTransport)}}
+			if timeout > 0 {
+				client.Timeout = timeout
+			}
+			return client
+		}
+		if transport != nil {
 			standardTransport = transport
 		}
 	}

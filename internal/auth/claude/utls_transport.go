@@ -3,6 +3,7 @@
 package claude
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 // utlsRoundTripper implements http.RoundTripper using utls with Chrome fingerprint
 // to bypass Cloudflare's TLS fingerprinting on Anthropic domains.
 type utlsRoundTripper struct {
+	err error
 	// mu protects the connections map and pending map
 	mu sync.Mutex
 	// connections caches HTTP/2 client connections per host
@@ -35,6 +37,9 @@ func newUtlsRoundTripper(cfg *config.SDKConfig) *utlsRoundTripper {
 		proxyDialer, mode, errBuild := proxyutil.BuildDialer(cfg.ProxyURL)
 		if errBuild != nil {
 			log.Errorf("failed to configure proxy dialer for %q: %v", proxyutil.Redact(cfg.ProxyURL), errBuild)
+			return &utlsRoundTripper{
+				err: fmt.Errorf("invalid proxy-url %s: %w", proxyutil.Redact(cfg.ProxyURL), errBuild),
+			}
 		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
 			dialer = proxyDialer
 		}
@@ -124,6 +129,9 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 
 // RoundTrip implements http.RoundTripper
 func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.err != nil {
+		return nil, t.err
+	}
 	host := req.URL.Host
 	addr := host
 	if !strings.Contains(addr, ":") {
