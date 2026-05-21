@@ -874,6 +874,77 @@ func normalizeClaudeTemperatureForThinking(body []byte) []byte {
 	return body
 }
 
+var claudeDroppedBetaTokens = map[string]struct{}{
+	"context-1m-2025-08-07": {},
+}
+
+var claudeBlockedUpstreamHeaderPrefixes = []string{
+	"x-openclaw-",
+	"x-hermes-",
+	"acp-",
+	"x-claude-relay-",
+	"x-litellm-",
+	"helicone-",
+	"x-portkey-",
+	"cf-aig-",
+	"x-kong-",
+	"x-bt-",
+	"x-cpa-",
+	"x-cliproxy-",
+	"x-sub2api-",
+}
+
+func filterClaudeBetaHeader(header string) string {
+	parts := strings.Split(header, ",")
+	filtered := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		beta := strings.TrimSpace(part)
+		if beta == "" {
+			continue
+		}
+		if _, drop := claudeDroppedBetaTokens[beta]; drop {
+			continue
+		}
+		if _, ok := seen[beta]; ok {
+			continue
+		}
+		seen[beta] = struct{}{}
+		filtered = append(filtered, beta)
+	}
+	return strings.Join(filtered, ",")
+}
+
+func filterClaudeBetaList(betas []string) []string {
+	if len(betas) == 0 {
+		return nil
+	}
+	filtered := make([]string, 0, len(betas))
+	for _, beta := range betas {
+		beta = strings.TrimSpace(beta)
+		if beta == "" {
+			continue
+		}
+		if _, drop := claudeDroppedBetaTokens[beta]; drop {
+			continue
+		}
+		filtered = append(filtered, beta)
+	}
+	return filtered
+}
+
+func sanitizeClaudeUpstreamHeaders(headers http.Header) {
+	for key := range headers {
+		lowerKey := strings.ToLower(strings.TrimSpace(key))
+		for _, prefix := range claudeBlockedUpstreamHeaderPrefixes {
+			if strings.HasPrefix(lowerKey, prefix) {
+				headers.Del(key)
+				break
+			}
+		}
+	}
+}
+
 type compositeReadCloser struct {
 	io.Reader
 	closers []func() error
@@ -1038,7 +1109,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 
 	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,effort-2025-11-24,context-management-2025-06-27,extended-cache-ttl-2025-04-11,fine-grained-tool-streaming-2025-05-14,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28"
 	if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
-		baseBetas = val
+		baseBetas = filterClaudeBetaHeader(val)
 	}
 	for _, beta := range []string{
 		"claude-code-20250219",
@@ -1054,6 +1125,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	}
 
 	// Merge extra betas from request body and request flags.
+	extraBetas = filterClaudeBetaList(extraBetas)
 	if len(extraBetas) > 0 {
 		existingSet := make(map[string]bool)
 		for _, b := range strings.Split(baseBetas, ",") {
@@ -1070,6 +1142,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 			}
 		}
 	}
+	baseBetas = filterClaudeBetaHeader(baseBetas)
 	r.Header.Set("Anthropic-Beta", baseBetas)
 
 	misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Version", "2023-06-01")
@@ -1113,6 +1186,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+	sanitizeClaudeUpstreamHeaders(r.Header)
 	// Re-enforce Accept-Encoding: identity after ApplyCustomHeadersFromAttrs, which
 	// may override it with a user-configured value.  Compressed SSE breaks the line
 	// scanner regardless of user preference, so this is non-negotiable for streams.
@@ -1155,7 +1229,7 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 }
 
 func checkSystemInstructions(payload []byte) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, false, false, false, "2.1.63", "", "")
+	return checkSystemInstructionsWithSigningMode(payload, false, false, false, helps.DefaultClaudeVersion(nil), "", "")
 }
 
 func isClaudeOAuthToken(apiKey string) bool {
@@ -1731,7 +1805,7 @@ func generateBillingHeader(payload []byte, experimentalCCHSigning bool, version,
 }
 
 func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, "2.1.63", "", "")
+	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, helps.DefaultClaudeVersion(nil), "", "")
 }
 
 // checkSystemInstructionsWithSigningMode injects Claude Code-style system blocks:

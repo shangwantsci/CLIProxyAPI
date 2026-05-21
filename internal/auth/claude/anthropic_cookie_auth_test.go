@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/imroc/req/v3"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
@@ -184,5 +185,51 @@ func TestCookieAuthInvalidProxyURLFailsClosed(t *testing.T) {
 	}
 	if hits != 0 {
 		t.Fatalf("invalid proxy-url should fail closed before upstream request, got %d hits", hits)
+	}
+}
+
+func TestCookieOrganizationUUIDUsesClaudeAIChromeClientFactory(t *testing.T) {
+	var hits int
+	var factoryCalls int
+	var cookieValue string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if cookie, err := r.Cookie("sessionKey"); err == nil {
+			cookieValue = cookie.Value
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"uuid":"org","name":"Org","raven_type":null}]`))
+	}))
+	defer server.Close()
+
+	oldClaudeAIBaseURL := claudeAIBaseURL
+	defer func() {
+		claudeAIBaseURL = oldClaudeAIBaseURL
+	}()
+	claudeAIBaseURL = server.URL
+
+	auth := &ClaudeAuth{
+		httpClient: server.Client(),
+		claudeAIClientFactory: func(proxyURL string) (*req.Client, error) {
+			factoryCalls++
+			return req.C().SetCookieJar(nil), nil
+		},
+	}
+	orgUUID, err := auth.getCookieOrganizationUUID(context.Background(), "session-value")
+	if err != nil {
+		t.Fatalf("getCookieOrganizationUUID returned error: %v", err)
+	}
+	if orgUUID != "org" {
+		t.Fatalf("orgUUID = %q, want org", orgUUID)
+	}
+	if factoryCalls != 1 {
+		t.Fatalf("factoryCalls = %d, want 1", factoryCalls)
+	}
+	if hits != 1 {
+		t.Fatalf("server hits = %d, want 1", hits)
+	}
+	if cookieValue != "session-value" {
+		t.Fatalf("cookie = %q, want session-value", cookieValue)
 	}
 }

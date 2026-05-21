@@ -147,6 +147,47 @@ func TestApplyClaudeHeaders_AddsFullClaudeCodeMimicryBetas(t *testing.T) {
 	}
 }
 
+func TestApplyClaudeHeaders_DropsContext1MBetaFromClientAndBody(t *testing.T) {
+	req := newClaudeHeaderTestRequest(t, http.Header{
+		"Anthropic-Beta": []string{"custom-beta,context-1m-2025-08-07"},
+	})
+	applyClaudeHeaders(req, &cliproxyauth.Auth{}, "key-betas-filter", false, []string{"context-1m-2025-08-07", "body-beta"}, &config.Config{})
+
+	got := req.Header.Get("Anthropic-Beta")
+	if strings.Contains(got, "context-1m-2025-08-07") {
+		t.Fatalf("Anthropic-Beta = %q, should drop context-1m", got)
+	}
+	for _, beta := range []string{"custom-beta", "body-beta", "claude-code-20250219", "oauth-2025-04-20"} {
+		if !strings.Contains(got, beta) {
+			t.Fatalf("Anthropic-Beta = %q, missing %s", got, beta)
+		}
+	}
+}
+
+func TestApplyClaudeHeaders_StripsKnownRelayClientHeaders(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"api_key":                     "key-relay-headers",
+			"header:X-OpenClaw-Client":    "openclaw",
+			"header:X-Hermes-Version":     "hermes",
+			"header:Acp-Session-Id":       "acp",
+			"header:X-Claude-Relay-Token": "relay",
+			"header:X-App":                "cli",
+		},
+	}
+	req := newClaudeHeaderTestRequest(t, nil)
+	applyClaudeHeaders(req, auth, "key-relay-headers", false, nil, &config.Config{})
+
+	for _, headerName := range []string{"X-OpenClaw-Client", "X-Hermes-Version", "Acp-Session-Id", "X-Claude-Relay-Token"} {
+		if got := req.Header.Get(headerName); got != "" {
+			t.Fatalf("%s leaked upstream as %q", headerName, got)
+		}
+	}
+	if got := req.Header.Get("X-App"); got != "cli" {
+		t.Fatalf("X-App = %q, want cli", got)
+	}
+}
+
 func TestApplyClaudeHeaders_TracksHighestClaudeCLIFingerprint(t *testing.T) {
 	resetClaudeDeviceProfileCache()
 	stabilize := true
@@ -2035,6 +2076,9 @@ func TestCheckSystemInstructionsWithMode_StringSystemPreserved(t *testing.T) {
 
 	if !strings.HasPrefix(blocks[0].Get("text").String(), "x-anthropic-billing-header:") {
 		t.Fatalf("blocks[0] should be billing header, got %q", blocks[0].Get("text").String())
+	}
+	if !strings.Contains(blocks[0].Get("text").String(), "cc_version="+helps.DefaultClaudeVersion(nil)+".") {
+		t.Fatalf("blocks[0] should use current default Claude Code version, got %q", blocks[0].Get("text").String())
 	}
 	if blocks[1].Get("text").String() != "You are Claude Code, Anthropic's official CLI for Claude." {
 		t.Fatalf("blocks[1] should be agent block, got %q", blocks[1].Get("text").String())

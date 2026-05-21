@@ -17,7 +17,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/imroc/req/v3"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
 )
@@ -149,6 +151,16 @@ type tokenResponse struct {
 	} `json:"account"`
 }
 
+type claudeOrganization struct {
+	UUID      string  `json:"uuid"`
+	Name      string  `json:"name"`
+	RavenType *string `json:"raven_type"`
+}
+
+type cookieAuthorizeResponse struct {
+	RedirectURI string `json:"redirect_uri"`
+}
+
 func tokenDataFromResponse(tokenResp tokenResponse) ClaudeTokenData {
 	expiresAt := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 	return ClaudeTokenData{
@@ -168,7 +180,9 @@ func tokenDataFromResponse(tokenResp tokenResponse) ClaudeTokenData {
 // It provides methods for generating authorization URLs, exchanging codes for tokens,
 // and refreshing expired tokens using PKCE for enhanced security.
 type ClaudeAuth struct {
-	httpClient *http.Client
+	httpClient            *http.Client
+	proxyURL              string
+	claudeAIClientFactory func(proxyURL string) (*req.Client, error)
 }
 
 // NewClaudeAuth creates a new Anthropic authentication service.
@@ -203,7 +217,9 @@ func NewClaudeAuthWithProxyURL(cfg *config.Config, proxyURL string) *ClaudeAuth 
 
 	// Use custom HTTP client with Chrome TLS fingerprint for Anthropic domains.
 	return &ClaudeAuth{
-		httpClient: NewAnthropicHttpClient(sdkCfg),
+		httpClient:            NewAnthropicHttpClient(sdkCfg),
+		proxyURL:              effectiveProxyURL,
+		claudeAIClientFactory: newClaudeAIChromeClient,
 	}
 }
 
@@ -488,6 +504,74 @@ func truncateClaudeAIResponseForError(body string, limit int) string {
 	return body[:limit] + "..."
 }
 
+func newClaudeAIChromeClient(proxyURL string) (*req.Client, error) {
+	client := req.C().
+		SetTimeout(60 * time.Second).
+		ImpersonateChrome().
+		SetCookieJar(nil)
+
+	setting, err := proxyutil.Parse(proxyURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid proxy-url %s: %w", proxyutil.Redact(proxyURL), err)
+	}
+	switch setting.Mode {
+	case proxyutil.ModeDirect:
+		client.SetProxy(nil)
+	case proxyutil.ModeProxy:
+		client.SetProxyURL(setting.URL.String())
+	}
+	return client, nil
+}
+
+func (o *ClaudeAuth) newCookieOAuthClient() (*req.Client, error) {
+	if o.claudeAIClientFactory == nil {
+		return nil, nil
+	}
+	client, err := o.claudeAIClientFactory(o.proxyURL)
+	if err != nil {
+		return nil, fmt.Errorf("create claude.ai chrome client: %w", err)
+	}
+	return client, nil
+}
+
+func selectCookieOrganizationUUID(orgs []claudeOrganization) (string, error) {
+	if len(orgs) == 0 {
+		return "", fmt.Errorf("no organizations found")
+	}
+	for _, org := range orgs {
+		if org.RavenType != nil && *org.RavenType == "team" && strings.TrimSpace(org.UUID) != "" {
+			return org.UUID, nil
+		}
+	}
+	if strings.TrimSpace(orgs[0].UUID) == "" {
+		return "", fmt.Errorf("organization uuid is empty")
+	}
+	return orgs[0].UUID, nil
+}
+
+func parseCookieAuthorizationCode(redirectURI, state string) (string, error) {
+	if strings.TrimSpace(redirectURI) == "" {
+		return "", fmt.Errorf("no redirect_uri in authorize response")
+	}
+	parsedURL, err := url.Parse(redirectURI)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse redirect_uri: %w", err)
+	}
+	query := parsedURL.Query()
+	authCode := strings.TrimSpace(query.Get("code"))
+	responseState := strings.TrimSpace(query.Get("state"))
+	if authCode == "" {
+		return "", fmt.Errorf("no authorization code in redirect_uri")
+	}
+	if responseState != "" && responseState != state {
+		return "", fmt.Errorf("state mismatch in redirect_uri")
+	}
+	if responseState != "" {
+		return authCode + "#" + responseState, nil
+	}
+	return authCode, nil
+}
+
 // CookieAuth completes Claude OAuth using a claude.ai sessionKey cookie.
 func (o *ClaudeAuth) CookieAuth(ctx context.Context, sessionKey string) (*ClaudeAuthBundle, error) {
 	sessionKey = strings.TrimSpace(sessionKey)
@@ -522,6 +606,26 @@ func (o *ClaudeAuth) CookieAuth(ctx context.Context, sessionKey string) (*Claude
 }
 
 func (o *ClaudeAuth) getCookieOrganizationUUID(ctx context.Context, sessionKey string) (string, error) {
+	if client, err := o.newCookieOAuthClient(); err != nil {
+		return "", err
+	} else if client != nil {
+		var orgs []claudeOrganization
+		resp, err := client.R().
+			SetContext(ctx).
+			SetCookies(&http.Cookie{Name: "sessionKey", Value: sessionKey}).
+			Get(strings.TrimRight(claudeAIBaseURL, "/") + "/api/organizations")
+		if err != nil {
+			return "", fmt.Errorf("organizations request failed: %w", err)
+		}
+		if !resp.IsSuccessState() {
+			return "", fmt.Errorf("failed to get organizations: status %d: %s", resp.StatusCode, resp.String())
+		}
+		if err = decodeClaudeAIJSONResponse("organizations", resp.Response, resp.Bytes(), &orgs); err != nil {
+			return "", err
+		}
+		return selectCookieOrganizationUUID(orgs)
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(claudeAIBaseURL, "/")+"/api/organizations", nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to create organizations request: %w", err)
@@ -543,26 +647,11 @@ func (o *ClaudeAuth) getCookieOrganizationUUID(ctx context.Context, sessionKey s
 		return "", fmt.Errorf("failed to get organizations: status %d: %s", resp.StatusCode, string(body))
 	}
 
-	var orgs []struct {
-		UUID      string  `json:"uuid"`
-		Name      string  `json:"name"`
-		RavenType *string `json:"raven_type"`
-	}
+	var orgs []claudeOrganization
 	if err = decodeClaudeAIJSONResponse("organizations", resp, body, &orgs); err != nil {
 		return "", err
 	}
-	if len(orgs) == 0 {
-		return "", fmt.Errorf("no organizations found")
-	}
-	for _, org := range orgs {
-		if org.RavenType != nil && *org.RavenType == "team" && strings.TrimSpace(org.UUID) != "" {
-			return org.UUID, nil
-		}
-	}
-	if strings.TrimSpace(orgs[0].UUID) == "" {
-		return "", fmt.Errorf("organization uuid is empty")
-	}
-	return orgs[0].UUID, nil
+	return selectCookieOrganizationUUID(orgs)
 }
 
 func (o *ClaudeAuth) getCookieAuthorizationCode(ctx context.Context, sessionKey, orgUUID, scope, codeChallenge, state string) (string, error) {
@@ -577,6 +666,33 @@ func (o *ClaudeAuth) getCookieAuthorizationCode(ctx context.Context, sessionKey,
 		"code_challenge":        codeChallenge,
 		"code_challenge_method": "S256",
 	}
+	if client, err := o.newCookieOAuthClient(); err != nil {
+		return "", err
+	} else if client != nil {
+		resp, err := client.R().
+			SetContext(ctx).
+			SetCookies(&http.Cookie{Name: "sessionKey", Value: sessionKey}).
+			SetHeader("Accept", "application/json").
+			SetHeader("Accept-Language", "en-US,en;q=0.9").
+			SetHeader("Cache-Control", "no-cache").
+			SetHeader("Origin", claudePlatformHTTPOrigin).
+			SetHeader("Referer", claudePlatformHTTPOrigin+"/new").
+			SetHeader("Content-Type", "application/json").
+			SetBody(reqBody).
+			Post(authURL)
+		if err != nil {
+			return "", fmt.Errorf("authorize request failed: %w", err)
+		}
+		if !resp.IsSuccessState() {
+			return "", fmt.Errorf("authorization failed: status %d: %s", resp.StatusCode, resp.String())
+		}
+		var result cookieAuthorizeResponse
+		if err = decodeClaudeAIJSONResponse("authorize", resp.Response, resp.Bytes(), &result); err != nil {
+			return "", err
+		}
+		return parseCookieAuthorizationCode(result.RedirectURI, state)
+	}
+
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal authorize request: %w", err)
@@ -606,33 +722,11 @@ func (o *ClaudeAuth) getCookieAuthorizationCode(ctx context.Context, sessionKey,
 		return "", fmt.Errorf("authorization failed: status %d: %s", resp.StatusCode, string(body))
 	}
 
-	var result struct {
-		RedirectURI string `json:"redirect_uri"`
-	}
+	var result cookieAuthorizeResponse
 	if err = decodeClaudeAIJSONResponse("authorize", resp, body, &result); err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(result.RedirectURI) == "" {
-		return "", fmt.Errorf("no redirect_uri in authorize response")
-	}
-
-	parsedURL, err := url.Parse(result.RedirectURI)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse redirect_uri: %w", err)
-	}
-	query := parsedURL.Query()
-	authCode := strings.TrimSpace(query.Get("code"))
-	responseState := strings.TrimSpace(query.Get("state"))
-	if authCode == "" {
-		return "", fmt.Errorf("no authorization code in redirect_uri")
-	}
-	if responseState != "" && responseState != state {
-		return "", fmt.Errorf("state mismatch in redirect_uri")
-	}
-	if responseState != "" {
-		return authCode + "#" + responseState, nil
-	}
-	return authCode, nil
+	return parseCookieAuthorizationCode(result.RedirectURI, state)
 }
 
 func (o *ClaudeAuth) exchangePlatformCodeForTokens(ctx context.Context, code, state string, pkceCodes *PKCECodes) (*ClaudeAuthBundle, error) {
@@ -651,6 +745,32 @@ func (o *ClaudeAuth) exchangePlatformCodeForTokens(ctx context.Context, code, st
 		reqBody["state"] = newState
 	} else if strings.TrimSpace(state) != "" {
 		reqBody["state"] = state
+	}
+
+	if client, err := o.newCookieOAuthClient(); err != nil {
+		return nil, err
+	} else if client != nil {
+		resp, err := client.R().
+			SetContext(ctx).
+			SetHeader("Accept", "application/json, text/plain, */*").
+			SetHeader("Content-Type", "application/json").
+			SetHeader("User-Agent", "axios/1.13.6").
+			SetBody(reqBody).
+			Post(claudePlatformTokenURL)
+		if err != nil {
+			return nil, fmt.Errorf("token exchange request failed: %w", err)
+		}
+		if !resp.IsSuccessState() {
+			return nil, fmt.Errorf("token exchange failed with status %d: %s", resp.StatusCode, resp.String())
+		}
+		var tokenResp tokenResponse
+		if err = decodeClaudeAIJSONResponse("token exchange", resp.Response, resp.Bytes(), &tokenResp); err != nil {
+			return nil, err
+		}
+		return &ClaudeAuthBundle{
+			TokenData:   tokenDataFromResponse(tokenResp),
+			LastRefresh: time.Now().Format(time.RFC3339),
+		}, nil
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
