@@ -46,3 +46,32 @@ func TestPostOAuthCallbackReturnsStateForStatusPolling(t *testing.T) {
 		t.Fatalf("provider = %q, want anthropic", response["provider"])
 	}
 }
+
+func TestPostOAuthCallbackParsesFragmentCallbackURL(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	oldSessions := oauthSessions
+	oauthSessions = newOAuthSessionStore(time.Minute)
+	defer func() { oauthSessions = oldSessions }()
+
+	state := "state-fragment"
+	RegisterOAuthSession(state, "anthropic")
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
+
+	body := []byte(`{"provider":"anthropic","redirect_url":"https://platform.claude.com/oauth/code/callback#code=abc&state=state-fragment"}`)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/oauth-callback", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.PostOAuthCallback(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PostOAuthCallback status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var response map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if response["state"] != state {
+		t.Fatalf("state = %q, want %q", response["state"], state)
+	}
+}

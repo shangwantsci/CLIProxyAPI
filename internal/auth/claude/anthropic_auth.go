@@ -35,6 +35,7 @@ const (
 
 	claudeRefreshMinBackoff = 5 * time.Second
 	claudeRefreshMaxBackoff = 5 * time.Minute
+	claudeOAuthScopeBrowser = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 	claudeCookieScopeAPI    = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 	claudeAIBrowserUA       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
@@ -236,6 +237,17 @@ func NewClaudeAuthWithProxyURL(cfg *config.Config, proxyURL string) *ClaudeAuth 
 //   - string: The state parameter for verification
 //   - error: An error if PKCE codes are missing or URL generation fails
 func (o *ClaudeAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string, string, error) {
+	return o.generateAuthURL(state, pkceCodes, RedirectURI, claudeCookieScopeAPI)
+}
+
+// GeneratePlatformAuthURL creates a Claude OAuth URL matching claude.ai's
+// platform callback flow. This is used by the web management panel where the
+// user pastes the platform callback URL back into the UI.
+func (o *ClaudeAuth) GeneratePlatformAuthURL(state string, pkceCodes *PKCECodes) (string, string, error) {
+	return o.generateAuthURL(state, pkceCodes, PlatformRedirectURI, claudeOAuthScopeBrowser)
+}
+
+func (o *ClaudeAuth) generateAuthURL(state string, pkceCodes *PKCECodes, redirectURI, scope string) (string, string, error) {
 	if pkceCodes == nil {
 		return "", "", fmt.Errorf("PKCE codes are required")
 	}
@@ -244,8 +256,8 @@ func (o *ClaudeAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string
 		"code":                  {"true"},
 		"client_id":             {ClientID},
 		"response_type":         {"code"},
-		"redirect_uri":          {RedirectURI},
-		"scope":                 {"user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"},
+		"redirect_uri":          {redirectURI},
+		"scope":                 {scope},
 		"code_challenge":        {pkceCodes.CodeChallenge},
 		"code_challenge_method": {"S256"},
 		"state":                 {state},
@@ -509,9 +521,6 @@ func newClaudeAIChromeClient(proxyURL string) (*req.Client, error) {
 		SetTimeout(60 * time.Second).
 		ImpersonateChrome().
 		SetCookieJar(nil)
-	client.GetClient().CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
 
 	setting, err := proxyutil.Parse(proxyURL)
 	if err != nil {
@@ -598,7 +607,7 @@ func (o *ClaudeAuth) CookieAuth(ctx context.Context, sessionKey string) (*Claude
 	if err != nil {
 		return nil, fmt.Errorf("failed to get authorization code: %w", err)
 	}
-	bundle, err := o.exchangePlatformCodeForTokens(ctx, code, state, pkceCodes)
+	bundle, err := o.ExchangePlatformCodeForTokens(ctx, code, state, pkceCodes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to exchange code: %w", err)
 	}
@@ -616,15 +625,6 @@ func (o *ClaudeAuth) getCookieOrganizationUUID(ctx context.Context, sessionKey s
 		resp, err := client.R().
 			SetContext(ctx).
 			SetCookies(&http.Cookie{Name: "sessionKey", Value: sessionKey}).
-			SetHeader("Accept", "application/json, text/plain, */*").
-			SetHeader("Accept-Language", "en-US,en;q=0.9").
-			SetHeader("Cache-Control", "no-cache").
-			SetHeader("Pragma", "no-cache").
-			SetHeader("Referer", claudePlatformHTTPOrigin+"/new").
-			SetHeader("Sec-Fetch-Dest", "empty").
-			SetHeader("Sec-Fetch-Mode", "cors").
-			SetHeader("Sec-Fetch-Site", "same-origin").
-			SetHeader("User-Agent", claudeAIBrowserUA).
 			Get(strings.TrimRight(claudeAIBaseURL, "/") + "/api/organizations")
 		if err != nil {
 			return "", fmt.Errorf("organizations request failed: %w", err)
@@ -687,14 +687,9 @@ func (o *ClaudeAuth) getCookieAuthorizationCode(ctx context.Context, sessionKey,
 			SetHeader("Accept", "application/json").
 			SetHeader("Accept-Language", "en-US,en;q=0.9").
 			SetHeader("Cache-Control", "no-cache").
-			SetHeader("Pragma", "no-cache").
 			SetHeader("Origin", claudePlatformHTTPOrigin).
 			SetHeader("Referer", claudePlatformHTTPOrigin+"/new").
-			SetHeader("Sec-Fetch-Dest", "empty").
-			SetHeader("Sec-Fetch-Mode", "cors").
-			SetHeader("Sec-Fetch-Site", "same-origin").
 			SetHeader("Content-Type", "application/json").
-			SetHeader("User-Agent", claudeAIBrowserUA).
 			SetBody(reqBody).
 			Post(authURL)
 		if err != nil {
@@ -746,7 +741,9 @@ func (o *ClaudeAuth) getCookieAuthorizationCode(ctx context.Context, sessionKey,
 	return parseCookieAuthorizationCode(result.RedirectURI, state)
 }
 
-func (o *ClaudeAuth) exchangePlatformCodeForTokens(ctx context.Context, code, state string, pkceCodes *PKCECodes) (*ClaudeAuthBundle, error) {
+// ExchangePlatformCodeForTokens exchanges a Claude platform OAuth callback code
+// for refresh/access tokens using the same endpoint and redirect_uri as sub2api.
+func (o *ClaudeAuth) ExchangePlatformCodeForTokens(ctx context.Context, code, state string, pkceCodes *PKCECodes) (*ClaudeAuthBundle, error) {
 	if pkceCodes == nil {
 		return nil, fmt.Errorf("PKCE codes are required for token exchange")
 	}

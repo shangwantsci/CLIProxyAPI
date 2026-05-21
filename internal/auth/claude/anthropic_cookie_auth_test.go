@@ -78,7 +78,7 @@ func TestCookieAuthExchangesSessionKeyForToken(t *testing.T) {
 	claudeAIBaseURL = server.URL
 	claudePlatformTokenURL = server.URL + "/v1/oauth/token"
 
-	auth := &ClaudeAuth{httpClient: server.Client()}
+	auth := NewClaudeAuthWithProxyURL(&config.Config{}, "")
 	bundle, err := auth.CookieAuth(context.Background(), "session-value")
 	if err != nil {
 		t.Fatalf("CookieAuth returned error: %v", err)
@@ -86,17 +86,8 @@ func TestCookieAuthExchangesSessionKeyForToken(t *testing.T) {
 	if orgCookie != "session-value" || authorizeCookie != "session-value" {
 		t.Fatalf("cookies = org %q authorize %q, want session-value", orgCookie, authorizeCookie)
 	}
-	if got := orgHeaders.Get("User-Agent"); !strings.Contains(got, "Mozilla/5.0") {
-		t.Fatalf("organization User-Agent = %q, want browser-like UA", got)
-	}
-	if got := orgHeaders.Get("Accept"); got != "application/json, text/plain, */*" {
-		t.Fatalf("organization Accept = %q, want application/json, text/plain, */*", got)
-	}
-	if got := orgHeaders.Get("Referer"); got != "https://claude.ai/new" {
-		t.Fatalf("organization Referer = %q, want https://claude.ai/new", got)
-	}
-	if got := orgHeaders.Get("Sec-Fetch-Site"); got != "same-origin" {
-		t.Fatalf("organization Sec-Fetch-Site = %q, want same-origin", got)
+	if got := orgHeaders.Get("Referer"); got != "" {
+		t.Fatalf("organization Referer = %q, want empty to match sub2api", got)
 	}
 	if got := authorizeHeaders.Get("Content-Type"); got != "application/json" {
 		t.Fatalf("authorize Content-Type = %q, want application/json", got)
@@ -157,6 +148,43 @@ func TestCookieOrganizationUUIDReportsHTMLResponse(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "session-value") {
 		t.Fatalf("error leaked session key: %q", err)
+	}
+}
+
+func TestCookieOrganizationUUIDFollowsClaudeAIRedirect(t *testing.T) {
+	var finalCookie string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/organizations":
+			http.Redirect(w, r, "/api/organizations/final", http.StatusFound)
+		case "/api/organizations/final":
+			if cookie, err := r.Cookie("sessionKey"); err == nil {
+				finalCookie = cookie.Value
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"uuid":"redirect-org","name":"Org","raven_type":null}]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	oldClaudeAIBaseURL := claudeAIBaseURL
+	defer func() {
+		claudeAIBaseURL = oldClaudeAIBaseURL
+	}()
+	claudeAIBaseURL = server.URL
+
+	auth := NewClaudeAuthWithProxyURL(&config.Config{}, "")
+	orgUUID, err := auth.getCookieOrganizationUUID(context.Background(), "session-value")
+	if err != nil {
+		t.Fatalf("getCookieOrganizationUUID returned error: %v", err)
+	}
+	if orgUUID != "redirect-org" {
+		t.Fatalf("orgUUID = %q, want redirect-org", orgUUID)
+	}
+	if finalCookie != "session-value" {
+		t.Fatalf("redirected cookie = %q, want session-value", finalCookie)
 	}
 }
 
@@ -234,16 +262,7 @@ func TestCookieOrganizationUUIDUsesClaudeAIChromeClientFactory(t *testing.T) {
 	if cookieValue != "session-value" {
 		t.Fatalf("cookie = %q, want session-value", cookieValue)
 	}
-	if got := orgHeaders.Get("Accept"); got != "application/json, text/plain, */*" {
-		t.Fatalf("organization Accept = %q, want application/json, text/plain, */*", got)
-	}
-	if got := orgHeaders.Get("Referer"); got != "https://claude.ai/new" {
-		t.Fatalf("organization Referer = %q, want https://claude.ai/new", got)
-	}
-	if got := orgHeaders.Get("Sec-Fetch-Site"); got != "same-origin" {
-		t.Fatalf("organization Sec-Fetch-Site = %q, want same-origin", got)
-	}
-	if got := orgHeaders.Get("User-Agent"); !strings.Contains(got, "Mozilla/5.0") {
-		t.Fatalf("organization User-Agent = %q, want browser-like UA", got)
+	if got := orgHeaders.Get("Referer"); got != "" {
+		t.Fatalf("organization Referer = %q, want empty to match sub2api", got)
 	}
 }

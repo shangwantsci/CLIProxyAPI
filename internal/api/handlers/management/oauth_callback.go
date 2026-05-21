@@ -58,6 +58,21 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 				errMsg = strings.TrimSpace(q.Get("error_description"))
 			}
 		}
+		if rawFragment := strings.Trim(strings.TrimSpace(u.Fragment), "?#&"); rawFragment != "" {
+			fragmentQuery, _ := url.ParseQuery(rawFragment)
+			if state == "" {
+				state = strings.TrimSpace(fragmentQuery.Get("state"))
+			}
+			if code == "" {
+				code = strings.TrimSpace(fragmentQuery.Get("code"))
+			}
+			if errMsg == "" {
+				errMsg = strings.TrimSpace(fragmentQuery.Get("error"))
+				if errMsg == "" {
+					errMsg = strings.TrimSpace(fragmentQuery.Get("error_description"))
+				}
+			}
+		}
 	}
 
 	if state == "" {
