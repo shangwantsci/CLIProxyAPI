@@ -1637,7 +1637,7 @@ func getWorkloadFromContext(ctx context.Context) string {
 // Returns (cloakMode, strictMode, sensitiveWords, cacheUserID).
 func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (string, bool, []string, bool) {
 	if auth == nil || auth.Attributes == nil {
-		return "auto", false, nil, false
+		return "auto", false, nil, true
 	}
 
 	cloakMode := auth.Attributes["cloak_mode"]
@@ -1655,7 +1655,10 @@ func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (string, bool, []string, bo
 		}
 	}
 
-	cacheUserID := strings.EqualFold(strings.TrimSpace(auth.Attributes["cloak_cache_user_id"]), "true")
+	cacheUserID := true
+	if rawCacheUserID := strings.TrimSpace(auth.Attributes["cloak_cache_user_id"]); rawCacheUserID != "" {
+		cacheUserID = strings.EqualFold(rawCacheUserID, "true") || rawCacheUserID == "1"
+	}
 
 	return cloakMode, strictMode, sensitiveWords, cacheUserID
 }

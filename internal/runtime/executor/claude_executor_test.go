@@ -45,6 +45,22 @@ func newClaudeHeaderTestRequest(t *testing.T, incoming http.Header) *http.Reques
 	return req.WithContext(context.WithValue(req.Context(), "gin", ginCtx))
 }
 
+func TestGetCloakConfigFromAuth_DefaultCachesUserID(t *testing.T) {
+	mode, strict, words, cacheUserID := getCloakConfigFromAuth(&cliproxyauth.Auth{})
+	if mode != "auto" {
+		t.Fatalf("mode = %q, want auto", mode)
+	}
+	if strict {
+		t.Fatalf("strict = true, want false")
+	}
+	if len(words) != 0 {
+		t.Fatalf("words = %#v, want empty", words)
+	}
+	if !cacheUserID {
+		t.Fatalf("cacheUserID = false, want true")
+	}
+}
+
 func assertClaudeFingerprint(t *testing.T, headers http.Header, userAgent, pkgVersion, runtimeVersion, osName, arch string) {
 	t.Helper()
 
@@ -923,7 +939,7 @@ func TestClaudeExecutor_ReusesUserIDAcrossModelsWhenCacheEnabled(t *testing.T) {
 	t.Logf("✓ End-to-end test passed: Same user_id (%s) was used for both models", userIDs[0])
 }
 
-func TestClaudeExecutor_GeneratesNewUserIDByDefault(t *testing.T) {
+func TestClaudeExecutor_ReusesUserIDByDefault(t *testing.T) {
 	var userIDs []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -958,11 +974,52 @@ func TestClaudeExecutor_GeneratesNewUserIDByDefault(t *testing.T) {
 	if userIDs[0] == "" || userIDs[1] == "" {
 		t.Fatal("expected user_id to be populated")
 	}
-	if userIDs[0] == userIDs[1] {
-		t.Fatalf("expected user_id to change when caching is not enabled, got identical values %q", userIDs[0])
+	if userIDs[0] != userIDs[1] {
+		t.Fatalf("expected user_id to be reused by default, got %q and %q", userIDs[0], userIDs[1])
 	}
 	if !helps.IsValidUserID(userIDs[0]) || !helps.IsValidUserID(userIDs[1]) {
 		t.Fatalf("user_ids should be valid, got %q and %q", userIDs[0], userIDs[1])
+	}
+}
+
+func TestClaudeExecutor_GeneratesNewUserIDWhenCacheDisabled(t *testing.T) {
+	var userIDs []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		userIDs = append(userIDs, gjson.GetBytes(body, "metadata.user_id").String())
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":             "key-123",
+		"base_url":            server.URL,
+		"cloak_cache_user_id": "false",
+	}}
+
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	for i := 0; i < 2; i++ {
+		if _, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "claude-3-5-sonnet",
+			Payload: payload,
+		}, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FromString("claude"),
+		}); err != nil {
+			t.Fatalf("Execute call %d error: %v", i, err)
+		}
+	}
+
+	if len(userIDs) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(userIDs))
+	}
+	if userIDs[0] == "" || userIDs[1] == "" {
+		t.Fatal("expected user_id to be populated")
+	}
+	if userIDs[0] == userIDs[1] {
+		t.Fatalf("expected user_id to change when caching is disabled, got identical values %q", userIDs[0])
 	}
 }
 

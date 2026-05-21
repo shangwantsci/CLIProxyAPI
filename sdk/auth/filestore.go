@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -258,8 +259,97 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
 	}
+	if proxyURL, ok := metadata["proxy_url"].(string); ok {
+		auth.ProxyURL = strings.TrimSpace(proxyURL)
+	}
+	if prefix, ok := metadata["prefix"].(string); ok {
+		auth.Prefix = strings.Trim(strings.TrimSpace(prefix), "/")
+		if auth.Prefix != "" {
+			auth.Attributes["prefix"] = auth.Prefix
+		}
+	}
+	if rawPriority, ok := metadata["priority"]; ok {
+		switch v := rawPriority.(type) {
+		case float64:
+			auth.Attributes["priority"] = strconv.Itoa(int(v))
+		case string:
+			priority := strings.TrimSpace(v)
+			if _, errAtoi := strconv.Atoi(priority); errAtoi == nil {
+				auth.Attributes["priority"] = priority
+			}
+		}
+	}
+	if rawNote, ok := metadata["note"].(string); ok {
+		if note := strings.TrimSpace(rawNote); note != "" {
+			auth.Attributes["note"] = note
+		}
+	}
+	applyClaudeCloakMetadata(auth, metadata)
 	cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
 	return auth, nil
+}
+
+func applyClaudeCloakMetadata(auth *cliproxyauth.Auth, metadata map[string]any) {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "claude") {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	if rawMode, ok := metadata["cloak_mode"].(string); ok {
+		mode := strings.ToLower(strings.TrimSpace(rawMode))
+		if mode == "auto" || mode == "always" || mode == "never" {
+			auth.Attributes["cloak_mode"] = mode
+		}
+	}
+	if rawStrict, ok := metadata["cloak_strict_mode"].(bool); ok {
+		auth.Attributes["cloak_strict_mode"] = strconv.FormatBool(rawStrict)
+	} else if rawStrict, ok := metadata["cloak_strict_mode"].(string); ok && strings.TrimSpace(rawStrict) != "" {
+		auth.Attributes["cloak_strict_mode"] = strconv.FormatBool(strings.EqualFold(strings.TrimSpace(rawStrict), "true") || strings.TrimSpace(rawStrict) == "1")
+	}
+	if rawCache, ok := metadata["cloak_cache_user_id"].(bool); ok {
+		auth.Attributes["cloak_cache_user_id"] = strconv.FormatBool(rawCache)
+	} else if rawCache, ok := metadata["cloak_cache_user_id"].(string); ok && strings.TrimSpace(rawCache) != "" {
+		auth.Attributes["cloak_cache_user_id"] = strconv.FormatBool(strings.EqualFold(strings.TrimSpace(rawCache), "true") || strings.TrimSpace(rawCache) == "1")
+	}
+	words := cloakWordsFromMetadata(metadata["cloak_sensitive_words"])
+	if len(words) > 0 {
+		auth.Attributes["cloak_sensitive_words"] = strings.Join(words, ",")
+	}
+}
+
+func cloakWordsFromMetadata(raw any) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0)
+	add := func(raw string) {
+		for _, part := range strings.Split(raw, ",") {
+			trimmed := strings.TrimSpace(part)
+			if trimmed == "" {
+				continue
+			}
+			key := strings.ToLower(trimmed)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, trimmed)
+		}
+	}
+	switch v := raw.(type) {
+	case string:
+		add(v)
+	case []string:
+		for _, item := range v {
+			add(item)
+		}
+	case []any:
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				add(s)
+			}
+		}
+	}
+	return out
 }
 
 func (s *FileTokenStore) idFor(path, baseDir string) string {

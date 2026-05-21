@@ -42,7 +42,7 @@ func TestPatchAuthFileFields_MergeHeadersAndDeleteEmptyValues(t *testing.T) {
 
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
 
-	body := `{"name":"test.json","prefix":"p1","proxy_url":"http://proxy.local","headers":{"X-Old":"new","X-New":"v","X-Remove":"  ","X-Nope":""}}`
+	body := `{"name":"test.json","prefix":"p1","proxy_url":"http://proxy.local","headers":{"X-Old":"new","X-New":"v","X-Remove":"  ","X-Nope":""},"cloak_mode":"always","cloak_strict_mode":true,"cloak_sensitive_words":["Claude"," account ","Claude"],"cloak_cache_user_id":false}`
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
 	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
@@ -105,6 +105,34 @@ func TestPatchAuthFileFields_MergeHeadersAndDeleteEmptyValues(t *testing.T) {
 	}
 	if _, ok := updated.Attributes["header:X-Nope"]; ok {
 		t.Fatalf("expected attrs header:X-Nope to be absent")
+	}
+	if got := updated.Attributes["cloak_mode"]; got != "always" {
+		t.Fatalf("attrs cloak_mode = %q, want %q", got, "always")
+	}
+	if got := updated.Attributes["cloak_strict_mode"]; got != "true" {
+		t.Fatalf("attrs cloak_strict_mode = %q, want true", got)
+	}
+	if got := updated.Attributes["cloak_sensitive_words"]; got != "Claude,account" {
+		t.Fatalf("attrs cloak_sensitive_words = %q, want Claude,account", got)
+	}
+	if got := updated.Attributes["cloak_cache_user_id"]; got != "false" {
+		t.Fatalf("attrs cloak_cache_user_id = %q, want false", got)
+	}
+	if got, _ := updated.Metadata["cloak_mode"].(string); got != "always" {
+		t.Fatalf("metadata.cloak_mode = %q, want always", got)
+	}
+	if got, _ := updated.Metadata["cloak_strict_mode"].(bool); !got {
+		t.Fatalf("metadata.cloak_strict_mode = %v, want true", got)
+	}
+	words, ok := updated.Metadata["cloak_sensitive_words"].([]string)
+	if !ok {
+		t.Fatalf("metadata.cloak_sensitive_words = %T, want []string", updated.Metadata["cloak_sensitive_words"])
+	}
+	if len(words) != 2 || words[0] != "Claude" || words[1] != "account" {
+		t.Fatalf("metadata.cloak_sensitive_words = %#v, want [Claude account]", words)
+	}
+	if got, _ := updated.Metadata["cloak_cache_user_id"].(bool); got {
+		t.Fatalf("metadata.cloak_cache_user_id = %v, want false", got)
 	}
 }
 

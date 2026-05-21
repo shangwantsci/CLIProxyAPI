@@ -438,6 +438,29 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 			log.WithError(err).Warnf("failed to stat auth file %s", path)
 		}
 	}
+	if prefix := strings.TrimSpace(auth.Prefix); prefix != "" {
+		entry["prefix"] = prefix
+	} else if prefix := authStringSetting(auth, "prefix"); prefix != "" {
+		entry["prefix"] = prefix
+	}
+	if proxyURL := strings.TrimSpace(auth.ProxyURL); proxyURL != "" {
+		entry["proxy_url"] = proxyURL
+	} else if proxyURL := authStringSetting(auth, "proxy_url"); proxyURL != "" {
+		entry["proxy_url"] = proxyURL
+	}
+	customHeaders := coreauth.ExtractCustomHeadersFromMetadata(auth.Metadata)
+	for key, value := range auth.Attributes {
+		if strings.HasPrefix(key, "header:") && strings.TrimSpace(value) != "" {
+			if customHeaders == nil {
+				customHeaders = make(map[string]string)
+			}
+			customHeaders[strings.TrimSpace(strings.TrimPrefix(key, "header:"))] = strings.TrimSpace(value)
+		}
+	}
+	if len(customHeaders) > 0 {
+		entry["headers_configured"] = true
+		entry["headers_count"] = len(customHeaders)
+	}
 	if claims := extractCodexIDTokenClaims(auth); claims != nil {
 		entry["id_token"] = claims
 	}
@@ -471,6 +494,12 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 				entry["note"] = trimmed
 			}
 		}
+	}
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "claude") {
+		entry["cloak_mode"] = authCloakMode(auth)
+		entry["cloak_strict_mode"] = authBoolSetting(auth, "cloak_strict_mode", false)
+		entry["cloak_cache_user_id"] = authBoolSetting(auth, "cloak_cache_user_id", true)
+		entry["cloak_sensitive_words"] = authStringListSetting(auth, "cloak_sensitive_words")
 	}
 	return entry
 }
@@ -562,6 +591,90 @@ func authAttribute(auth *coreauth.Auth, key string) string {
 		return ""
 	}
 	return auth.Attributes[key]
+}
+
+func authStringSetting(auth *coreauth.Auth, key string) string {
+	if v := strings.TrimSpace(authAttribute(auth, key)); v != "" {
+		return v
+	}
+	if auth == nil || auth.Metadata == nil {
+		return ""
+	}
+	if v, ok := auth.Metadata[key].(string); ok {
+		return strings.TrimSpace(v)
+	}
+	return ""
+}
+
+func authBoolSetting(auth *coreauth.Auth, key string, defaultValue bool) bool {
+	if v := strings.TrimSpace(authAttribute(auth, key)); v != "" {
+		return strings.EqualFold(v, "true") || v == "1"
+	}
+	if auth == nil || auth.Metadata == nil {
+		return defaultValue
+	}
+	switch v := auth.Metadata[key].(type) {
+	case bool:
+		return v
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return defaultValue
+		}
+		return strings.EqualFold(trimmed, "true") || trimmed == "1"
+	default:
+		return defaultValue
+	}
+}
+
+func authStringListSetting(auth *coreauth.Auth, key string) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0)
+	add := func(raw string) {
+		for _, part := range strings.Split(raw, ",") {
+			trimmed := strings.TrimSpace(part)
+			if trimmed == "" {
+				continue
+			}
+			dedupeKey := strings.ToLower(trimmed)
+			if _, ok := seen[dedupeKey]; ok {
+				continue
+			}
+			seen[dedupeKey] = struct{}{}
+			out = append(out, trimmed)
+		}
+	}
+
+	if v := strings.TrimSpace(authAttribute(auth, key)); v != "" {
+		add(v)
+	}
+	if auth != nil && auth.Metadata != nil {
+		switch v := auth.Metadata[key].(type) {
+		case string:
+			add(v)
+		case []string:
+			for _, item := range v {
+				add(item)
+			}
+		case []any:
+			for _, item := range v {
+				if s, ok := item.(string); ok {
+					add(s)
+				}
+			}
+		}
+	}
+	return out
+}
+
+func authCloakMode(auth *coreauth.Auth) string {
+	mode := strings.ToLower(strings.TrimSpace(authStringSetting(auth, "cloak_mode")))
+	switch mode {
+	case "always", "never":
+		return mode
+	default:
+		return "auto"
+	}
 }
 
 func isRuntimeOnlyAuth(auth *coreauth.Auth) bool {
@@ -1150,7 +1263,7 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
 }
 
-// PatchAuthFileFields updates editable fields (prefix, proxy_url, headers, priority, note) of an auth file.
+// PatchAuthFileFields updates editable routing and Claude compatibility fields of an auth file.
 func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	if h.authManager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
@@ -1158,12 +1271,16 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	}
 
 	var req struct {
-		Name     string            `json:"name"`
-		Prefix   *string           `json:"prefix"`
-		ProxyURL *string           `json:"proxy_url"`
-		Headers  map[string]string `json:"headers"`
-		Priority *int              `json:"priority"`
-		Note     *string           `json:"note"`
+		Name                string            `json:"name"`
+		Prefix              *string           `json:"prefix"`
+		ProxyURL            *string           `json:"proxy_url"`
+		Headers             map[string]string `json:"headers"`
+		Priority            *int              `json:"priority"`
+		Note                *string           `json:"note"`
+		CloakMode           *string           `json:"cloak_mode"`
+		CloakStrictMode     *bool             `json:"cloak_strict_mode"`
+		CloakSensitiveWords *[]string         `json:"cloak_sensitive_words"`
+		CloakCacheUserID    *bool             `json:"cloak_cache_user_id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -1329,6 +1446,46 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		}
 		changed = true
 	}
+	if req.CloakMode != nil || req.CloakStrictMode != nil || req.CloakSensitiveWords != nil || req.CloakCacheUserID != nil {
+		if targetAuth.Metadata == nil {
+			targetAuth.Metadata = make(map[string]any)
+		}
+		if targetAuth.Attributes == nil {
+			targetAuth.Attributes = make(map[string]string)
+		}
+
+		if req.CloakMode != nil {
+			mode := strings.ToLower(strings.TrimSpace(*req.CloakMode))
+			if mode == "" {
+				mode = "auto"
+			}
+			if mode != "auto" && mode != "always" && mode != "never" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "cloak_mode must be auto, always, or never"})
+				return
+			}
+			targetAuth.Metadata["cloak_mode"] = mode
+			targetAuth.Attributes["cloak_mode"] = mode
+		}
+		if req.CloakStrictMode != nil {
+			targetAuth.Metadata["cloak_strict_mode"] = *req.CloakStrictMode
+			targetAuth.Attributes["cloak_strict_mode"] = strconv.FormatBool(*req.CloakStrictMode)
+		}
+		if req.CloakSensitiveWords != nil {
+			words := normalizeStringList(*req.CloakSensitiveWords)
+			if len(words) == 0 {
+				delete(targetAuth.Metadata, "cloak_sensitive_words")
+				delete(targetAuth.Attributes, "cloak_sensitive_words")
+			} else {
+				targetAuth.Metadata["cloak_sensitive_words"] = words
+				targetAuth.Attributes["cloak_sensitive_words"] = strings.Join(words, ",")
+			}
+		}
+		if req.CloakCacheUserID != nil {
+			targetAuth.Metadata["cloak_cache_user_id"] = *req.CloakCacheUserID
+			targetAuth.Attributes["cloak_cache_user_id"] = strconv.FormatBool(*req.CloakCacheUserID)
+		}
+		changed = true
+	}
 
 	if !changed {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
@@ -1343,6 +1500,37 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+func normalizeStringList(input []string) []string {
+	seen := make(map[string]struct{}, len(input))
+	out := make([]string, 0, len(input))
+	for _, item := range input {
+		trimmed := strings.TrimSpace(item)
+		if trimmed == "" {
+			continue
+		}
+		key := strings.ToLower(trimmed)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, trimmed)
+	}
+	return out
+}
+
+func defaultClaudeAuthMetadata(email string) map[string]any {
+	metadata := map[string]any{
+		"type":                "claude",
+		"cloak_mode":          "auto",
+		"cloak_strict_mode":   false,
+		"cloak_cache_user_id": true,
+	}
+	if trimmedEmail := strings.TrimSpace(email); trimmedEmail != "" {
+		metadata["email"] = trimmedEmail
+	}
+	return metadata
 }
 
 func (h *Handler) disableAuth(ctx context.Context, id string) {
@@ -1542,7 +1730,11 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 			Provider: "claude",
 			FileName: fmt.Sprintf("claude-%s.json", tokenStorage.Email),
 			Storage:  tokenStorage,
-			Metadata: map[string]any{"email": tokenStorage.Email},
+			Metadata: defaultClaudeAuthMetadata(tokenStorage.Email),
+			Attributes: map[string]string{
+				"cloak_mode":          "auto",
+				"cloak_cache_user_id": "true",
+			},
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {

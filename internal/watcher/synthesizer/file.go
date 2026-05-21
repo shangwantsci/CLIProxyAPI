@@ -157,6 +157,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 			}
 		}
 	}
+	applyClaudeCloakMetadata(a, metadata)
 	coreauth.ApplyCustomHeadersFromMetadata(a)
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
 	// For codex auth files, extract plan_type from the JWT id_token.
@@ -181,6 +182,69 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		}
 	}
 	return []*coreauth.Auth{a}
+}
+
+func applyClaudeCloakMetadata(auth *coreauth.Auth, metadata map[string]any) {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "claude") {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	if rawMode, ok := metadata["cloak_mode"].(string); ok {
+		mode := strings.ToLower(strings.TrimSpace(rawMode))
+		if mode == "auto" || mode == "always" || mode == "never" {
+			auth.Attributes["cloak_mode"] = mode
+		}
+	}
+	if rawStrict, ok := metadata["cloak_strict_mode"].(bool); ok {
+		auth.Attributes["cloak_strict_mode"] = strconv.FormatBool(rawStrict)
+	} else if rawStrict, ok := metadata["cloak_strict_mode"].(string); ok && strings.TrimSpace(rawStrict) != "" {
+		auth.Attributes["cloak_strict_mode"] = strconv.FormatBool(strings.EqualFold(strings.TrimSpace(rawStrict), "true") || strings.TrimSpace(rawStrict) == "1")
+	}
+	if rawCache, ok := metadata["cloak_cache_user_id"].(bool); ok {
+		auth.Attributes["cloak_cache_user_id"] = strconv.FormatBool(rawCache)
+	} else if rawCache, ok := metadata["cloak_cache_user_id"].(string); ok && strings.TrimSpace(rawCache) != "" {
+		auth.Attributes["cloak_cache_user_id"] = strconv.FormatBool(strings.EqualFold(strings.TrimSpace(rawCache), "true") || strings.TrimSpace(rawCache) == "1")
+	}
+	words := cloakWordsFromMetadata(metadata["cloak_sensitive_words"])
+	if len(words) > 0 {
+		auth.Attributes["cloak_sensitive_words"] = strings.Join(words, ",")
+	}
+}
+
+func cloakWordsFromMetadata(raw any) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0)
+	add := func(raw string) {
+		for _, part := range strings.Split(raw, ",") {
+			trimmed := strings.TrimSpace(part)
+			if trimmed == "" {
+				continue
+			}
+			key := strings.ToLower(trimmed)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, trimmed)
+		}
+	}
+	switch v := raw.(type) {
+	case string:
+		add(v)
+	case []string:
+		for _, item := range v {
+			add(item)
+		}
+	case []any:
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				add(s)
+			}
+		}
+	}
+	return out
 }
 
 // SynthesizeGeminiVirtualAuths creates virtual Auth entries for multi-project Gemini credentials.

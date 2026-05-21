@@ -59,9 +59,7 @@ func (h *Handler) PostAnthropicCookieAuth(c *gin.Context) {
 	}
 	fileName := fmt.Sprintf("claude-%s.json", accountID)
 
-	metadata := map[string]any{
-		"email": tokenStorage.Email,
-	}
+	metadata := defaultClaudeAuthMetadata(tokenStorage.Email)
 	if proxyURL != "" {
 		metadata["proxy_url"] = proxyURL
 	}
@@ -80,6 +78,10 @@ func (h *Handler) PostAnthropicCookieAuth(c *gin.Context) {
 		Storage:  tokenStorage,
 		ProxyURL: proxyURL,
 		Metadata: metadata,
+		Attributes: map[string]string{
+			"cloak_mode":          "auto",
+			"cloak_cache_user_id": "true",
+		},
 	}
 
 	savedPath, err := h.saveTokenRecord(ctx, record)
