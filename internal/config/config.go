@@ -20,9 +20,13 @@ import (
 )
 
 const (
-	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+	DefaultPanelGitHubRepository = "https://github.com/shangwantsci/Cli-Proxy-API-Management-Center"
 	DefaultPprofAddr             = "127.0.0.1:8316"
 	DefaultAuthDir               = "~/.cli-proxy-api"
+	DefaultRequestRetry          = 2
+	DefaultMaxRetryCredentials   = 0
+	DefaultMaxRetryInterval      = 30
+	DefaultSessionAffinityTTL    = "1h"
 )
 
 // Config represents the application's configuration, loaded from a YAML file.
@@ -152,7 +156,7 @@ type Config struct {
 // ClaudeHeaderDefaults configures default header values injected into Claude API requests.
 // In legacy mode, UserAgent/PackageVersion/RuntimeVersion/Timeout act as fallbacks when
 // the client omits them, while OS/Arch remain runtime-derived. When stabilized device
-// profiles are enabled, OS/Arch become the pinned platform baseline, while
+// profiles are enabled (the default), OS/Arch become the pinned platform baseline, while
 // UserAgent/PackageVersion/RuntimeVersion seed the upgradeable software fingerprint.
 type ClaudeHeaderDefaults struct {
 	UserAgent              string `yaml:"user-agent" json:"user-agent"`
@@ -362,7 +366,7 @@ type PayloadModelRule struct {
 // Cloaking disguises API requests to appear as originating from the official Claude Code CLI.
 type CloakConfig struct {
 	// Mode controls cloaking behavior: "auto" (default), "always", or "never".
-	// - "auto": cloak only when client is not Claude Code (based on User-Agent)
+	// - "auto": cloak unless the client has both Claude Code User-Agent and metadata.user_id
 	// - "always": always apply cloaking regardless of client
 	// - "never": never apply cloaking
 	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
@@ -641,6 +645,11 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.UsageStatisticsEnabled = false
 	cfg.RedisUsageQueueRetentionSeconds = 60
 	cfg.DisableCooling = false
+	cfg.RequestRetry = DefaultRequestRetry
+	cfg.MaxRetryCredentials = DefaultMaxRetryCredentials
+	cfg.MaxRetryInterval = DefaultMaxRetryInterval
+	cfg.Routing.SessionAffinity = true
+	cfg.Routing.SessionAffinityTTL = DefaultSessionAffinityTTL
 	cfg.DisableImageGeneration = DisableImageGenerationOff
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr

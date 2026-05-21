@@ -3,14 +3,21 @@ package helps
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"regexp"
 	"strings"
 
 	"github.com/google/uuid"
 )
 
-// userIDPattern matches Claude Code format: user_[64-hex]_account_[uuid]_session_[uuid]
-var userIDPattern = regexp.MustCompile(`^user_[a-fA-F0-9]{64}_account_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_session_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+// userIDPattern matches Claude Code legacy format: user_[64-hex]_account_[optional-id]_session_[uuid]
+var userIDPattern = regexp.MustCompile(`^user_[a-fA-F0-9]{64}_account_[a-zA-Z0-9-]*_session_[a-fA-F0-9-]{36}$`)
+
+type jsonMetadataUserID struct {
+	DeviceID    string `json:"device_id"`
+	AccountUUID string `json:"account_uuid"`
+	SessionID   string `json:"session_id"`
+}
 
 // generateFakeUserID generates a fake user ID in Claude Code format.
 // Format: user_[64-hex-chars]_account_[UUID-v4]_session_[UUID-v4]
@@ -25,6 +32,17 @@ func generateFakeUserID() string {
 
 // isValidUserID checks if a user ID matches Claude Code format.
 func isValidUserID(userID string) bool {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return false
+	}
+	if strings.HasPrefix(userID, "{") {
+		var parsed jsonMetadataUserID
+		if err := json.Unmarshal([]byte(userID), &parsed); err != nil {
+			return false
+		}
+		return strings.TrimSpace(parsed.DeviceID) != "" && strings.TrimSpace(parsed.SessionID) != ""
+	}
 	return userIDPattern.MatchString(userID)
 }
 
@@ -45,8 +63,19 @@ func ShouldCloak(cloakMode string, userAgent string) bool {
 	case "never":
 		return false
 	default: // "auto" or empty
-		// If client is Claude Code, don't cloak
 		return !strings.HasPrefix(userAgent, "claude-cli")
+	}
+}
+
+// ShouldCloakRequest determines if a request should be cloaked.
+func ShouldCloakRequest(cloakMode string, userAgent string, userID string) bool {
+	switch strings.ToLower(cloakMode) {
+	case "always":
+		return true
+	case "never":
+		return false
+	default: // "auto" or empty
+		return !(strings.HasPrefix(userAgent, "claude-cli") && isValidUserID(userID))
 	}
 }
 

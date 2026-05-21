@@ -15,8 +15,18 @@ type ClaudeTokenData struct {
 	AccessToken string `json:"access_token"`
 	// RefreshToken is used to obtain new access tokens
 	RefreshToken string `json:"refresh_token"`
+	// TokenType is the OAuth token type returned by Claude.
+	TokenType string `json:"token_type,omitempty"`
+	// ExpiresIn is the token lifetime returned by Claude, in seconds.
+	ExpiresIn int `json:"expires_in,omitempty"`
 	// Email is the Anthropic account email
 	Email string `json:"email"`
+	// OrganizationUUID is the Claude organization selected during OAuth.
+	OrganizationUUID string `json:"organization_uuid,omitempty"`
+	// AccountUUID is the Claude account UUID returned during OAuth.
+	AccountUUID string `json:"account_uuid,omitempty"`
+	// Scope is the granted OAuth scope.
+	Scope string `json:"scope,omitempty"`
 	// Expire is the timestamp of the token expire
 	Expire string `json:"expired"`
 }

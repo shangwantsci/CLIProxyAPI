@@ -25,6 +25,11 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.UsageStatisticsEnabled = false
 	cfg.RedisUsageQueueRetentionSeconds = 60
 	cfg.DisableCooling = false
+	cfg.RequestRetry = DefaultRequestRetry
+	cfg.MaxRetryCredentials = DefaultMaxRetryCredentials
+	cfg.MaxRetryInterval = DefaultMaxRetryInterval
+	cfg.Routing.SessionAffinity = true
+	cfg.Routing.SessionAffinityTTL = DefaultSessionAffinityTTL
 	cfg.DisableImageGeneration = DisableImageGenerationOff
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr

@@ -5,6 +5,8 @@ package claude
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,14 +29,21 @@ const (
 	ClientID    = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 	RedirectURI = "http://localhost:54545/callback"
 
+	PlatformRedirectURI = "https://platform.claude.com/oauth/code/callback"
+
 	claudeRefreshMinBackoff = 5 * time.Second
 	claudeRefreshMaxBackoff = 5 * time.Minute
+	claudeCookieScopeAPI    = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 )
 
 var (
 	claudeRefreshGroup singleflight.Group
 	claudeRefreshMu    sync.Mutex
 	claudeRefreshBlock = make(map[string]time.Time)
+
+	claudeAIBaseURL          = "https://claude.ai"
+	claudePlatformTokenURL   = "https://platform.claude.com/v1/oauth/token"
+	claudePlatformHTTPOrigin = "https://claude.ai"
 )
 
 type refreshHTTPError struct {
@@ -49,6 +58,13 @@ func (e *refreshHTTPError) Error() string {
 
 func (e *refreshHTTPError) Retryable() bool {
 	return e != nil && e.retryable
+}
+
+func (e *refreshHTTPError) StatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.status
 }
 
 func resetClaudeRefreshState() {
@@ -121,6 +137,7 @@ type tokenResponse struct {
 	RefreshToken string `json:"refresh_token"`
 	TokenType    string `json:"token_type"`
 	ExpiresIn    int    `json:"expires_in"`
+	Scope        string `json:"scope"`
 	Organization struct {
 		UUID string `json:"uuid"`
 		Name string `json:"name"`
@@ -129,6 +146,21 @@ type tokenResponse struct {
 		UUID         string `json:"uuid"`
 		EmailAddress string `json:"email_address"`
 	} `json:"account"`
+}
+
+func tokenDataFromResponse(tokenResp tokenResponse) ClaudeTokenData {
+	expiresAt := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+	return ClaudeTokenData{
+		AccessToken:      tokenResp.AccessToken,
+		RefreshToken:     tokenResp.RefreshToken,
+		TokenType:        tokenResp.TokenType,
+		ExpiresIn:        tokenResp.ExpiresIn,
+		Email:            tokenResp.Account.EmailAddress,
+		OrganizationUUID: tokenResp.Organization.UUID,
+		AccountUUID:      tokenResp.Account.UUID,
+		Scope:            tokenResp.Scope,
+		Expire:           expiresAt.Format(time.RFC3339),
+	}
 }
 
 // ClaudeAuth handles Anthropic OAuth2 authentication flow.
@@ -299,13 +331,7 @@ func (o *ClaudeAuth) ExchangeCodeForTokens(ctx context.Context, code, state stri
 		return nil, fmt.Errorf("failed to parse token response: %w", err)
 	}
 
-	// Create token data
-	tokenData := ClaudeTokenData{
-		AccessToken:  tokenResp.AccessToken,
-		RefreshToken: tokenResp.RefreshToken,
-		Email:        tokenResp.Account.EmailAddress,
-		Expire:       time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
-	}
+	tokenData := tokenDataFromResponse(tokenResp)
 
 	// Create auth bundle
 	bundle := &ClaudeAuthBundle{
@@ -414,14 +440,220 @@ func (o *ClaudeAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken
 		return nil, fmt.Errorf("failed to parse token response: %w", err)
 	}
 
-	// Create token data
 	clearClaudeRefreshBlockedUntil(refreshToken)
 
-	return &ClaudeTokenData{
-		AccessToken:  tokenResp.AccessToken,
-		RefreshToken: tokenResp.RefreshToken,
-		Email:        tokenResp.Account.EmailAddress,
-		Expire:       time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
+	tokenData := tokenDataFromResponse(tokenResp)
+	return &tokenData, nil
+}
+
+func generateClaudeOAuthState() (string, error) {
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", fmt.Errorf("failed to generate state: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(bytes), nil
+}
+
+// CookieAuth completes Claude OAuth using a claude.ai sessionKey cookie.
+func (o *ClaudeAuth) CookieAuth(ctx context.Context, sessionKey string) (*ClaudeAuthBundle, error) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return nil, fmt.Errorf("sessionKey is required")
+	}
+	pkceCodes, err := GeneratePKCECodes()
+	if err != nil {
+		return nil, err
+	}
+	state, err := generateClaudeOAuthState()
+	if err != nil {
+		return nil, err
+	}
+
+	orgUUID, err := o.getCookieOrganizationUUID(ctx, sessionKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get organization info: %w", err)
+	}
+	code, err := o.getCookieAuthorizationCode(ctx, sessionKey, orgUUID, claudeCookieScopeAPI, pkceCodes.CodeChallenge, state)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get authorization code: %w", err)
+	}
+	bundle, err := o.exchangePlatformCodeForTokens(ctx, code, state, pkceCodes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to exchange code: %w", err)
+	}
+	if bundle.TokenData.OrganizationUUID == "" {
+		bundle.TokenData.OrganizationUUID = orgUUID
+	}
+	return bundle, nil
+}
+
+func (o *ClaudeAuth) getCookieOrganizationUUID(ctx context.Context, sessionKey string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(claudeAIBaseURL, "/")+"/api/organizations", nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create organizations request: %w", err)
+	}
+	req.AddCookie(&http.Cookie{Name: "sessionKey", Value: sessionKey})
+
+	resp, err := o.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("organizations request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read organizations response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("failed to get organizations: status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var orgs []struct {
+		UUID      string  `json:"uuid"`
+		Name      string  `json:"name"`
+		RavenType *string `json:"raven_type"`
+	}
+	if err = json.Unmarshal(body, &orgs); err != nil {
+		return "", fmt.Errorf("failed to parse organizations response: %w", err)
+	}
+	if len(orgs) == 0 {
+		return "", fmt.Errorf("no organizations found")
+	}
+	for _, org := range orgs {
+		if org.RavenType != nil && *org.RavenType == "team" && strings.TrimSpace(org.UUID) != "" {
+			return org.UUID, nil
+		}
+	}
+	if strings.TrimSpace(orgs[0].UUID) == "" {
+		return "", fmt.Errorf("organization uuid is empty")
+	}
+	return orgs[0].UUID, nil
+}
+
+func (o *ClaudeAuth) getCookieAuthorizationCode(ctx context.Context, sessionKey, orgUUID, scope, codeChallenge, state string) (string, error) {
+	authURL := fmt.Sprintf("%s/v1/oauth/%s/authorize", strings.TrimRight(claudeAIBaseURL, "/"), url.PathEscape(orgUUID))
+	reqBody := map[string]any{
+		"response_type":         "code",
+		"client_id":             ClientID,
+		"organization_uuid":     orgUUID,
+		"redirect_uri":          PlatformRedirectURI,
+		"scope":                 scope,
+		"state":                 state,
+		"code_challenge":        codeChallenge,
+		"code_challenge_method": "S256",
+	}
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal authorize request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, authURL, strings.NewReader(string(jsonBody)))
+	if err != nil {
+		return "", fmt.Errorf("failed to create authorize request: %w", err)
+	}
+	req.AddCookie(&http.Cookie{Name: "sessionKey", Value: sessionKey})
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Cache-Control", "no-cache")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", claudePlatformHTTPOrigin)
+	req.Header.Set("Referer", claudePlatformHTTPOrigin+"/new")
+
+	resp, err := o.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("authorize request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read authorize response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("authorization failed: status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		RedirectURI string `json:"redirect_uri"`
+	}
+	if err = json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("failed to parse authorize response: %w", err)
+	}
+	if strings.TrimSpace(result.RedirectURI) == "" {
+		return "", fmt.Errorf("no redirect_uri in authorize response")
+	}
+
+	parsedURL, err := url.Parse(result.RedirectURI)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse redirect_uri: %w", err)
+	}
+	query := parsedURL.Query()
+	authCode := strings.TrimSpace(query.Get("code"))
+	responseState := strings.TrimSpace(query.Get("state"))
+	if authCode == "" {
+		return "", fmt.Errorf("no authorization code in redirect_uri")
+	}
+	if responseState != "" && responseState != state {
+		return "", fmt.Errorf("state mismatch in redirect_uri")
+	}
+	if responseState != "" {
+		return authCode + "#" + responseState, nil
+	}
+	return authCode, nil
+}
+
+func (o *ClaudeAuth) exchangePlatformCodeForTokens(ctx context.Context, code, state string, pkceCodes *PKCECodes) (*ClaudeAuthBundle, error) {
+	if pkceCodes == nil {
+		return nil, fmt.Errorf("PKCE codes are required for token exchange")
+	}
+	newCode, newState := o.parseCodeAndState(code)
+	reqBody := map[string]any{
+		"code":          newCode,
+		"grant_type":    "authorization_code",
+		"client_id":     ClientID,
+		"redirect_uri":  PlatformRedirectURI,
+		"code_verifier": pkceCodes.CodeVerifier,
+	}
+	if newState != "" {
+		reqBody["state"] = newState
+	} else if strings.TrimSpace(state) != "" {
+		reqBody["state"] = state
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal token request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, claudePlatformTokenURL, strings.NewReader(string(jsonBody)))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create token request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "axios/1.13.6")
+
+	resp, err := o.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("token exchange request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read token response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("token exchange failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var tokenResp tokenResponse
+	if err = json.Unmarshal(body, &tokenResp); err != nil {
+		return nil, fmt.Errorf("failed to parse token response: %w", err)
+	}
+
+	return &ClaudeAuthBundle{
+		TokenData:   tokenDataFromResponse(tokenResp),
+		LastRefresh: time.Now().Format(time.RFC3339),
 	}, nil
 }
 
@@ -436,11 +668,16 @@ func (o *ClaudeAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken
 //   - *ClaudeTokenStorage: A new token storage instance
 func (o *ClaudeAuth) CreateTokenStorage(bundle *ClaudeAuthBundle) *ClaudeTokenStorage {
 	storage := &ClaudeTokenStorage{
-		AccessToken:  bundle.TokenData.AccessToken,
-		RefreshToken: bundle.TokenData.RefreshToken,
-		LastRefresh:  bundle.LastRefresh,
-		Email:        bundle.TokenData.Email,
-		Expire:       bundle.TokenData.Expire,
+		AccessToken:      bundle.TokenData.AccessToken,
+		RefreshToken:     bundle.TokenData.RefreshToken,
+		TokenType:        bundle.TokenData.TokenType,
+		ExpiresIn:        bundle.TokenData.ExpiresIn,
+		LastRefresh:      bundle.LastRefresh,
+		Email:            bundle.TokenData.Email,
+		OrganizationUUID: bundle.TokenData.OrganizationUUID,
+		AccountUUID:      bundle.TokenData.AccountUUID,
+		Scope:            bundle.TokenData.Scope,
+		Expire:           bundle.TokenData.Expire,
 	}
 
 	return storage
@@ -496,7 +733,24 @@ func (o *ClaudeAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken st
 func (o *ClaudeAuth) UpdateTokenStorage(storage *ClaudeTokenStorage, tokenData *ClaudeTokenData) {
 	storage.AccessToken = tokenData.AccessToken
 	storage.RefreshToken = tokenData.RefreshToken
+	if tokenData.TokenType != "" {
+		storage.TokenType = tokenData.TokenType
+	}
+	if tokenData.ExpiresIn > 0 {
+		storage.ExpiresIn = tokenData.ExpiresIn
+	}
 	storage.LastRefresh = time.Now().Format(time.RFC3339)
-	storage.Email = tokenData.Email
+	if tokenData.Email != "" {
+		storage.Email = tokenData.Email
+	}
+	if tokenData.OrganizationUUID != "" {
+		storage.OrganizationUUID = tokenData.OrganizationUUID
+	}
+	if tokenData.AccountUUID != "" {
+		storage.AccountUUID = tokenData.AccountUUID
+	}
+	if tokenData.Scope != "" {
+		storage.Scope = tokenData.Scope
+	}
 	storage.Expire = tokenData.Expire
 }

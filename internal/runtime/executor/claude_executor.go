@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -241,7 +242,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			helps.RecordAPIResponseError(ctx, e.cfg, decErr)
 			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
 			helps.LogWithRequestID(ctx).Warn(msg)
-			return resp, statusErr{code: httpResp.StatusCode, msg: msg}
+			return resp, newClaudeStatusErr(httpResp.StatusCode, []byte(msg), httpResp.Header)
 		}
 		b, readErr := io.ReadAll(errBody)
 		if readErr != nil {
@@ -252,7 +253,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		err = newClaudeStatusErr(httpResp.StatusCode, b, httpResp.Header)
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
@@ -415,7 +416,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			helps.RecordAPIResponseError(ctx, e.cfg, decErr)
 			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
 			helps.LogWithRequestID(ctx).Warn(msg)
-			return nil, statusErr{code: httpResp.StatusCode, msg: msg}
+			return nil, newClaudeStatusErr(httpResp.StatusCode, []byte(msg), httpResp.Header)
 		}
 		b, readErr := io.ReadAll(errBody)
 		if readErr != nil {
@@ -429,7 +430,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		err = newClaudeStatusErr(httpResp.StatusCode, b, httpResp.Header)
 		return nil, err
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
@@ -595,9 +596,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
-	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
-		body = checkSystemInstructions(body)
-	}
+	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
 
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
 	body = enforceCacheControlLimit(body, 4)
@@ -606,8 +605,12 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	// Extract betas from body and convert to header (for count_tokens too)
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
-	if isClaudeOAuthToken(apiKey) {
+	oauthToken := isClaudeOAuthToken(apiKey)
+	if oauthToken {
 		body, _ = prepareClaudeOAuthToolNamesForUpstream(body, claudeToolPrefix, auth.ToolPrefixDisabled())
+	}
+	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
+		body = signAnthropicMessagesBody(body)
 	}
 
 	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
@@ -650,7 +653,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 			helps.RecordAPIResponseError(ctx, e.cfg, decErr)
 			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
 			helps.LogWithRequestID(ctx).Warn(msg)
-			return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: msg}
+			return cliproxyexecutor.Response{}, newClaudeStatusErr(resp.StatusCode, []byte(msg), resp.Header)
 		}
 		b, readErr := io.ReadAll(errBody)
 		if readErr != nil {
@@ -663,7 +666,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
-		return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: string(b)}
+		return cliproxyexecutor.Response{}, newClaudeStatusErr(resp.StatusCode, b, resp.Header)
 	}
 	decodedBody, err := decodeResponseBody(resp.Body, resp.Header.Get("Content-Encoding"))
 	if err != nil {
@@ -724,6 +727,92 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	now := time.Now().Format(time.RFC3339)
 	auth.Metadata["last_refresh"] = now
 	return auth, nil
+}
+
+func newClaudeStatusErr(statusCode int, body []byte, headers http.Header) statusErr {
+	err := statusErr{code: statusCode, msg: string(body)}
+	if statusCode == http.StatusTooManyRequests {
+		err.retryAfter = parseClaudeUpstreamRetryAfter(headers, time.Now())
+	}
+	return err
+}
+
+func parseClaudeUpstreamRetryAfter(headers http.Header, now time.Time) *time.Duration {
+	if headers == nil {
+		return nil
+	}
+	if retryAfter := parseRetryAfterHeaderValue(headers.Get("Retry-After"), now); retryAfter != nil {
+		return retryAfter
+	}
+	if raw := strings.TrimSpace(headers.Get("Retry-After-Ms")); raw != "" {
+		if ms, err := strconv.ParseInt(raw, 10, 64); err == nil && ms > 0 {
+			d := time.Duration(ms) * time.Millisecond
+			return &d
+		}
+	}
+
+	var earliest *time.Duration
+	for _, name := range []string{
+		"anthropic-ratelimit-unified-reset",
+		"anthropic-ratelimit-requests-reset",
+		"anthropic-ratelimit-tokens-reset",
+		"anthropic-ratelimit-input-tokens-reset",
+		"anthropic-ratelimit-output-tokens-reset",
+	} {
+		if d := parseResetHeaderDuration(headers.Get(name), now); d != nil && *d > 0 {
+			if earliest == nil || *d < *earliest {
+				v := *d
+				earliest = &v
+			}
+		}
+	}
+	return earliest
+}
+
+func parseRetryAfterHeaderValue(raw string, now time.Time) *time.Duration {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	if seconds, err := strconv.ParseInt(raw, 10, 64); err == nil && seconds > 0 {
+		d := time.Duration(seconds) * time.Second
+		return &d
+	}
+	if when, err := http.ParseTime(raw); err == nil {
+		d := when.Sub(now)
+		if d > 0 {
+			return &d
+		}
+	}
+	return nil
+}
+
+func parseResetHeaderDuration(raw string, now time.Time) *time.Duration {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	if unixSeconds, err := strconv.ParseInt(raw, 10, 64); err == nil && unixSeconds > 0 {
+		d := time.Unix(unixSeconds, 0).Sub(now)
+		if d > 0 {
+			return &d
+		}
+		return nil
+	}
+	if when, err := time.Parse(time.RFC3339, raw); err == nil {
+		d := when.Sub(now)
+		if d > 0 {
+			return &d
+		}
+		return nil
+	}
+	if when, err := http.ParseTime(raw); err == nil {
+		d := when.Sub(now)
+		if d > 0 {
+			return &d
+		}
+	}
+	return nil
 }
 
 // extractAndRemoveBetas extracts the "betas" array from the body and removes it.
@@ -947,15 +1036,21 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		deviceProfile = helps.ResolveClaudeDeviceProfile(auth, apiKey, ginHeaders, cfg)
 	}
 
-	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28"
+	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,effort-2025-11-24,context-management-2025-06-27,extended-cache-ttl-2025-04-11,fine-grained-tool-streaming-2025-05-14,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28"
 	if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
 		baseBetas = val
-		if !strings.Contains(val, "oauth") {
-			baseBetas += ",oauth-2025-04-20"
-		}
 	}
-	if !strings.Contains(baseBetas, "interleaved-thinking") {
-		baseBetas += ",interleaved-thinking-2025-05-14"
+	for _, beta := range []string{
+		"claude-code-20250219",
+		"oauth-2025-04-20",
+		"interleaved-thinking-2025-05-14",
+		"prompt-caching-scope-2026-01-05",
+		"effort-2025-11-24",
+		"context-management-2025-06-27",
+		"extended-cache-ttl-2025-04-11",
+		"fine-grained-tool-streaming-2025-05-14",
+	} {
+		baseBetas = appendClaudeBeta(baseBetas, beta)
 	}
 
 	// Merge extra betas from request body and request flags.
@@ -983,7 +1078,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Dangerous-Direct-Browser-Access", "true")
 	}
 	misc.EnsureHeader(r.Header, ginHeaders, "X-App", "cli")
-	// Values below match Claude Code 2.1.63 / @anthropic-ai/sdk 0.74.0 (updated 2026-02-28).
+	// Values below match the configured Claude Code baseline fingerprint.
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Retry-Count", "0")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Runtime", "node")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Lang", "js")
@@ -1024,6 +1119,23 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	if stream {
 		r.Header.Set("Accept-Encoding", "identity")
 	}
+}
+
+func appendClaudeBeta(header string, beta string) string {
+	beta = strings.TrimSpace(beta)
+	if beta == "" {
+		return strings.TrimSpace(header)
+	}
+	for _, existing := range strings.Split(header, ",") {
+		if strings.TrimSpace(existing) == beta {
+			return strings.TrimSpace(header)
+		}
+	}
+	header = strings.TrimSpace(header)
+	if header == "" {
+		return beta
+	}
+	return header + "," + beta
 }
 
 func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
@@ -1819,7 +1931,8 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 	}
 
 	// Determine if cloaking should be applied
-	if !helps.ShouldCloak(cloakMode, clientUserAgent) {
+	clientUserID := gjson.GetBytes(payload, "metadata.user_id").String()
+	if !helps.ShouldCloakRequest(cloakMode, clientUserAgent, clientUserID) {
 		return payload
 	}
 

@@ -45,6 +45,14 @@ func (e unauthorizedRefreshTestExecutor) Refresh(ctx context.Context, auth *Auth
 	return nil, errors.New("token refresh failed with status 401: invalid_grant")
 }
 
+type invalidGrantRefreshTestExecutor struct {
+	schedulerProviderTestExecutor
+}
+
+func (e invalidGrantRefreshTestExecutor) Refresh(ctx context.Context, auth *Auth) (*Auth, error) {
+	return nil, errors.New(`token refresh failed with status 400: {"error":"invalid_grant","error_description":"token revoked"}`)
+}
+
 func TestManager_RefreshAuthUnauthorizedFailureStopsAutoRefreshRetry(t *testing.T) {
 	ctx := context.Background()
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
@@ -78,6 +86,9 @@ func TestManager_RefreshAuthUnauthorizedFailureStopsAutoRefreshRetry(t *testing.
 	if updated.LastError.Code != "unauthorized" {
 		t.Fatalf("LastError.Code = %q, want unauthorized", updated.LastError.Code)
 	}
+	if !updated.Disabled || updated.Status != StatusDisabled {
+		t.Fatalf("expected unauthorized refresh failure to disable auth, got disabled=%v status=%s", updated.Disabled, updated.Status)
+	}
 	if !updated.NextRefreshAfter.IsZero() {
 		t.Fatalf("NextRefreshAfter = %s, want zero for unauthorized refresh failure", updated.NextRefreshAfter)
 	}
@@ -87,6 +98,124 @@ func TestManager_RefreshAuthUnauthorizedFailureStopsAutoRefreshRetry(t *testing.
 	}
 	if _, shouldSchedule := nextRefreshCheckAt(now, updated, time.Second); shouldSchedule {
 		t.Fatal("expected unauthorized auth to be removed from the auto-refresh schedule")
+	}
+}
+
+func TestManager_RefreshAuthInvalidGrantDisablesAuth(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(invalidGrantRefreshTestExecutor{
+		schedulerProviderTestExecutor: schedulerProviderTestExecutor{provider: "claude"},
+	})
+
+	auth := &Auth{
+		ID:       "invalid-grant-refresh",
+		Provider: "claude",
+		Metadata: map[string]any{
+			"email": "x@example.com",
+		},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	manager.refreshAuth(ctx, auth.ID)
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatalf("expected auth %q after refresh", auth.ID)
+	}
+	if updated.LastError == nil {
+		t.Fatal("expected refresh failure to be recorded")
+	}
+	if updated.LastError.Code != "unauthorized" {
+		t.Fatalf("LastError.Code = %q, want unauthorized", updated.LastError.Code)
+	}
+	if !updated.Disabled || updated.Status != StatusDisabled {
+		t.Fatalf("expected invalid_grant refresh failure to disable auth, got disabled=%v status=%s", updated.Disabled, updated.Status)
+	}
+	if manager.shouldRefresh(updated, time.Now()) {
+		t.Fatal("expected invalid_grant auth to stop refresh attempts")
+	}
+}
+
+func TestManager_MarkResultUnauthorizedForcesRefreshCheck(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+
+	auth := &Auth{
+		ID:       "request-unauthorized",
+		Provider: "claude",
+		Metadata: map[string]any{
+			"email":         "x@example.com",
+			"refresh_token": "refresh-token",
+			"expired":       time.Now().Add(10 * time.Hour).Unix(),
+		},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	manager.MarkResult(ctx, Result{
+		AuthID:   auth.ID,
+		Provider: "claude",
+		Model:    "claude-sonnet-4-5",
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusUnauthorized, Message: "expired access token"},
+	})
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatalf("expected auth %q after mark result", auth.ID)
+	}
+	if updated.Disabled || updated.Status == StatusDisabled {
+		t.Fatalf("request 401 should not directly disable auth, got disabled=%v status=%s", updated.Disabled, updated.Status)
+	}
+	if updated.NextRefreshAfter.IsZero() {
+		t.Fatal("expected request 401 to request an immediate token refresh")
+	}
+	if !manager.shouldRefresh(updated, time.Now()) {
+		t.Fatal("expected request 401 auth to be refreshable immediately")
+	}
+}
+
+func TestManager_RefreshAuthSuccessClearsUnauthorizedModelStates(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(schedulerProviderTestExecutor{provider: "claude"})
+
+	next := time.Now().Add(30 * time.Minute)
+	auth := &Auth{
+		ID:       "refresh-clears-401",
+		Provider: "claude",
+		Metadata: map[string]any{
+			"email": "x@example.com",
+		},
+		ModelStates: map[string]*ModelState{
+			"claude-sonnet-4-5": {
+				Unavailable:    true,
+				Status:         StatusError,
+				StatusMessage:  "unauthorized",
+				NextRetryAfter: next,
+				LastError:      &Error{HTTPStatus: http.StatusUnauthorized, Message: "expired access token"},
+			},
+		},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	manager.refreshAuth(ctx, auth.ID)
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatalf("expected auth %q after refresh", auth.ID)
+	}
+	if len(updated.ModelStates) != 0 {
+		t.Fatalf("expected successful refresh to clear unauthorized model states, got %#v", updated.ModelStates)
+	}
+	if updated.Status != StatusActive {
+		t.Fatalf("Status = %s, want active", updated.Status)
 	}
 }
 

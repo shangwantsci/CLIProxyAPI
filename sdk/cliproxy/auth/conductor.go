@@ -1163,7 +1163,7 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		auth.Failed = existing.Failed
 		auth.recentRequests = existing.recentRequests
 		if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
-			if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
+			if auth.ModelStates == nil && len(existing.ModelStates) > 0 {
 				auth.ModelStates = existing.ModelStates
 			}
 		}
@@ -2142,6 +2142,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 	shouldResumeModel := false
 	shouldSuspendModel := false
+	shouldRefreshAuth := false
 	suspendReason := ""
 	clearModelQuota := false
 	setModelQuota := false
@@ -2197,6 +2198,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					} else {
 						switch statusCode {
 						case 401:
+							auth.NextRefreshAfter = now
+							shouldRefreshAuth = true
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
 							} else {
@@ -2276,6 +2279,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.mu.Unlock()
 	if m.scheduler != nil && authSnapshot != nil {
 		m.scheduler.upsertAuth(authSnapshot)
+	}
+	if shouldRefreshAuth && result.AuthID != "" {
+		m.queueRefreshReschedule(result.AuthID)
 	}
 
 	if clearModelQuota && result.Model != "" {
@@ -2494,14 +2500,41 @@ func isUnauthorizedError(err error) bool {
 		return true
 	}
 	raw := strings.ToLower(err.Error())
-	return strings.Contains(raw, "status 401") || strings.Contains(raw, "401 unauthorized")
+	return strings.Contains(raw, "status 401") ||
+		strings.Contains(raw, "401 unauthorized") ||
+		isPermanentAuthErrorMessage(raw)
 }
 
 func hasUnauthorizedAuthFailure(auth *Auth) bool {
 	if auth == nil || auth.LastError == nil {
 		return false
 	}
-	return auth.LastError.StatusCode() == http.StatusUnauthorized || strings.EqualFold(auth.LastError.Code, "unauthorized")
+	return strings.EqualFold(auth.LastError.Code, "unauthorized")
+}
+
+func isPermanentAuthErrorMessage(raw string) bool {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if raw == "" {
+		return false
+	}
+	patterns := [...]string{
+		"invalid_grant",
+		"invalid_client",
+		"unauthorized_client",
+		"token_revoked",
+		"token revoked",
+		"token_invalidated",
+		"refresh token revoked",
+		"refresh token expired",
+		"access_denied",
+		"no refresh token available",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(raw, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 func refreshErrorFromError(err error) *Error {
@@ -2509,11 +2542,12 @@ func refreshErrorFromError(err error) *Error {
 		return nil
 	}
 	statusCode := statusCodeFromError(err)
-	if statusCode == 0 && isUnauthorizedError(err) {
+	unauthorized := isUnauthorizedError(err)
+	if statusCode == 0 && unauthorized {
 		statusCode = http.StatusUnauthorized
 	}
 	authErr := &Error{Message: err.Error(), HTTPStatus: statusCode}
-	if statusCode == http.StatusUnauthorized {
+	if unauthorized {
 		authErr.Code = "unauthorized"
 		authErr.Retryable = false
 	}
@@ -2544,6 +2578,16 @@ func statusCodeFromResult(err *Error) int {
 		return 0
 	}
 	return err.StatusCode()
+}
+
+func isUnauthorizedResultError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	if strings.EqualFold(err.Code, "unauthorized") {
+		return true
+	}
+	return err.StatusCode() == http.StatusUnauthorized
 }
 
 func isModelSupportErrorMessage(message string) bool {
@@ -2664,6 +2708,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	switch statusCode {
 	case 401:
 		auth.StatusMessage = "unauthorized"
+		auth.NextRefreshAfter = now
 		if disableCooling {
 			auth.NextRetryAfter = time.Time{}
 		} else {
@@ -3788,11 +3833,17 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 	if a == nil {
 		return false
 	}
+	if a.Disabled || a.Status == StatusDisabled {
+		return false
+	}
 	if hasUnauthorizedAuthFailure(a) {
 		return false
 	}
-	if !a.NextRefreshAfter.IsZero() && now.Before(a.NextRefreshAfter) {
-		return false
+	if !a.NextRefreshAfter.IsZero() {
+		if now.Before(a.NextRefreshAfter) {
+			return false
+		}
+		return true
 	}
 	if evaluator, ok := a.Runtime.(RefreshEvaluator); ok && evaluator != nil {
 		return evaluator.ShouldRefresh(now, a)
@@ -4042,8 +4093,10 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 			current.LastError = refreshErrorFromError(err)
 			if unauthorized {
 				current.NextRefreshAfter = time.Time{}
+				current.NextRetryAfter = time.Time{}
 				current.Unavailable = true
-				current.Status = StatusError
+				current.Disabled = true
+				current.Status = StatusDisabled
 				current.StatusMessage = "unauthorized"
 			} else {
 				current.NextRefreshAfter = now.Add(refreshFailureBackoff)
@@ -4072,10 +4125,44 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	updated.NextRefreshAfter = time.Time{}
 	updated.LastError = nil
 	updated.UpdatedAt = now
+	clearedModels := clearUnauthorizedModelStatesAfterRefresh(updated, auth, now)
 	if m.shouldRefresh(updated, now) {
 		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
 	}
 	_, _ = m.Update(ctx, updated)
+	for _, model := range clearedModels {
+		registry.GetGlobalRegistry().ResumeClientModel(updated.ID, model)
+	}
+}
+
+func clearUnauthorizedModelStatesAfterRefresh(updated, previous *Auth, now time.Time) []string {
+	if updated == nil || previous == nil || len(previous.ModelStates) == 0 {
+		return nil
+	}
+	preserved := make(map[string]*ModelState, len(previous.ModelStates))
+	cleared := make([]string, 0)
+	for model, state := range previous.ModelStates {
+		if state == nil {
+			continue
+		}
+		if isUnauthorizedResultError(state.LastError) || strings.EqualFold(state.StatusMessage, "unauthorized") {
+			cleared = append(cleared, model)
+			continue
+		}
+		preserved[model] = state.Clone()
+	}
+	if len(cleared) == 0 {
+		return nil
+	}
+	updated.ModelStates = preserved
+	if len(preserved) == 0 {
+		updated.Unavailable = false
+		updated.NextRetryAfter = time.Time{}
+		updated.Status = StatusActive
+		updated.StatusMessage = ""
+	}
+	updated.UpdatedAt = now
+	return cleared
 }
 
 func (m *Manager) executorFor(provider string) ProviderExecutor {

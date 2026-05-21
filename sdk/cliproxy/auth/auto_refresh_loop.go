@@ -339,6 +339,9 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 	if auth == nil {
 		return time.Time{}, false
 	}
+	if auth.Disabled || auth.Status == StatusDisabled {
+		return time.Time{}, false
+	}
 	if hasUnauthorizedAuthFailure(auth) {
 		return time.Time{}, false
 	}
@@ -348,8 +351,11 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 		return time.Time{}, false
 	}
 
-	if !auth.NextRefreshAfter.IsZero() && now.Before(auth.NextRefreshAfter) {
-		return auth.NextRefreshAfter, true
+	if !auth.NextRefreshAfter.IsZero() {
+		if now.Before(auth.NextRefreshAfter) {
+			return auth.NextRefreshAfter, true
+		}
+		return now, true
 	}
 
 	if evaluator, ok := auth.Runtime.(RefreshEvaluator); ok && evaluator != nil {

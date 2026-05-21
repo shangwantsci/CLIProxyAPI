@@ -202,3 +202,37 @@ func TestManager_Update_ActiveInheritsModelStates(t *testing.T) {
 		t.Fatalf("expected BackoffLevel to be %d, got %d", backoffLevel, state.Quota.BackoffLevel)
 	}
 }
+
+func TestManager_Update_ExplicitEmptyModelStatesClearsActiveStates(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+
+	if _, err := m.Register(context.Background(), &Auth{
+		ID:       "auth-clear-model-states",
+		Provider: "claude",
+		Status:   StatusActive,
+		ModelStates: map[string]*ModelState{
+			"stale-model": {
+				Status: StatusError,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	if _, err := m.Update(context.Background(), &Auth{
+		ID:          "auth-clear-model-states",
+		Provider:    "claude",
+		Status:      StatusActive,
+		ModelStates: map[string]*ModelState{},
+	}); err != nil {
+		t.Fatalf("update auth: %v", err)
+	}
+
+	updated, ok := m.GetByID("auth-clear-model-states")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if len(updated.ModelStates) != 0 {
+		t.Fatalf("expected explicit empty ModelStates to clear active states, got %d entries", len(updated.ModelStates))
+	}
+}

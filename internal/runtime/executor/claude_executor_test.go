@@ -107,6 +107,30 @@ func TestApplyClaudeHeaders_UsesConfiguredBaselineFingerprint(t *testing.T) {
 	}
 }
 
+func TestApplyClaudeHeaders_AddsFullClaudeCodeMimicryBetas(t *testing.T) {
+	req := newClaudeHeaderTestRequest(t, http.Header{
+		"Anthropic-Beta": []string{"custom-beta"},
+	})
+	applyClaudeHeaders(req, &cliproxyauth.Auth{}, "key-betas", false, nil, &config.Config{})
+
+	got := req.Header.Get("Anthropic-Beta")
+	for _, beta := range []string{
+		"custom-beta",
+		"claude-code-20250219",
+		"oauth-2025-04-20",
+		"interleaved-thinking-2025-05-14",
+		"prompt-caching-scope-2026-01-05",
+		"effort-2025-11-24",
+		"context-management-2025-06-27",
+		"extended-cache-ttl-2025-04-11",
+		"fine-grained-tool-streaming-2025-05-14",
+	} {
+		if !strings.Contains(got, beta) {
+			t.Fatalf("Anthropic-Beta = %q, missing %s", got, beta)
+		}
+	}
+}
+
 func TestApplyClaudeHeaders_TracksHighestClaudeCLIFingerprint(t *testing.T) {
 	resetClaudeDeviceProfileCache()
 	stabilize := true
@@ -570,7 +594,7 @@ func TestApplyClaudeHeaders_LegacyModeFallsBackToRuntimeOSArchWhenMissing(t *tes
 	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.60 (external, cli)", "0.70.0", "v22.0.0", helps.MapStainlessOS(), helps.MapStainlessArch())
 }
 
-func TestApplyClaudeHeaders_UnsetStabilizationAlsoUsesLegacyRuntimeOSArchFallback(t *testing.T) {
+func TestApplyClaudeHeaders_DefaultStabilizationPinsBaselineOSArch(t *testing.T) {
 	resetClaudeDeviceProfileCache()
 
 	cfg := &config.Config{
@@ -594,15 +618,21 @@ func TestApplyClaudeHeaders_UnsetStabilizationAlsoUsesLegacyRuntimeOSArchFallbac
 	})
 	applyClaudeHeaders(req, auth, "key-unset-runtime-os-arch", false, nil, cfg)
 
-	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.60 (external, cli)", "0.70.0", "v22.0.0", helps.MapStainlessOS(), helps.MapStainlessArch())
+	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.60 (external, cli)", "0.70.0", "v22.0.0", "MacOS", "arm64")
 }
 
-func TestClaudeDeviceProfileStabilizationEnabled_DefaultFalse(t *testing.T) {
-	if helps.ClaudeDeviceProfileStabilizationEnabled(nil) {
-		t.Fatal("expected nil config to default to disabled stabilization")
+func TestClaudeDeviceProfileStabilizationEnabled_DefaultTrueUnlessDisabled(t *testing.T) {
+	if !helps.ClaudeDeviceProfileStabilizationEnabled(nil) {
+		t.Fatal("expected nil config to default to enabled stabilization")
 	}
-	if helps.ClaudeDeviceProfileStabilizationEnabled(&config.Config{}) {
-		t.Fatal("expected unset stabilize-device-profile to default to disabled stabilization")
+	if !helps.ClaudeDeviceProfileStabilizationEnabled(&config.Config{}) {
+		t.Fatal("expected unset stabilize-device-profile to default to enabled stabilization")
+	}
+	stabilize := false
+	if helps.ClaudeDeviceProfileStabilizationEnabled(&config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{StabilizeDeviceProfile: &stabilize},
+	}) {
+		t.Fatal("expected explicit false stabilize-device-profile to disable stabilization")
 	}
 }
 
@@ -1043,6 +1073,36 @@ func assertStatusErr(t *testing.T, err error, want int) {
 	}
 }
 
+func TestClaudeExecutor_ErrorExposesRetryAfterHeader(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "7")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"type":"rate_limit_error","message":"slow down"}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: []byte(`{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err == nil {
+		t.Fatalf("expected 429 error")
+	}
+	assertStatusErr(t, err, http.StatusTooManyRequests)
+	retryable, ok := err.(interface{ RetryAfter() *time.Duration })
+	if !ok || retryable.RetryAfter() == nil {
+		t.Fatalf("expected error to expose RetryAfter")
+	}
+	if got := *retryable.RetryAfter(); got != 7*time.Second {
+		t.Fatalf("RetryAfter() = %v, want 7s", got)
+	}
+}
+
 func TestStripClaudeToolPrefixFromResponse_NestedToolReference(t *testing.T) {
 	input := []byte(`{"content":[{"type":"tool_result","tool_use_id":"toolu_123","content":[{"type":"tool_reference","tool_name":"proxy_mcp__nia__manage_resource"}]}]}`)
 	out := stripClaudeToolPrefixFromResponse(input, "proxy_")
@@ -1248,6 +1308,65 @@ func TestClaudeExecutor_CountTokens_AppliesCacheControlGuards(t *testing.T) {
 	}
 	if hasTTLOrderingViolation(seenBody) {
 		t.Fatalf("count_tokens body still has ttl ordering violations: %s", string(seenBody))
+	}
+}
+
+func TestClaudeExecutor_CountTokens_AppliesClaudeCodeCloaking(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"input_tokens":42}`))
+	}))
+	defer server.Close()
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginReq := httptest.NewRequest(http.MethodPost, "http://localhost/v1/messages/count_tokens", nil)
+	ginReq.Header.Set("User-Agent", "curl/8.7.1")
+	ginCtx.Request = ginReq
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"base_url": server.URL,
+		},
+		Metadata: map[string]any{
+			"access_token": "sk-ant-oat-test-token",
+		},
+	}
+	payload := []byte(`{
+		"system": "Use the project instructions.",
+		"messages": [{"role":"user","content":"hi"}]
+	}`)
+
+	_, err := executor.CountTokens(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("CountTokens error: %v", err)
+	}
+
+	if !helps.IsValidUserID(gjson.GetBytes(seenBody, "metadata.user_id").String()) {
+		t.Fatalf("count_tokens body should include valid Claude Code metadata.user_id: %s", string(seenBody))
+	}
+	blocks := gjson.GetBytes(seenBody, "system").Array()
+	if len(blocks) != 3 {
+		t.Fatalf("count_tokens system blocks = %d, want 3: %s", len(blocks), string(seenBody))
+	}
+	billingHeader := blocks[0].Get("text").String()
+	if !strings.HasPrefix(billingHeader, "x-anthropic-billing-header:") {
+		t.Fatalf("count_tokens billing header missing: %q", billingHeader)
+	}
+	if strings.Contains(billingHeader, "cch=00000;") {
+		t.Fatalf("count_tokens billing header should be signed, got %q", billingHeader)
+	}
+	if blocks[1].Get("text").String() != "You are Claude Code, Anthropic's official CLI for Claude." {
+		t.Fatalf("count_tokens agent block mismatch: %q", blocks[1].Get("text").String())
 	}
 }
 

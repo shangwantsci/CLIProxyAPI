@@ -25,11 +25,26 @@ type ClaudeTokenStorage struct {
 	// RefreshToken is used to obtain new access tokens when the current one expires.
 	RefreshToken string `json:"refresh_token"`
 
+	// TokenType is the OAuth token type returned by Claude.
+	TokenType string `json:"token_type,omitempty"`
+
+	// ExpiresIn is the token lifetime returned by Claude, in seconds.
+	ExpiresIn int `json:"expires_in,omitempty"`
+
 	// LastRefresh is the timestamp of the last token refresh operation.
 	LastRefresh string `json:"last_refresh"`
 
 	// Email is the Anthropic account email address associated with this token.
 	Email string `json:"email"`
+
+	// OrganizationUUID is the Claude organization selected during OAuth.
+	OrganizationUUID string `json:"organization_uuid,omitempty"`
+
+	// AccountUUID is the Claude account UUID returned during OAuth.
+	AccountUUID string `json:"account_uuid,omitempty"`
+
+	// Scope is the granted OAuth scope.
+	Scope string `json:"scope,omitempty"`
 
 	// Type indicates the authentication provider type, always "claude" for this storage.
 	Type string `json:"type"`
