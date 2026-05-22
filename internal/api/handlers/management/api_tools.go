@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -210,11 +211,122 @@ func (h *Handler) APICall(c *gin.Context) {
 		return
 	}
 
+	h.recordClaudeOAuthProbeResult(c.Request.Context(), auth, parsedURL, resp.StatusCode, resp.Header, respBody)
+
 	c.JSON(http.StatusOK, apiCallResponse{
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header,
 		Body:       string(respBody),
 	})
+}
+
+func (h *Handler) recordClaudeOAuthProbeResult(ctx context.Context, auth *coreauth.Auth, parsedURL *url.URL, statusCode int, headers http.Header, body []byte) {
+	if h == nil || h.authManager == nil || auth == nil || parsedURL == nil {
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "claude") {
+		return
+	}
+	if !isClaudeOAuthProbeURL(parsedURL) {
+		return
+	}
+	if statusCode != http.StatusUnauthorized && statusCode != http.StatusForbidden && statusCode != http.StatusTooManyRequests {
+		return
+	}
+
+	now := time.Now()
+	code, message := claudeOAuthProbeError(statusCode, body)
+	updated := auth.Clone()
+	updated.LastError = &coreauth.Error{
+		Code:       code,
+		Message:    message,
+		Retryable:  statusCode == http.StatusTooManyRequests,
+		HTTPStatus: statusCode,
+	}
+	updated.StatusMessage = message
+	updated.UpdatedAt = now
+
+	switch statusCode {
+	case http.StatusUnauthorized:
+		updated.Disabled = true
+		updated.Status = coreauth.StatusDisabled
+		updated.Unavailable = true
+		updated.NextRetryAfter = time.Time{}
+	case http.StatusForbidden:
+		updated.Disabled = true
+		updated.Status = coreauth.StatusDisabled
+		updated.Unavailable = true
+		updated.NextRetryAfter = time.Time{}
+	case http.StatusTooManyRequests:
+		next := claudeOAuthRetryAfter(headers, now)
+		updated.Status = coreauth.StatusError
+		updated.Unavailable = true
+		updated.NextRetryAfter = next
+		updated.Quota.Exceeded = true
+		updated.Quota.Reason = message
+		updated.Quota.NextRecoverAt = next
+	}
+
+	_, _ = h.authManager.Update(ctx, updated)
+}
+
+func isClaudeOAuthProbeURL(parsedURL *url.URL) bool {
+	if parsedURL == nil {
+		return false
+	}
+	path := strings.TrimRight(strings.ToLower(strings.TrimSpace(parsedURL.Path)), "/")
+	return path == "/api/oauth/profile" || path == "/api/oauth/usage"
+}
+
+func claudeOAuthProbeError(statusCode int, body []byte) (string, string) {
+	code := "upstream_error"
+	switch statusCode {
+	case http.StatusUnauthorized:
+		code = "unauthorized"
+	case http.StatusForbidden:
+		code = "forbidden"
+	case http.StatusTooManyRequests:
+		code = "rate_limited"
+	}
+	message := http.StatusText(statusCode)
+
+	var payload struct {
+		Error struct {
+			Type    string         `json:"type"`
+			Message string         `json:"message"`
+			Details map[string]any `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &payload); err == nil {
+		if detailCode, ok := payload.Error.Details["error_code"].(string); ok && strings.TrimSpace(detailCode) != "" {
+			code = strings.TrimSpace(detailCode)
+		} else if strings.TrimSpace(payload.Error.Type) != "" && code == "upstream_error" {
+			code = strings.TrimSpace(payload.Error.Type)
+		}
+		if strings.TrimSpace(payload.Error.Message) != "" {
+			message = strings.TrimSpace(payload.Error.Message)
+		}
+	}
+	if message == "" {
+		message = code
+	}
+	return code, message
+}
+
+func claudeOAuthRetryAfter(headers http.Header, now time.Time) time.Time {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	raw := strings.TrimSpace(headers.Get("Retry-After"))
+	if raw != "" {
+		if seconds, err := strconv.Atoi(raw); err == nil && seconds > 0 {
+			return now.Add(time.Duration(seconds) * time.Second)
+		}
+		if when, err := http.ParseTime(raw); err == nil && when.After(now) {
+			return when
+		}
+	}
+	return now.Add(30 * time.Minute)
 }
 
 func firstNonEmptyString(values ...*string) string {
