@@ -280,6 +280,56 @@ func TestAPICallRecordsClaudeOAuthAccountBanned(t *testing.T) {
 	}
 }
 
+func TestAPICallRecordsClaudeOAuthOrganizationDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"invalid_request_error","message":"This organization has been disabled."},"request_id":"req_123"}`))
+	}))
+	defer upstream.Close()
+
+	manager := coreauth.NewManager(&memoryAuthStore{}, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "claude-org-disabled",
+		FileName: "claude-org-disabled.json",
+		Provider: "claude",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{
+			"type":         "claude",
+			"access_token": "access-token",
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	authIndex := auth.EnsureIndex()
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	body := fmt.Sprintf(`{"auth_index":%q,"method":"GET","url":%q,"header":{"Authorization":"Bearer $TOKEN$"}}`, authIndex, upstream.URL+"/api/oauth/profile")
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/api-call", strings.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	h.APICall(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	updated := h.authByIndex(authIndex)
+	if updated == nil {
+		t.Fatal("updated auth not found")
+	}
+	if !updated.Disabled || updated.Status != coreauth.StatusDisabled {
+		t.Fatalf("disabled/status = %v/%s, want true/disabled", updated.Disabled, updated.Status)
+	}
+	if updated.LastError == nil || updated.LastError.Code != "organization_disabled" || updated.LastError.HTTPStatus != http.StatusBadRequest {
+		t.Fatalf("LastError = %#v, want organization_disabled 400", updated.LastError)
+	}
+}
+
 func TestAPICallRecordsClaudeOAuthRateLimit(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

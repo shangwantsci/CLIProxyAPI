@@ -2181,7 +2181,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				clearAuthStateOnSuccess(auth, now)
 			}
 		} else {
-			if result.Model != "" {
+			if applyPermanentAuthDisabledState(auth, result.Error, result.Model, now) {
+				// Permanent account/organization failures must remove the credential from rotation.
+			} else if result.Model != "" {
 				if !isRequestScopedNotFoundResultError(result.Error) {
 					disableCooling := quotaCooldownDisabledForAuth(auth)
 					state := ensureModelState(auth, result.Model)
@@ -2543,6 +2545,126 @@ func isPermanentAuthErrorMessage(raw string) bool {
 	return false
 }
 
+func permanentAuthDisabledDetails(statusCode int, rawMessage string) (string, string, bool) {
+	if statusCode != 0 && statusCode != http.StatusBadRequest && statusCode != http.StatusForbidden {
+		return "", "", false
+	}
+
+	message := strings.TrimSpace(rawMessage)
+	combined := strings.ToLower(message)
+	var payload struct {
+		Error struct {
+			Type    string         `json:"type"`
+			Message string         `json:"message"`
+			Details map[string]any `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(message), &payload); err == nil {
+		if trimmed := strings.TrimSpace(payload.Error.Message); trimmed != "" {
+			message = trimmed
+		}
+		if trimmed := strings.TrimSpace(payload.Error.Type); trimmed != "" {
+			combined += " " + strings.ToLower(trimmed)
+		}
+		if payload.Error.Details != nil {
+			if rawCode, ok := payload.Error.Details["error_code"].(string); ok {
+				combined += " " + strings.ToLower(strings.TrimSpace(rawCode))
+			}
+		}
+	}
+
+	if strings.Contains(combined, "account_banned") {
+		if message == "" || strings.HasPrefix(message, "{") {
+			message = "Claude account has been banned or disabled."
+		}
+		return "account_banned", message, true
+	}
+	if strings.Contains(combined, "organization_disabled") ||
+		strings.Contains(combined, "organization has been disabled") ||
+		strings.Contains(combined, "this organization has been disabled") {
+		if message == "" || strings.HasPrefix(message, "{") {
+			message = "This organization has been disabled."
+		}
+		return "organization_disabled", message, true
+	}
+	if strings.Contains(combined, "account_disabled") ||
+		strings.Contains(combined, "account has been disabled") ||
+		strings.Contains(combined, "user account is disabled") {
+		if message == "" || strings.HasPrefix(message, "{") {
+			message = "Claude account has been disabled."
+		}
+		return "account_disabled", message, true
+	}
+	return "", "", false
+}
+
+func permanentAuthDisabledDetailsFromResult(err *Error) (string, string, bool) {
+	if err == nil {
+		return "", "", false
+	}
+	statusCode := statusCodeFromResult(err)
+	if err.Code != "" {
+		code, message, ok := permanentAuthDisabledDetails(statusCode, err.Code+" "+err.Message)
+		if ok {
+			return code, message, true
+		}
+	}
+	return permanentAuthDisabledDetails(statusCode, err.Message)
+}
+
+func isPermanentAuthDisabledError(err error) bool {
+	if err == nil {
+		return false
+	}
+	_, _, ok := permanentAuthDisabledDetails(statusCodeFromError(err), err.Error())
+	return ok
+}
+
+func applyPermanentAuthDisabledState(auth *Auth, resultErr *Error, model string, now time.Time) bool {
+	if auth == nil {
+		return false
+	}
+	code, message, ok := permanentAuthDisabledDetailsFromResult(resultErr)
+	if !ok {
+		return false
+	}
+
+	lastError := cloneError(resultErr)
+	if lastError == nil {
+		lastError = &Error{}
+	}
+	lastError.Code = code
+	lastError.Message = message
+	lastError.Retryable = false
+	if lastError.HTTPStatus == 0 {
+		lastError.HTTPStatus = statusCodeFromResult(resultErr)
+	}
+
+	auth.Disabled = true
+	auth.Unavailable = true
+	auth.Status = StatusDisabled
+	auth.StatusMessage = message
+	auth.LastError = lastError
+	auth.NextRetryAfter = time.Time{}
+	auth.NextRefreshAfter = time.Time{}
+	auth.Quota = QuotaState{}
+	auth.UpdatedAt = now
+
+	if model != "" {
+		state := ensureModelState(auth, model)
+		if state != nil {
+			state.Status = StatusDisabled
+			state.StatusMessage = message
+			state.Unavailable = true
+			state.NextRetryAfter = time.Time{}
+			state.LastError = cloneError(lastError)
+			state.Quota = QuotaState{}
+			state.UpdatedAt = now
+		}
+	}
+	return true
+}
+
 func refreshErrorFromError(err error) *Error {
 	if err == nil {
 		return nil
@@ -2668,6 +2790,9 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 // routing can fall through to another auth or upstream.
 func isRequestInvalidError(err error) bool {
 	if err == nil {
+		return false
+	}
+	if isPermanentAuthDisabledError(err) {
 		return false
 	}
 	if isModelSupportError(err) {

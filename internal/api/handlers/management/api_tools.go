@@ -230,12 +230,14 @@ func (h *Handler) recordClaudeOAuthProbeResult(ctx context.Context, auth *coreau
 	if !isClaudeOAuthProbeURL(parsedURL) {
 		return
 	}
-	if statusCode != http.StatusUnauthorized && statusCode != http.StatusForbidden && statusCode != http.StatusTooManyRequests {
-		return
-	}
-
 	now := time.Now()
 	code, message := claudeOAuthProbeError(statusCode, body)
+	if statusCode == http.StatusBadRequest && !isClaudePermanentAccountError(code, message) {
+		return
+	}
+	if statusCode != http.StatusBadRequest && statusCode != http.StatusUnauthorized && statusCode != http.StatusForbidden && statusCode != http.StatusTooManyRequests {
+		return
+	}
 	updated := auth.Clone()
 	updated.LastError = &coreauth.Error{
 		Code:       code,
@@ -253,6 +255,11 @@ func (h *Handler) recordClaudeOAuthProbeResult(ctx context.Context, auth *coreau
 		updated.Unavailable = true
 		updated.NextRetryAfter = time.Time{}
 	case http.StatusForbidden:
+		updated.Disabled = true
+		updated.Status = coreauth.StatusDisabled
+		updated.Unavailable = true
+		updated.NextRetryAfter = time.Time{}
+	case http.StatusBadRequest:
 		updated.Disabled = true
 		updated.Status = coreauth.StatusDisabled
 		updated.Unavailable = true
@@ -307,10 +314,50 @@ func claudeOAuthProbeError(statusCode int, body []byte) (string, string) {
 			message = strings.TrimSpace(payload.Error.Message)
 		}
 	}
+	if normalizedCode, normalizedMessage, ok := normalizeClaudePermanentAccountError(code, message); ok {
+		code = normalizedCode
+		message = normalizedMessage
+	}
 	if message == "" {
 		message = code
 	}
 	return code, message
+}
+
+func normalizeClaudePermanentAccountError(code, message string) (string, string, bool) {
+	raw := strings.ToLower(strings.TrimSpace(code + " " + message))
+	if raw == "" {
+		return "", "", false
+	}
+	trimmedMessage := strings.TrimSpace(message)
+	if strings.Contains(raw, "account_banned") {
+		if trimmedMessage == "" {
+			trimmedMessage = "Claude account has been banned or disabled."
+		}
+		return "account_banned", trimmedMessage, true
+	}
+	if strings.Contains(raw, "organization_disabled") ||
+		strings.Contains(raw, "organization has been disabled") ||
+		strings.Contains(raw, "this organization has been disabled") {
+		if trimmedMessage == "" {
+			trimmedMessage = "This organization has been disabled."
+		}
+		return "organization_disabled", trimmedMessage, true
+	}
+	if strings.Contains(raw, "account_disabled") ||
+		strings.Contains(raw, "account has been disabled") ||
+		strings.Contains(raw, "user account is disabled") {
+		if trimmedMessage == "" {
+			trimmedMessage = "Claude account has been disabled."
+		}
+		return "account_disabled", trimmedMessage, true
+	}
+	return "", "", false
+}
+
+func isClaudePermanentAccountError(code, message string) bool {
+	_, _, ok := normalizeClaudePermanentAccountError(code, message)
+	return ok
 }
 
 func claudeOAuthRetryAfter(headers http.Header, now time.Time) time.Time {
