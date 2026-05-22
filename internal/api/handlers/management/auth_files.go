@@ -542,6 +542,17 @@ func addClaudeAuthHealthFields(entry gin.H, auth *coreauth.Auth, now time.Time) 
 	}
 	healthStatus := claudeAuthHealthStatus(auth, now)
 	entry["health_status"] = healthStatus
+	entry["quota"] = auth.Quota
+	entry["quota_exceeded"] = auth.Quota.Exceeded
+	if auth.Quota.Reason != "" {
+		entry["quota_reason"] = auth.Quota.Reason
+	}
+	if !auth.Quota.NextRecoverAt.IsZero() {
+		entry["quota_next_recover_at"] = auth.Quota.NextRecoverAt
+	}
+	if !auth.NextRefreshAfter.IsZero() {
+		entry["next_refresh_after"] = auth.NextRefreshAfter
+	}
 	if expiresAt, ok := auth.ExpirationTime(); ok {
 		entry["expires_at"] = expiresAt
 		seconds := int64(expiresAt.Sub(now).Seconds())
@@ -572,6 +583,31 @@ func addClaudeAuthHealthFields(entry gin.H, auth *coreauth.Auth, now time.Time) 
 		if updatedAt, ok := auth.Metadata["claude_device_profile_updated_at"]; ok && updatedAt != nil {
 			entry["claude_device_profile_updated_at"] = updatedAt
 		}
+	}
+	if len(auth.ModelStates) > 0 {
+		models := make(map[string]gin.H, len(auth.ModelStates))
+		for model, state := range auth.ModelStates {
+			if state == nil {
+				continue
+			}
+			item := gin.H{
+				"status":      state.Status,
+				"unavailable": state.Unavailable,
+				"quota":       state.Quota,
+				"updated_at":  state.UpdatedAt,
+			}
+			if state.StatusMessage != "" {
+				item["status_message"] = state.StatusMessage
+			}
+			if !state.NextRetryAfter.IsZero() {
+				item["next_retry_after"] = state.NextRetryAfter
+			}
+			if state.LastError != nil {
+				item["last_error"] = state.LastError
+			}
+			models[model] = item
+		}
+		entry["model_states"] = models
 	}
 }
 
@@ -1737,8 +1773,10 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		return
 	}
 
+	proxyURL := strings.TrimSpace(c.Query("proxy_url"))
+
 	// Initialize Claude auth service
-	anthropicAuth := claude.NewClaudeAuth(h.cfg)
+	anthropicAuth := claude.NewClaudeAuthWithProxyURL(h.cfg, proxyURL)
 
 	isWebUI := isWebUIRequest(c)
 
@@ -1833,12 +1871,17 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 			accountID = fmt.Sprintf("oauth-%d", time.Now().Unix())
 		}
 		fileName := fmt.Sprintf("claude-%s.json", accountID)
+		metadata := defaultClaudeAuthMetadata(tokenStorage.Email)
+		if proxyURL != "" {
+			metadata["proxy_url"] = proxyURL
+		}
 		record := &coreauth.Auth{
 			ID:       fileName,
 			Provider: "claude",
 			FileName: fileName,
 			Storage:  tokenStorage,
-			Metadata: defaultClaudeAuthMetadata(tokenStorage.Email),
+			ProxyURL: proxyURL,
+			Metadata: metadata,
 			Attributes: map[string]string{
 				"cloak_mode":          "auto",
 				"cloak_cache_user_id": "true",
@@ -1860,7 +1903,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		CompleteOAuthSessionsByProvider("anthropic")
 	}()
 
-	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
+	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state, "proxy_url": proxyURL})
 }
 
 func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {

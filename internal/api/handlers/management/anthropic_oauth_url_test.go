@@ -47,3 +47,29 @@ func TestRequestAnthropicTokenWebUIUsesPlatformOAuthURL(t *testing.T) {
 		t.Fatalf("scope = %q, want org:create_api_key for platform OAuth", scope)
 	}
 }
+
+func TestRequestAnthropicTokenReturnsProxyURL(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir(), Port: 8317}, nil)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/anthropic-auth-url?is_webui=true&proxy_url=socks5%3A%2F%2F127.0.0.1%3A1080", nil)
+
+	h.RequestAnthropicToken(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("RequestAnthropicToken status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	var response struct {
+		State    string `json:"state"`
+		ProxyURL string `json:"proxy_url"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	defer CompleteOAuthSession(response.State)
+	if response.ProxyURL != "socks5://127.0.0.1:1080" {
+		t.Fatalf("proxy_url = %q, want socks5 proxy", response.ProxyURL)
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -262,8 +263,82 @@ func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth) 
 		token, errToken := h.refreshAntigravityOAuthAccessToken(ctx, auth)
 		return token, errToken
 	}
+	if provider == "claude" {
+		token, errToken := h.refreshClaudeOAuthAccessToken(ctx, auth)
+		return token, errToken
+	}
 
 	return tokenValueForAuth(auth), nil
+}
+
+func (h *Handler) refreshClaudeOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if auth == nil {
+		return "", nil
+	}
+
+	current := strings.TrimSpace(tokenValueFromMetadata(auth.Metadata))
+	if current != "" {
+		if expiresAt, ok := auth.ExpirationTime(); !ok || expiresAt.After(time.Now().Add(30*time.Second)) {
+			return current, nil
+		}
+	}
+
+	refreshToken := stringValue(auth.Metadata, "refresh_token")
+	if refreshToken == "" {
+		return current, fmt.Errorf("claude refresh token missing")
+	}
+
+	authSvc := claudeauth.NewClaudeAuthWithProxyURL(h.cfg, strings.TrimSpace(auth.ProxyURL))
+	tokenData, errRefresh := authSvc.RefreshTokensWithRetry(ctx, refreshToken, 2)
+	if errRefresh != nil {
+		return current, errRefresh
+	}
+	if tokenData == nil || strings.TrimSpace(tokenData.AccessToken) == "" {
+		return current, fmt.Errorf("claude token refresh returned empty access_token")
+	}
+
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	now := time.Now()
+	auth.Metadata["access_token"] = strings.TrimSpace(tokenData.AccessToken)
+	if strings.TrimSpace(tokenData.RefreshToken) != "" {
+		auth.Metadata["refresh_token"] = strings.TrimSpace(tokenData.RefreshToken)
+	}
+	if strings.TrimSpace(tokenData.TokenType) != "" {
+		auth.Metadata["token_type"] = strings.TrimSpace(tokenData.TokenType)
+	}
+	if tokenData.ExpiresIn > 0 {
+		auth.Metadata["expires_in"] = tokenData.ExpiresIn
+	}
+	if strings.TrimSpace(tokenData.Expire) != "" {
+		auth.Metadata["expired"] = strings.TrimSpace(tokenData.Expire)
+	}
+	if strings.TrimSpace(tokenData.Email) != "" {
+		auth.Metadata["email"] = strings.TrimSpace(tokenData.Email)
+	}
+	if strings.TrimSpace(tokenData.OrganizationUUID) != "" {
+		auth.Metadata["organization_uuid"] = strings.TrimSpace(tokenData.OrganizationUUID)
+	}
+	if strings.TrimSpace(tokenData.AccountUUID) != "" {
+		auth.Metadata["account_uuid"] = strings.TrimSpace(tokenData.AccountUUID)
+	}
+	if strings.TrimSpace(tokenData.Scope) != "" {
+		auth.Metadata["scope"] = strings.TrimSpace(tokenData.Scope)
+	}
+	auth.Metadata["last_refresh"] = now.Format(time.RFC3339)
+	auth.Metadata["type"] = "claude"
+
+	if h != nil && h.authManager != nil {
+		auth.LastRefreshedAt = now
+		auth.UpdatedAt = now
+		_, _ = h.authManager.Update(ctx, auth)
+	}
+
+	return strings.TrimSpace(tokenData.AccessToken), nil
 }
 
 func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {

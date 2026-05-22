@@ -26,6 +26,11 @@ func TestListClaudeAuthHealth_ExposesClaudeAccountRuntimeState(t *testing.T) {
 		Provider: "claude",
 		Status:   coreauth.StatusActive,
 		ProxyURL: "socks5://127.0.0.1:1080",
+		Quota: coreauth.QuotaState{
+			Exceeded:      true,
+			Reason:        "rate limited",
+			NextRecoverAt: time.Now().UTC().Add(15 * time.Minute),
+		},
 		Attributes: map[string]string{
 			"path": "claude-1.json",
 		},
@@ -83,5 +88,11 @@ func TestListClaudeAuthHealth_ExposesClaudeAccountRuntimeState(t *testing.T) {
 	}
 	if seconds, _ := account["seconds_until_expiration"].(float64); seconds <= 0 {
 		t.Fatalf("seconds_until_expiration = %v, want positive", account["seconds_until_expiration"])
+	}
+	if got, _ := account["quota_exceeded"].(bool); !got {
+		t.Fatalf("quota_exceeded = %v, want true", account["quota_exceeded"])
+	}
+	if got, _ := account["quota_reason"].(string); got != "rate limited" {
+		t.Fatalf("quota_reason = %q, want rate limited", got)
 	}
 }
