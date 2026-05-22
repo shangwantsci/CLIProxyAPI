@@ -18,6 +18,7 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 )
@@ -231,6 +232,11 @@ func (h *Handler) recordClaudeOAuthProbeResult(ctx context.Context, auth *coreau
 		return
 	}
 	now := time.Now()
+	if isClaudeOAuthUsageURL(parsedURL) && statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices {
+		h.recordClaudeOAuthUsageSuccess(ctx, auth, body, now)
+		return
+	}
+
 	code, message := claudeOAuthProbeError(statusCode, body)
 	if statusCode == http.StatusBadRequest && !isClaudePermanentAccountError(code, message) {
 		return
@@ -283,6 +289,176 @@ func isClaudeOAuthProbeURL(parsedURL *url.URL) bool {
 	}
 	path := strings.TrimRight(strings.ToLower(strings.TrimSpace(parsedURL.Path)), "/")
 	return path == "/api/oauth/profile" || path == "/api/oauth/usage"
+}
+
+func isClaudeOAuthUsageURL(parsedURL *url.URL) bool {
+	if parsedURL == nil {
+		return false
+	}
+	path := strings.TrimRight(strings.ToLower(strings.TrimSpace(parsedURL.Path)), "/")
+	return path == "/api/oauth/usage"
+}
+
+func (h *Handler) recordClaudeOAuthUsageSuccess(ctx context.Context, auth *coreauth.Auth, body []byte, now time.Time) {
+	if h == nil || h.authManager == nil || auth == nil || auth.Disabled || auth.Status == coreauth.StatusDisabled {
+		return
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	usage, ok := claudeOAuthUsageQuotaState(body, now)
+	if !ok {
+		return
+	}
+
+	updated := auth.Clone()
+	updated.UpdatedAt = now
+	if usage.exceeded {
+		updated.Disabled = false
+		updated.Status = coreauth.StatusError
+		updated.StatusMessage = usage.reason
+		updated.Unavailable = true
+		updated.NextRetryAfter = usage.recoverAt
+		updated.Quota = coreauth.QuotaState{
+			Exceeded:      true,
+			Reason:        usage.reason,
+			NextRecoverAt: usage.recoverAt,
+		}
+		updated.LastError = &coreauth.Error{
+			Code:       "quota_exhausted",
+			Message:    usage.reason,
+			Retryable:  true,
+			HTTPStatus: http.StatusOK,
+		}
+		_, _ = h.authManager.Update(ctx, updated)
+		return
+	}
+
+	if !isClaudeOAuthQuotaCooldown(auth) {
+		return
+	}
+	updated.Status = coreauth.StatusActive
+	updated.StatusMessage = ""
+	updated.Unavailable = false
+	updated.NextRetryAfter = time.Time{}
+	updated.Quota = coreauth.QuotaState{}
+	updated.LastError = nil
+	_, _ = h.authManager.Update(ctx, updated)
+}
+
+type claudeOAuthUsageProbeState struct {
+	exceeded  bool
+	reason    string
+	recoverAt time.Time
+}
+
+var claudeOAuthUsageWindowKeys = []string{
+	"five_hour",
+	"seven_day",
+	"seven_day_oauth_apps",
+	"seven_day_opus",
+	"seven_day_sonnet",
+	"seven_day_cowork",
+	"iguana_necktie",
+}
+
+func claudeOAuthUsageQuotaState(body []byte, now time.Time) (claudeOAuthUsageProbeState, bool) {
+	if !gjson.ValidBytes(body) {
+		return claudeOAuthUsageProbeState{}, false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	var exhausted []string
+	recoverAt := time.Time{}
+	seenWindow := false
+	for _, key := range claudeOAuthUsageWindowKeys {
+		window := gjson.GetBytes(body, key)
+		if !window.Exists() || !window.IsObject() {
+			continue
+		}
+		utilization := window.Get("utilization")
+		if !utilization.Exists() {
+			continue
+		}
+		seenWindow = true
+		if utilization.Float() < 99.999 {
+			continue
+		}
+		resetAt := parseClaudeUsageResetTime(window.Get("resets_at"), now)
+		if resetAt.IsZero() {
+			resetAt = now.Add(30 * time.Minute)
+		}
+		if resetAt.Before(now) {
+			resetAt = now
+		}
+		exhausted = append(exhausted, key)
+		if recoverAt.IsZero() || resetAt.Before(recoverAt) {
+			recoverAt = resetAt
+		}
+	}
+	if !seenWindow {
+		return claudeOAuthUsageProbeState{}, false
+	}
+	if len(exhausted) == 0 {
+		return claudeOAuthUsageProbeState{}, true
+	}
+	return claudeOAuthUsageProbeState{
+		exceeded:  true,
+		reason:    "Claude quota exhausted: " + strings.Join(exhausted, ", "),
+		recoverAt: recoverAt,
+	}, true
+}
+
+func parseClaudeUsageResetTime(value gjson.Result, now time.Time) time.Time {
+	if !value.Exists() {
+		return time.Time{}
+	}
+	if value.Type == gjson.Number {
+		raw := value.Int()
+		if raw <= 0 {
+			return time.Time{}
+		}
+		if raw > 1e12 {
+			return time.UnixMilli(raw)
+		}
+		return time.Unix(raw, 0)
+	}
+	raw := strings.TrimSpace(value.String())
+	if raw == "" {
+		return time.Time{}
+	}
+	if numeric, errParse := strconv.ParseInt(raw, 10, 64); errParse == nil && numeric > 0 {
+		if numeric > 1e12 {
+			return time.UnixMilli(numeric)
+		}
+		return time.Unix(numeric, 0)
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if parsed, errParse := time.Parse(layout, raw); errParse == nil {
+			return parsed
+		}
+	}
+	if parsed, errParse := http.ParseTime(raw); errParse == nil {
+		return parsed
+	}
+	_ = now
+	return time.Time{}
+}
+
+func isClaudeOAuthQuotaCooldown(auth *coreauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if auth.Quota.Exceeded {
+		return true
+	}
+	if auth.LastError == nil {
+		return false
+	}
+	code := strings.ToLower(strings.TrimSpace(auth.LastError.Code))
+	return code == "quota_exhausted" || code == "rate_limited"
 }
 
 func claudeOAuthProbeError(statusCode int, body []byte) (string, string) {

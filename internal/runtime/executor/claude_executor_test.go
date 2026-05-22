@@ -2671,6 +2671,87 @@ func TestRemapOAuthToolNames_HermesMCPToolNamespacedAndReversed(t *testing.T) {
 	}
 }
 
+func TestRemapOAuthToolNames_KnownMuseToolsMappedAndReversed(t *testing.T) {
+	body := []byte(`{
+		"tools":[
+			{"name":"cronjob","description":"Schedule a job","input_schema":{"type":"object","properties":{"wake_at":{"type":"string"}},"required":["wake_at"]}},
+			{"name":"delegate_task","description":"Delegate work","input_schema":{"type":"object","properties":{"agent_id":{"type":"string"},"prompt":{"type":"string"}}}},
+			{"name":"skill_view","description":"View skill","input_schema":{"type":"object","properties":{"skill":{"type":"string"}}}}
+		],
+		"tool_choice":{"type":"any"},
+		"messages":[{"role":"assistant","content":[
+			{"type":"tool_use","id":"toolu_01","name":"cronjob","input":{"wake_at":"2026-05-22T12:00:00Z"}},
+			{"type":"tool_use","id":"toolu_02","name":"delegate_task","input":{"agent_id":"worker-1","prompt":"do it"}},
+			{"type":"tool_use","id":"toolu_03","name":"skill_view","input":{"skill":"frontend"}}
+		]}]
+	}`)
+
+	out, reverseMap := remapOAuthToolNames(body)
+
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "Scheduler" {
+		t.Fatalf("tools.0.name = %q, want Scheduler", got)
+	}
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "Task" {
+		t.Fatalf("tools.1.name = %q, want Task", got)
+	}
+	if got := gjson.GetBytes(out, "tools.2.name").String(); got != "Skill" {
+		t.Fatalf("tools.2.name = %q, want Skill", got)
+	}
+	if got := gjson.GetBytes(out, "tool_choice.type").String(); got != "auto" {
+		t.Fatalf("tool_choice.type = %q, want auto", got)
+	}
+	if got := gjson.GetBytes(out, "tools.0.description").String(); got != "" {
+		t.Fatalf("tools.0.description = %q, want stripped description", got)
+	}
+	if !gjson.GetBytes(out, "tools.0.input_schema.properties.trigger_at").Exists() {
+		t.Fatalf("wake_at should be renamed to trigger_at: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.input.trigger_at").String(); got == "" {
+		t.Fatalf("tool input trigger_at should exist: %s", string(out))
+	}
+	if reverseMap.ToolNames["Scheduler"] != "cronjob" || reverseMap.ToolNames["Task"] != "delegate_task" || reverseMap.ToolNames["Skill"] != "skill_view" {
+		t.Fatalf("reverseMap.ToolNames = %v, want Scheduler/Task/Skill mappings", reverseMap.ToolNames)
+	}
+
+	resp := []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"Scheduler","input":{"trigger_at":"2026-05-22T12:00:00Z"}}]}`)
+	reversed := reverseRemapOAuthToolNames(resp, reverseMap)
+	if got := gjson.GetBytes(reversed, "content.0.name").String(); got != "cronjob" {
+		t.Fatalf("content.0.name = %q, want cronjob", got)
+	}
+	if got := gjson.GetBytes(reversed, "content.0.input.wake_at").String(); got == "" {
+		t.Fatalf("trigger_at should be restored to wake_at: %s", string(reversed))
+	}
+}
+
+func TestPrepareClaudeOAuthToolNamesForUpstream_StripsForwardedThinkingBlocks(t *testing.T) {
+	body := []byte(`{
+		"messages":[{
+			"role":"assistant",
+			"content":[
+				{"type":"text","text":"visible answer"},
+				{"type":"thinking","thinking":"old private reasoning","signature":"bad-signature"},
+				{"type":"tool_use","id":"toolu_01","name":"bash","input":{"command":"pwd"}}
+			]
+		}],
+		"tools":[{"name":"bash","input_schema":{"type":"object","properties":{"command":{"type":"string"}}}}]
+	}`)
+
+	out, reverseMap := prepareClaudeOAuthToolNamesForUpstream(body, "", true)
+
+	if gjson.GetBytes(out, "messages.0.content.#(type==\"thinking\")").Exists() {
+		t.Fatalf("thinking block should be stripped before OAuth upstream request: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.#(type==\"text\").text").String(); got != "visible answer" {
+		t.Fatalf("text block = %q, want visible answer", got)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.#(type==\"tool_use\").name").String(); got != "Bash" {
+		t.Fatalf("tool_use name = %q, want Bash", got)
+	}
+	if reverseMap.ToolNames["Bash"] != "bash" {
+		t.Fatalf("reverseMap.ToolNames = %v, want Bash->bash", reverseMap.ToolNames)
+	}
+}
+
 // TestRemapOAuthToolNames_MixedCase_OnlyRenamedToolsReversed is the regression
 // test for a case where a single request contains both a TitleCase tool (which
 // must pass through unchanged) and a lowercase tool that we forward-rename.

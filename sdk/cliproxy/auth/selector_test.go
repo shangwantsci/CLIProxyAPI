@@ -313,6 +313,45 @@ func TestIsAuthBlockedForModel_UnavailableWithoutNextRetryIsNotBlocked(t *testin
 	}
 }
 
+func TestIsAuthBlockedForModel_AuthLevelQuotaCooldownBlocksModelRoute(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	recoverAt := now.Add(2 * time.Hour)
+	auth := &Auth{
+		ID:              "claude-limited",
+		Unavailable:     true,
+		NextRetryAfter:  recoverAt,
+		Quota:           QuotaState{Exceeded: true, NextRecoverAt: recoverAt},
+		Status:          StatusError,
+		StatusMessage:   "Claude quota exhausted: five_hour",
+		ModelStates:     map[string]*ModelState{},
+		LastRefreshedAt: now,
+	}
+
+	blocked, reason, next := isAuthBlockedForModel(auth, "claude-sonnet-4-5", now)
+	if !blocked {
+		t.Fatalf("blocked = false, want true")
+	}
+	if reason != blockReasonCooldown {
+		t.Fatalf("reason = %v, want %v", reason, blockReasonCooldown)
+	}
+	if !next.Equal(recoverAt) {
+		t.Fatalf("next = %v, want %v", next, recoverAt)
+	}
+
+	blocked, reason, next = isAuthBlockedForModel(auth, "claude-sonnet-4-5", recoverAt.Add(time.Second))
+	if blocked {
+		t.Fatalf("blocked after recoverAt = true, want false")
+	}
+	if reason != blockReasonNone {
+		t.Fatalf("reason after recoverAt = %v, want %v", reason, blockReasonNone)
+	}
+	if !next.IsZero() {
+		t.Fatalf("next after recoverAt = %v, want zero", next)
+	}
+}
+
 func TestFillFirstSelectorPick_ThinkingSuffixFallsBackToBaseModelState(t *testing.T) {
 	t.Parallel()
 

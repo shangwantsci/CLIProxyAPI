@@ -389,3 +389,125 @@ func TestAPICallRecordsClaudeOAuthRateLimit(t *testing.T) {
 		t.Fatalf("LastError = %#v, want rate_limited 429", updated.LastError)
 	}
 }
+
+func TestAPICallRecordsClaudeOAuthUsageExhaustedFromSuccessfulProbe(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	resetAt := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(fmt.Sprintf(`{
+			"five_hour":{"utilization":100,"resets_at":%q},
+			"seven_day":{"utilization":30,"resets_at":%q}
+		}`, resetAt.Format(time.RFC3339), resetAt.Add(24*time.Hour).Format(time.RFC3339))))
+	}))
+	defer upstream.Close()
+
+	manager := coreauth.NewManager(&memoryAuthStore{}, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "claude-usage-exhausted",
+		FileName: "claude-usage-exhausted.json",
+		Provider: "claude",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{
+			"type":         "claude",
+			"access_token": "access-token",
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	authIndex := auth.EnsureIndex()
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	body := fmt.Sprintf(`{"auth_index":%q,"method":"GET","url":%q,"header":{"Authorization":"Bearer $TOKEN$"}}`, authIndex, upstream.URL+"/api/oauth/usage")
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/api-call", strings.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	h.APICall(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	updated := h.authByIndex(authIndex)
+	if updated == nil {
+		t.Fatal("updated auth not found")
+	}
+	if updated.Disabled || updated.Status == coreauth.StatusDisabled {
+		t.Fatalf("auth unexpectedly disabled: disabled=%v status=%s", updated.Disabled, updated.Status)
+	}
+	if updated.Status != coreauth.StatusError || !updated.Unavailable {
+		t.Fatalf("status/unavailable = %s/%v, want error/true", updated.Status, updated.Unavailable)
+	}
+	if !updated.Quota.Exceeded || !strings.Contains(updated.Quota.Reason, "five_hour") {
+		t.Fatalf("quota = %#v, want exhausted five_hour reason", updated.Quota)
+	}
+	if !updated.Quota.NextRecoverAt.Equal(resetAt) || !updated.NextRetryAfter.Equal(resetAt) {
+		t.Fatalf("recover/retry = %v/%v, want %v", updated.Quota.NextRecoverAt, updated.NextRetryAfter, resetAt)
+	}
+	if updated.LastError == nil || updated.LastError.Code != "quota_exhausted" || updated.LastError.HTTPStatus != http.StatusOK {
+		t.Fatalf("LastError = %#v, want quota_exhausted 200", updated.LastError)
+	}
+}
+
+func TestAPICallClearsClaudeOAuthQuotaAfterSuccessfulUsageAvailable(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	resetAt := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"five_hour":{"utilization":40,"resets_at":%q}}`, resetAt.Format(time.RFC3339))))
+	}))
+	defer upstream.Close()
+
+	manager := coreauth.NewManager(&memoryAuthStore{}, nil, nil)
+	auth := &coreauth.Auth{
+		ID:             "claude-usage-recovered",
+		FileName:       "claude-usage-recovered.json",
+		Provider:       "claude",
+		Status:         coreauth.StatusError,
+		StatusMessage:  "Claude quota exhausted: five_hour",
+		Unavailable:    true,
+		NextRetryAfter: time.Now().Add(-time.Minute),
+		Quota: coreauth.QuotaState{
+			Exceeded:      true,
+			Reason:        "Claude quota exhausted: five_hour",
+			NextRecoverAt: time.Now().Add(-time.Minute),
+		},
+		LastError: &coreauth.Error{Code: "quota_exhausted", Message: "Claude quota exhausted: five_hour", HTTPStatus: http.StatusOK},
+		Metadata: map[string]any{
+			"type":         "claude",
+			"access_token": "access-token",
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	authIndex := auth.EnsureIndex()
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	body := fmt.Sprintf(`{"auth_index":%q,"method":"GET","url":%q,"header":{"Authorization":"Bearer $TOKEN$"}}`, authIndex, upstream.URL+"/api/oauth/usage")
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/api-call", strings.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	h.APICall(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	updated := h.authByIndex(authIndex)
+	if updated == nil {
+		t.Fatal("updated auth not found")
+	}
+	if updated.Disabled || updated.Status != coreauth.StatusActive || updated.Unavailable {
+		t.Fatalf("disabled/status/unavailable = %v/%s/%v, want false/active/false", updated.Disabled, updated.Status, updated.Unavailable)
+	}
+	if updated.Quota.Exceeded || !updated.Quota.NextRecoverAt.IsZero() || !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("quota/retry should be cleared, quota=%#v retry=%v", updated.Quota, updated.NextRetryAfter)
+	}
+	if updated.LastError != nil || updated.StatusMessage != "" {
+		t.Fatalf("LastError/statusMessage = %#v/%q, want cleared", updated.LastError, updated.StatusMessage)
+	}
+}

@@ -75,6 +75,7 @@ var oauthToolRenameMap = map[string]string{
 	"canvas":               "CanvasView",
 	"nodes":                "DeviceControl",
 	"cron":                 "Scheduler",
+	"cronjob":              "Scheduler",
 	"message":              "SendMessage",
 	"tts":                  "Speech",
 	"gateway":              "SystemCtl",
@@ -96,8 +97,10 @@ var oauthToolRenameMap = map[string]string{
 	"lcm_describe":         "ContextDescribe",
 	"lcm_expand":           "ContextExpand",
 	"yield_task":           "TaskYield",
+	"delegate_task":        "Task",
 	"task_store":           "TaskStore",
 	"task_yield_interrupt": "TaskYieldInterrupt",
+	"skill_view":           "Skill",
 
 	// Hermes/OpenCode MCP shims often emit mcp_<tool>. Real Claude Code SDK
 	// MCP tools use mcp__<server>__<tool>, so normalize the outward shape while
@@ -1363,11 +1366,64 @@ func isClaudeOAuthToken(apiKey string) bool {
 // so any future non-empty prefix still composes correctly with the per-request
 // reverse map.
 func prepareClaudeOAuthToolNamesForUpstream(body []byte, prefix string, prefixDisabled bool) ([]byte, oauthToolReverseMap) {
+	body = stripForwardedThinkingBlocks(body)
 	body, reverseMap := remapOAuthToolNames(body)
 	if !prefixDisabled {
 		body = applyClaudeToolPrefix(body, prefix)
 	}
 	return body, reverseMap
+}
+
+func stripForwardedThinkingBlocks(body []byte) []byte {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body
+	}
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return body
+	}
+
+	original := body
+	changed := false
+	messages.ForEach(func(msgIndex, msg gjson.Result) bool {
+		content := msg.Get("content")
+		if !content.Exists() || !content.IsArray() {
+			return true
+		}
+
+		var contentJSON strings.Builder
+		contentJSON.WriteByte('[')
+		count := 0
+		removed := false
+		content.ForEach(func(_, part gjson.Result) bool {
+			if part.Get("type").String() == "thinking" {
+				removed = true
+				return true
+			}
+			if count > 0 {
+				contentJSON.WriteByte(',')
+			}
+			contentJSON.WriteString(part.Raw)
+			count++
+			return true
+		})
+		contentJSON.WriteByte(']')
+		if !removed {
+			return true
+		}
+
+		path := fmt.Sprintf("messages.%d.content", msgIndex.Int())
+		updated, err := sjson.SetRawBytes(body, path, []byte(contentJSON.String()))
+		if err == nil {
+			body = updated
+			changed = true
+		}
+		return true
+	})
+	if !changed {
+		return original
+	}
+	return body
 }
 
 // restoreClaudeOAuthToolNamesFromResponse undoes the Claude OAuth tool-name
