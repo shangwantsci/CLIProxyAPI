@@ -10,7 +10,7 @@ func TestIsValidUserIDAcceptsClaudeCodeJSONFormat(t *testing.T) {
 }
 
 func TestShouldCloakRequestRequiresValidClaudeCodeUserID(t *testing.T) {
-	userAgent := "claude-cli/2.1.92 (external, cli)"
+	userAgent := "claude-cli/2.1.148 (external, cli)"
 	validUserID := `{"device_id":"device","account_uuid":"","session_id":"session"}`
 
 	if ShouldCloakRequest("auto", userAgent, validUserID) {

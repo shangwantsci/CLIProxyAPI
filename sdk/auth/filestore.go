@@ -74,10 +74,7 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 
 	switch {
 	case auth.Storage != nil:
-		if auth.Metadata == nil {
-			auth.Metadata = make(map[string]any)
-		}
-		auth.Metadata["disabled"] = auth.Disabled
+		syncRuntimeStateMetadata(auth)
 		if setter, ok := auth.Storage.(metadataSetter); ok {
 			setter.SetMetadata(auth.Metadata)
 		}
@@ -85,7 +82,7 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 			return "", err
 		}
 	case auth.Metadata != nil:
-		auth.Metadata["disabled"] = auth.Disabled
+		syncRuntimeStateMetadata(auth)
 		raw, errMarshal := json.Marshal(auth.Metadata)
 		if errMarshal != nil {
 			return "", fmt.Errorf("auth filestore: marshal metadata failed: %w", errMarshal)
@@ -117,6 +114,46 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 	}
 
 	return path, nil
+}
+
+func syncRuntimeStateMetadata(auth *cliproxyauth.Auth) {
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["disabled"] = auth.Disabled
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "claude") {
+		return
+	}
+	if auth.Status != "" && auth.Status != cliproxyauth.StatusActive {
+		auth.Metadata["status"] = string(auth.Status)
+	} else {
+		delete(auth.Metadata, "status")
+	}
+	if strings.TrimSpace(auth.StatusMessage) != "" {
+		auth.Metadata["status_message"] = strings.TrimSpace(auth.StatusMessage)
+	} else {
+		delete(auth.Metadata, "status_message")
+	}
+	if auth.Unavailable {
+		auth.Metadata["unavailable"] = true
+	} else {
+		delete(auth.Metadata, "unavailable")
+	}
+	if auth.LastError != nil {
+		lastError := map[string]any{
+			"message":   strings.TrimSpace(auth.LastError.Message),
+			"retryable": auth.LastError.Retryable,
+		}
+		if strings.TrimSpace(auth.LastError.Code) != "" {
+			lastError["code"] = strings.TrimSpace(auth.LastError.Code)
+		}
+		if auth.LastError.HTTPStatus != 0 {
+			lastError["http_status"] = auth.LastError.HTTPStatus
+		}
+		auth.Metadata["last_error"] = lastError
+	} else {
+		delete(auth.Metadata, "last_error")
+	}
 }
 
 func (s *FileTokenStore) attachResolvedPath(auth *cliproxyauth.Auth, path string) {
@@ -245,6 +282,15 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 	id := s.idFor(path, baseDir)
 	disabled, _ := metadata["disabled"].(bool)
 	status := cliproxyauth.StatusActive
+	statusMessage := ""
+	unavailable := false
+	var lastError *cliproxyauth.Error
+	if strings.EqualFold(provider, "claude") {
+		status = statusFromMetadata(metadata, disabled)
+		statusMessage, _ = metadata["status_message"].(string)
+		unavailable, _ = metadata["unavailable"].(bool)
+		lastError = authErrorFromMetadata(metadata["last_error"])
+	}
 	if disabled {
 		status = cliproxyauth.StatusDisabled
 	}
@@ -254,9 +300,12 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 		FileName:         id,
 		Label:            s.labelFor(metadata),
 		Status:           status,
+		StatusMessage:    strings.TrimSpace(statusMessage),
 		Disabled:         disabled,
+		Unavailable:      unavailable,
 		Attributes:       map[string]string{"path": path},
 		Metadata:         metadata,
+		LastError:        lastError,
 		CreatedAt:        info.ModTime(),
 		UpdatedAt:        info.ModTime(),
 		LastRefreshedAt:  time.Time{},
@@ -293,6 +342,58 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 	applyClaudeCloakMetadata(auth, metadata)
 	cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
 	return auth, nil
+}
+
+func statusFromMetadata(metadata map[string]any, disabled bool) cliproxyauth.Status {
+	if disabled {
+		return cliproxyauth.StatusDisabled
+	}
+	raw, _ := metadata["status"].(string)
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case string(cliproxyauth.StatusUnknown):
+		return cliproxyauth.StatusUnknown
+	case string(cliproxyauth.StatusPending):
+		return cliproxyauth.StatusPending
+	case string(cliproxyauth.StatusRefreshing):
+		return cliproxyauth.StatusRefreshing
+	case string(cliproxyauth.StatusError):
+		return cliproxyauth.StatusError
+	case string(cliproxyauth.StatusDisabled):
+		return cliproxyauth.StatusDisabled
+	default:
+		return cliproxyauth.StatusActive
+	}
+}
+
+func authErrorFromMetadata(raw any) *cliproxyauth.Error {
+	values, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	err := &cliproxyauth.Error{}
+	if code, ok := values["code"].(string); ok {
+		err.Code = strings.TrimSpace(code)
+	}
+	if message, ok := values["message"].(string); ok {
+		err.Message = strings.TrimSpace(message)
+	}
+	if retryable, ok := values["retryable"].(bool); ok {
+		err.Retryable = retryable
+	}
+	switch status := values["http_status"].(type) {
+	case float64:
+		err.HTTPStatus = int(status)
+	case int:
+		err.HTTPStatus = status
+	case string:
+		if parsed, parseErr := strconv.Atoi(strings.TrimSpace(status)); parseErr == nil {
+			err.HTTPStatus = parsed
+		}
+	}
+	if err.Code == "" && err.Message == "" && err.HTTPStatus == 0 {
+		return nil
+	}
+	return err
 }
 
 func applyClaudeCloakMetadata(auth *cliproxyauth.Auth, metadata map[string]any) {

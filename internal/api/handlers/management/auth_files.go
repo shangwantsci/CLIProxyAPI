@@ -808,10 +808,10 @@ func authStringListSetting(auth *coreauth.Auth, key string) []string {
 func authCloakMode(auth *coreauth.Auth) string {
 	mode := strings.ToLower(strings.TrimSpace(authStringSetting(auth, "cloak_mode")))
 	switch mode {
-	case "always", "never":
+	case "auto", "always", "never":
 		return mode
 	default:
-		return "auto"
+		return "always"
 	}
 }
 
@@ -1661,7 +1661,7 @@ func normalizeStringList(input []string) []string {
 func defaultClaudeAuthMetadata(email string) map[string]any {
 	metadata := map[string]any{
 		"type":                "claude",
-		"cloak_mode":          "auto",
+		"cloak_mode":          "always",
 		"cloak_strict_mode":   false,
 		"cloak_cache_user_id": true,
 	}
@@ -1883,7 +1883,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 			ProxyURL: proxyURL,
 			Metadata: metadata,
 			Attributes: map[string]string{
-				"cloak_mode":          "auto",
+				"cloak_mode":          "always",
 				"cloak_cache_user_id": "true",
 			},
 		}

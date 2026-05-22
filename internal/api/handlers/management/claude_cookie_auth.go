@@ -79,7 +79,7 @@ func (h *Handler) PostAnthropicCookieAuth(c *gin.Context) {
 		ProxyURL: proxyURL,
 		Metadata: metadata,
 		Attributes: map[string]string{
-			"cloak_mode":          "auto",
+			"cloak_mode":          "always",
 			"cloak_cache_user_id": "true",
 		},
 	}

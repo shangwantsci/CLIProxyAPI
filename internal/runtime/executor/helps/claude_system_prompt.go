@@ -1,6 +1,8 @@
 package helps
 
-// Claude Code system prompt static sections (extracted from Claude Code v2.1.63).
+// Claude Code system prompt static sections. Anchor strings are verified against
+// Claude Code v2.1.148, but full HTTPS request capture still gives the strongest
+// calibration signal.
 // These sections are sent as system[] blocks to Anthropic's API.
 // The structure and content must match real Claude Code to pass server-side validation.
 

@@ -20,7 +20,6 @@ import (
 	"github.com/klauspost/compress/zstd"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -878,6 +877,28 @@ var claudeDroppedBetaTokens = map[string]struct{}{
 	"context-1m-2025-08-07": {},
 }
 
+var claudeCodeDefaultBetaTokens = []string{
+	"claude-code-20250219",
+	"oauth-2025-04-20",
+	"interleaved-thinking-2025-05-14",
+	"prompt-caching-scope-2026-01-05",
+	"effort-2025-11-24",
+	"context-management-2025-06-27",
+	"extended-cache-ttl-2025-04-11",
+	"fine-grained-tool-streaming-2025-05-14",
+	"structured-outputs-2025-12-15",
+	"fast-mode-2026-02-01",
+	"redact-thinking-2026-02-12",
+}
+
+var claudeAllowedBetaTokens = func() map[string]struct{} {
+	allowed := make(map[string]struct{}, len(claudeCodeDefaultBetaTokens))
+	for _, beta := range claudeCodeDefaultBetaTokens {
+		allowed[beta] = struct{}{}
+	}
+	return allowed
+}()
+
 var claudeBlockedUpstreamHeaderPrefixes = []string{
 	"x-openclaw-",
 	"x-hermes-",
@@ -915,6 +936,9 @@ func filterClaudeBetaHeader(header string) string {
 		if _, drop := claudeDroppedBetaTokens[beta]; drop {
 			continue
 		}
+		if _, allowed := claudeAllowedBetaTokens[beta]; !allowed {
+			continue
+		}
 		if _, ok := seen[beta]; ok {
 			continue
 		}
@@ -935,6 +959,9 @@ func filterClaudeBetaList(betas []string) []string {
 			continue
 		}
 		if _, drop := claudeDroppedBetaTokens[beta]; drop {
+			continue
+		}
+		if _, allowed := claudeAllowedBetaTokens[beta]; !allowed {
 			continue
 		}
 		filtered = append(filtered, beta)
@@ -1083,6 +1110,30 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 	return body, nil
 }
 
+func ginHeadersFromContext(ctx context.Context) http.Header {
+	if ctx == nil {
+		return nil
+	}
+	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		return ginCtx.Request.Header
+	}
+	return nil
+}
+
+func buildClaudeBetaHeader(ginHeaders http.Header, extraBetas []string) string {
+	baseBetas := ""
+	for _, beta := range claudeCodeDefaultBetaTokens {
+		baseBetas = appendClaudeBeta(baseBetas, beta)
+	}
+	for _, beta := range strings.Split(filterClaudeBetaHeader(ginHeaders.Get("Anthropic-Beta")), ",") {
+		baseBetas = appendClaudeBeta(baseBetas, beta)
+	}
+	for _, beta := range filterClaudeBetaList(extraBetas) {
+		baseBetas = appendClaudeBeta(baseBetas, beta)
+	}
+	return filterClaudeBetaHeader(baseBetas)
+}
+
 func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config) {
 	hdrDefault := func(cfgVal, fallback string) string {
 		if cfgVal != "" {
@@ -1098,110 +1149,73 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 
 	useAPIKey := auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""
 	isAnthropicBase := r.URL != nil && strings.EqualFold(r.URL.Scheme, "https") && strings.EqualFold(r.URL.Host, "api.anthropic.com")
-	if isAnthropicBase && useAPIKey {
-		r.Header.Del("Authorization")
-		r.Header.Set("x-api-key", apiKey)
-	} else {
-		r.Header.Set("Authorization", "Bearer "+apiKey)
-	}
-	r.Header.Set("Content-Type", "application/json")
-
-	var ginHeaders http.Header
-	if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-		ginHeaders = ginCtx.Request.Header
-	}
+	ginHeaders := ginHeadersFromContext(r.Context())
 	stabilizeDeviceProfile := helps.ClaudeDeviceProfileStabilizationEnabled(cfg)
 	var deviceProfile helps.ClaudeDeviceProfile
 	if stabilizeDeviceProfile {
 		deviceProfile = helps.ResolveClaudeDeviceProfile(auth, apiKey, ginHeaders, cfg)
 	}
 
-	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,effort-2025-11-24,context-management-2025-06-27,extended-cache-ttl-2025-04-11,fine-grained-tool-streaming-2025-05-14,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28"
-	if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
-		baseBetas = filterClaudeBetaHeader(val)
-	}
-	for _, beta := range []string{
-		"claude-code-20250219",
-		"oauth-2025-04-20",
-		"interleaved-thinking-2025-05-14",
-		"prompt-caching-scope-2026-01-05",
-		"effort-2025-11-24",
-		"context-management-2025-06-27",
-		"extended-cache-ttl-2025-04-11",
-		"fine-grained-tool-streaming-2025-05-14",
-	} {
-		baseBetas = appendClaudeBeta(baseBetas, beta)
-	}
-
-	// Merge extra betas from request body and request flags.
-	extraBetas = filterClaudeBetaList(extraBetas)
-	if len(extraBetas) > 0 {
-		existingSet := make(map[string]bool)
-		for _, b := range strings.Split(baseBetas, ",") {
-			betaName := strings.TrimSpace(b)
-			if betaName != "" {
-				existingSet[betaName] = true
-			}
-		}
-		for _, beta := range extraBetas {
-			beta = strings.TrimSpace(beta)
-			if beta != "" && !existingSet[beta] {
-				baseBetas += "," + beta
-				existingSet[beta] = true
-			}
-		}
-	}
-	baseBetas = filterClaudeBetaHeader(baseBetas)
-	r.Header.Set("Anthropic-Beta", baseBetas)
-
-	misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Version", "2023-06-01")
-	// Only set browser access header for API key mode; real Claude Code CLI does not send it.
-	if useAPIKey {
-		misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Dangerous-Direct-Browser-Access", "true")
-	}
-	misc.EnsureHeader(r.Header, ginHeaders, "X-App", "cli")
-	// Values below match the configured Claude Code baseline fingerprint.
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Retry-Count", "0")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Runtime", "node")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Lang", "js")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Timeout", hdrDefault(hd.Timeout, "600"))
-	// Session ID: stable per auth/apiKey, matches Claude Code's X-Claude-Code-Session-Id header.
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Claude-Code-Session-Id", helps.CachedSessionID(apiKey))
-	// Per-request UUID, matches Claude Code's x-client-request-id for first-party API.
-	if isAnthropicBase {
-		misc.EnsureHeader(r.Header, ginHeaders, "x-client-request-id", uuid.New().String())
-	}
-	r.Header.Set("Connection", "keep-alive")
-	if stream {
-		r.Header.Set("Accept", "text/event-stream")
-		// SSE streams must not be compressed: the downstream scanner reads
-		// line-delimited text and cannot parse compressed bytes.  Using
-		// "identity" tells the upstream to send an uncompressed stream.
-		r.Header.Set("Accept-Encoding", "identity")
-	} else {
-		r.Header.Set("Accept", "application/json")
-		r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
-	}
-	// Legacy mode keeps OS/Arch runtime-derived; stabilized mode pins OS/Arch
-	// to the configured baseline while still allowing newer official
-	// User-Agent/package/runtime tuples to upgrade the software fingerprint.
-	if stabilizeDeviceProfile {
-		helps.ApplyClaudeDeviceProfileHeaders(r, deviceProfile)
-	} else {
-		helps.ApplyClaudeLegacyDeviceHeaders(r, ginHeaders, cfg)
-	}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
-	sanitizeClaudeUpstreamHeaders(r.Header)
-	// Re-enforce Accept-Encoding: identity after ApplyCustomHeadersFromAttrs, which
-	// may override it with a user-configured value.  Compressed SSE breaks the line
-	// scanner regardless of user preference, so this is non-negotiable for streams.
-	if stream {
-		r.Header.Set("Accept-Encoding", "identity")
+
+	for _, headerName := range []string{
+		"User-Agent",
+		"X-Stainless-Package-Version",
+		"X-Stainless-Runtime-Version",
+		"X-Stainless-Os",
+		"X-Stainless-Arch",
+		"X-Stainless-Retry-Count",
+		"X-Stainless-Runtime",
+		"X-Stainless-Lang",
+		"X-Stainless-Timeout",
+		"X-App",
+		"Anthropic-Version",
+		"Anthropic-Beta",
+		"Anthropic-Dangerous-Direct-Browser-Access",
+		"X-Claude-Code-Session-Id",
+		"x-client-request-id",
+		"Authorization",
+		"x-api-key",
+	} {
+		r.Header.Del(headerName)
 	}
+
+	if isAnthropicBase && useAPIKey {
+		r.Header.Set("x-api-key", apiKey)
+		r.Header.Set("Anthropic-Dangerous-Direct-Browser-Access", "true")
+	} else {
+		r.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Anthropic-Version", "2023-06-01")
+	r.Header.Set("Anthropic-Beta", buildClaudeBetaHeader(ginHeaders, extraBetas))
+	r.Header.Set("X-App", "cli")
+	r.Header.Set("X-Stainless-Retry-Count", "0")
+	r.Header.Set("X-Stainless-Runtime", "node")
+	r.Header.Set("X-Stainless-Lang", "js")
+	r.Header.Set("X-Stainless-Timeout", hdrDefault(hd.Timeout, "600"))
+	r.Header.Set("X-Claude-Code-Session-Id", helps.CachedSessionID(apiKey))
+	r.Header.Set("x-client-request-id", uuid.New().String())
+	r.Header.Set("Connection", "keep-alive")
+	if stream {
+		r.Header.Set("Accept", "text/event-stream")
+		// SSE streams must not be compressed: the downstream scanner reads
+		// line-delimited text and cannot parse compressed bytes.
+		r.Header.Set("Accept-Encoding", "identity")
+	} else {
+		r.Header.Set("Accept", "application/json")
+		r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+	}
+	if stabilizeDeviceProfile {
+		helps.ApplyClaudeDeviceProfileHeaders(r, deviceProfile)
+	} else {
+		helps.ApplyClaudeLegacyDeviceHeaders(r, ginHeaders, cfg)
+	}
+	sanitizeClaudeUpstreamHeaders(r.Header)
 }
 
 func appendClaudeBeta(header string, beta string) string {
@@ -1720,12 +1734,12 @@ func getWorkloadFromContext(ctx context.Context) string {
 // Returns (cloakMode, strictMode, sensitiveWords, cacheUserID).
 func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (string, bool, []string, bool) {
 	if auth == nil || auth.Attributes == nil {
-		return "auto", false, nil, true
+		return "always", false, nil, true
 	}
 
 	cloakMode := auth.Attributes["cloak_mode"]
 	if cloakMode == "" {
-		cloakMode = "auto"
+		cloakMode = "always"
 	}
 
 	strictMode := strings.ToLower(auth.Attributes["cloak_strict_mode"]) == "true"
@@ -1748,7 +1762,7 @@ func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (string, bool, []string, bo
 
 // injectFakeUserID generates and injects a fake user ID into the request metadata.
 // When useCache is false, a new user ID is generated for every call.
-func injectFakeUserID(payload []byte, apiKey string, useCache bool) []byte {
+func injectFakeUserID(payload []byte, apiKey string, useCache bool, force bool) []byte {
 	generateID := func() string {
 		if useCache {
 			return helps.CachedUserID(apiKey)
@@ -1763,7 +1777,7 @@ func injectFakeUserID(payload []byte, apiKey string, useCache bool) []byte {
 	}
 
 	existingUserID := gjson.GetBytes(payload, "metadata.user_id").String()
-	if existingUserID == "" || !helps.IsValidUserID(existingUserID) {
+	if force || existingUserID == "" || !helps.IsValidUserID(existingUserID) {
 		payload, _ = sjson.SetBytes(payload, "metadata.user_id", generateID())
 	}
 	return payload
@@ -1826,6 +1840,10 @@ func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 //	system[4]: doing tasks (no cache_control)
 //	system[5]: user system messages moved to first user message
 func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, experimentalCCHSigning bool, oauthMode bool, version, entrypoint, workload string) []byte {
+	return checkSystemInstructionsWithSigningModeForced(payload, strictMode, experimentalCCHSigning, oauthMode, version, entrypoint, workload, false)
+}
+
+func checkSystemInstructionsWithSigningModeForced(payload []byte, strictMode bool, experimentalCCHSigning bool, oauthMode bool, version, entrypoint, workload string, forceBilling bool) []byte {
 	system := gjson.GetBytes(payload, "system")
 
 	// Extract original message text for fingerprint computation (before billing injection).
@@ -1845,7 +1863,7 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 
 	// Skip if already injected
 	firstText := gjson.GetBytes(payload, "system.0.text").String()
-	if strings.HasPrefix(firstText, "x-anthropic-billing-header:") {
+	if strings.HasPrefix(firstText, "x-anthropic-billing-header:") && !forceBilling {
 		return payload
 	}
 
@@ -1876,13 +1894,13 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 			system.ForEach(func(_, part gjson.Result) bool {
 				if part.Get("type").String() == "text" {
 					txt := strings.TrimSpace(part.Get("text").String())
-					if txt != "" {
+					if shouldForwardOriginalSystemText(txt, forceBilling) {
 						userSystemParts = append(userSystemParts, txt)
 					}
 				}
 				return true
 			})
-		} else if system.Type == gjson.String && strings.TrimSpace(system.String()) != "" {
+		} else if system.Type == gjson.String && shouldForwardOriginalSystemText(strings.TrimSpace(system.String()), forceBilling) {
 			userSystemParts = append(userSystemParts, strings.TrimSpace(system.String()))
 		}
 
@@ -1898,6 +1916,26 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 	}
 
 	return payload
+}
+
+func shouldForwardOriginalSystemText(text string, forceBilling bool) bool {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return false
+	}
+	if !forceBilling {
+		return true
+	}
+	if strings.HasPrefix(text, "x-anthropic-billing-header:") {
+		return false
+	}
+	if text == "You are Claude Code, Anthropic's official CLI for Claude." {
+		return false
+	}
+	if strings.Contains(text, helps.ClaudeCodeIntro) && strings.Contains(text, helps.ClaudeCodeSystem) {
+		return false
+	}
+	return true
 }
 
 // sanitizeForwardedSystemPrompt reduces forwarded third-party system context to a
@@ -1983,6 +2021,15 @@ IMPORTANT: this context may or may not be relevant to your tasks. You should not
 	return payload
 }
 
+func resolveClaudeBillingVersion(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, apiKey string) string {
+	fallback := helps.DefaultClaudeVersion(cfg)
+	if !helps.ClaudeDeviceProfileStabilizationEnabled(cfg) {
+		return fallback
+	}
+	profile := helps.ResolveClaudeDeviceProfile(auth, apiKey, ginHeadersFromContext(ctx), cfg)
+	return helps.ClaudeDeviceProfileVersion(profile, fallback)
+}
+
 // applyCloaking applies cloaking transformations to the payload based on config and client.
 // Cloaking includes: system prompt injection, fake user ID, and sensitive word obfuscation.
 func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, payload []byte, model string, apiKey string) []byte {
@@ -2024,14 +2071,14 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 
 	// Skip system instructions for claude-3-5-haiku models
 	if !strings.HasPrefix(model, "claude-3-5-haiku") {
-		billingVersion := helps.DefaultClaudeVersion(cfg)
+		billingVersion := resolveClaudeBillingVersion(ctx, cfg, auth, apiKey)
 		entrypoint := parseEntrypointFromUA(clientUserAgent)
 		workload := getWorkloadFromContext(ctx)
-		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, useCCHSigning, oauthToken, billingVersion, entrypoint, workload)
+		payload = checkSystemInstructionsWithSigningModeForced(payload, strictMode, useCCHSigning, oauthToken, billingVersion, entrypoint, workload, true)
 	}
 
 	// Inject fake user ID
-	payload = injectFakeUserID(payload, apiKey, cacheUserID)
+	payload = injectFakeUserID(payload, apiKey, cacheUserID, true)
 
 	// Apply sensitive word obfuscation
 	if len(sensitiveWords) > 0 {
