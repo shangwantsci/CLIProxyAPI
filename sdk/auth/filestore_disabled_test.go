@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
@@ -114,5 +115,53 @@ func TestFileTokenStore_Save_PersistsRuntimeErrorState(t *testing.T) {
 	}
 	if got.LastError.Code != "organization_disabled" || got.LastError.HTTPStatus != http.StatusBadRequest || got.LastError.Retryable {
 		t.Fatalf("LastError = %#v, want organization_disabled 400 non-retryable", got.LastError)
+	}
+}
+
+func TestFileTokenStore_Save_PersistsClaudeQuotaCooldown(t *testing.T) {
+	ctx := context.Background()
+	baseDir := t.TempDir()
+	path := filepath.Join(baseDir, "claude-limited.json")
+	if err := os.WriteFile(path, []byte(`{"type":"claude","email":"limited@example.com"}`), 0o600); err != nil {
+		t.Fatalf("seed auth file: %v", err)
+	}
+	store := NewFileTokenStore()
+	store.SetBaseDir(baseDir)
+
+	recoverAt := time.Now().UTC().Add(2 * time.Hour).Truncate(time.Second)
+	auth := &cliproxyauth.Auth{
+		ID:              "claude-limited.json",
+		Provider:        "claude",
+		FileName:        "claude-limited.json",
+		Status:          cliproxyauth.StatusError,
+		StatusMessage:   "Claude quota exhausted: five_hour",
+		Unavailable:     true,
+		NextRetryAfter:  recoverAt,
+		Metadata:        map[string]any{"type": "claude", "email": "limited@example.com"},
+		Quota:           cliproxyauth.QuotaState{Exceeded: true, Reason: "Claude quota exhausted: five_hour", NextRecoverAt: recoverAt},
+		LastError:       &cliproxyauth.Error{Code: "quota_exhausted", Message: "Claude quota exhausted: five_hour", HTTPStatus: http.StatusOK, Retryable: true},
+		LastRefreshedAt: time.Now().UTC(),
+	}
+
+	if _, err := store.Save(ctx, auth); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+
+	loaded, err := store.List(ctx)
+	if err != nil {
+		t.Fatalf("List() error: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("List() returned %d auths, want 1", len(loaded))
+	}
+	got := loaded[0]
+	if got.Status != cliproxyauth.StatusError || !got.Unavailable {
+		t.Fatalf("status/unavailable = %s/%v, want error/true", got.Status, got.Unavailable)
+	}
+	if !got.NextRetryAfter.Equal(recoverAt) {
+		t.Fatalf("NextRetryAfter = %v, want %v", got.NextRetryAfter, recoverAt)
+	}
+	if !got.Quota.Exceeded || got.Quota.Reason != "Claude quota exhausted: five_hour" || !got.Quota.NextRecoverAt.Equal(recoverAt) {
+		t.Fatalf("Quota = %#v, want exhausted quota until %v", got.Quota, recoverAt)
 	}
 }

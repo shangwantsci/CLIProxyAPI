@@ -139,6 +139,33 @@ func syncRuntimeStateMetadata(auth *cliproxyauth.Auth) {
 	} else {
 		delete(auth.Metadata, "unavailable")
 	}
+	if !auth.NextRetryAfter.IsZero() {
+		auth.Metadata["next_retry_after"] = auth.NextRetryAfter.Format(time.RFC3339Nano)
+	} else {
+		delete(auth.Metadata, "next_retry_after")
+	}
+	if !auth.NextRefreshAfter.IsZero() {
+		auth.Metadata["next_refresh_after"] = auth.NextRefreshAfter.Format(time.RFC3339Nano)
+	} else {
+		delete(auth.Metadata, "next_refresh_after")
+	}
+	if auth.Quota.Exceeded || auth.Quota.Reason != "" || !auth.Quota.NextRecoverAt.IsZero() || auth.Quota.BackoffLevel != 0 {
+		quota := map[string]any{
+			"exceeded": auth.Quota.Exceeded,
+		}
+		if strings.TrimSpace(auth.Quota.Reason) != "" {
+			quota["reason"] = strings.TrimSpace(auth.Quota.Reason)
+		}
+		if !auth.Quota.NextRecoverAt.IsZero() {
+			quota["next_recover_at"] = auth.Quota.NextRecoverAt.Format(time.RFC3339Nano)
+		}
+		if auth.Quota.BackoffLevel != 0 {
+			quota["backoff_level"] = auth.Quota.BackoffLevel
+		}
+		auth.Metadata["quota"] = quota
+	} else {
+		delete(auth.Metadata, "quota")
+	}
 	if auth.LastError != nil {
 		lastError := map[string]any{
 			"message":   strings.TrimSpace(auth.LastError.Message),
@@ -285,11 +312,17 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 	statusMessage := ""
 	unavailable := false
 	var lastError *cliproxyauth.Error
+	nextRetryAfter := time.Time{}
+	nextRefreshAfter := time.Time{}
+	quota := cliproxyauth.QuotaState{}
 	if strings.EqualFold(provider, "claude") {
 		status = statusFromMetadata(metadata, disabled)
 		statusMessage, _ = metadata["status_message"].(string)
 		unavailable, _ = metadata["unavailable"].(bool)
 		lastError = authErrorFromMetadata(metadata["last_error"])
+		nextRetryAfter, _ = metadataTimeValue(metadata["next_retry_after"])
+		nextRefreshAfter, _ = metadataTimeValue(metadata["next_refresh_after"])
+		quota = quotaStateFromMetadata(metadata["quota"])
 	}
 	if disabled {
 		status = cliproxyauth.StatusDisabled
@@ -305,11 +338,13 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 		Unavailable:      unavailable,
 		Attributes:       map[string]string{"path": path},
 		Metadata:         metadata,
+		Quota:            quota,
 		LastError:        lastError,
 		CreatedAt:        info.ModTime(),
 		UpdatedAt:        info.ModTime(),
 		LastRefreshedAt:  time.Time{},
-		NextRefreshAfter: time.Time{},
+		NextRefreshAfter: nextRefreshAfter,
+		NextRetryAfter:   nextRetryAfter,
 	}
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
@@ -394,6 +429,88 @@ func authErrorFromMetadata(raw any) *cliproxyauth.Error {
 		return nil
 	}
 	return err
+}
+
+func quotaStateFromMetadata(raw any) cliproxyauth.QuotaState {
+	values, ok := raw.(map[string]any)
+	if !ok {
+		return cliproxyauth.QuotaState{}
+	}
+	quota := cliproxyauth.QuotaState{}
+	if exceeded, ok := values["exceeded"].(bool); ok {
+		quota.Exceeded = exceeded
+	}
+	if reason, ok := values["reason"].(string); ok {
+		quota.Reason = strings.TrimSpace(reason)
+	}
+	if recoverAt, ok := metadataTimeValue(values["next_recover_at"]); ok {
+		quota.NextRecoverAt = recoverAt
+	}
+	if level, ok := metadataIntValue(values["backoff_level"]); ok {
+		quota.BackoffLevel = level
+	}
+	return quota
+}
+
+func metadataTimeValue(raw any) (time.Time, bool) {
+	switch value := raw.(type) {
+	case string:
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			return time.Time{}, false
+		}
+		for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05", "2006-01-02 15:04"} {
+			if parsed, err := time.Parse(layout, trimmed); err == nil {
+				return parsed, true
+			}
+		}
+		if unix, err := strconv.ParseInt(trimmed, 10, 64); err == nil && unix > 0 {
+			return normalizeMetadataUnixTime(unix), true
+		}
+	case float64:
+		if value > 0 {
+			return normalizeMetadataUnixTime(int64(value)), true
+		}
+	case int64:
+		if value > 0 {
+			return normalizeMetadataUnixTime(value), true
+		}
+	case int:
+		if value > 0 {
+			return normalizeMetadataUnixTime(int64(value)), true
+		}
+	case json.Number:
+		if unix, err := value.Int64(); err == nil && unix > 0 {
+			return normalizeMetadataUnixTime(unix), true
+		}
+	}
+	return time.Time{}, false
+}
+
+func normalizeMetadataUnixTime(raw int64) time.Time {
+	if raw > 1_000_000_000_000 {
+		return time.UnixMilli(raw)
+	}
+	return time.Unix(raw, 0)
+}
+
+func metadataIntValue(raw any) (int, bool) {
+	switch value := raw.(type) {
+	case int:
+		return value, true
+	case int64:
+		return int(value), true
+	case float64:
+		return int(value), true
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		return parsed, err == nil
+	case json.Number:
+		parsed, err := value.Int64()
+		return int(parsed), err == nil
+	default:
+		return 0, false
+	}
 }
 
 func applyClaudeCloakMetadata(auth *cliproxyauth.Auth, metadata map[string]any) {
