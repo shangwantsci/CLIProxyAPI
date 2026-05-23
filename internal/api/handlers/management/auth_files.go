@@ -28,6 +28,7 @@ import (
 	geminiAuth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/gemini"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -49,6 +50,11 @@ const (
 	geminiCLIEndpoint     = "https://cloudcode-pa.googleapis.com"
 	geminiCLIVersion      = "v1internal"
 )
+
+var refreshClaudeTokenForManagement = func(ctx context.Context, cfg *config.Config, proxyURL, refreshToken string, opts claude.RefreshTokenOptions) (*claude.ClaudeTokenData, error) {
+	svc := claude.NewClaudeAuthWithProxyURL(cfg, proxyURL)
+	return svc.RefreshTokensWithRetryOptions(ctx, refreshToken, 3, opts)
+}
 
 type callbackForwarder struct {
 	provider string
@@ -1401,6 +1407,121 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
 }
 
+func (h *Handler) ReauthenticateClaudeAuthFile(c *gin.Context) {
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+		return
+	}
+
+	targetAuth := h.findAuthByNameOrID(name)
+	if targetAuth == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(targetAuth.Provider), "claude") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "auth file is not a Claude account"})
+		return
+	}
+
+	refreshToken := ""
+	authSource := ""
+	tokenEndpoint := ""
+	if targetAuth.Metadata != nil {
+		refreshToken, _ = targetAuth.Metadata["refresh_token"].(string)
+		authSource, _ = targetAuth.Metadata["auth_source"].(string)
+		tokenEndpoint, _ = targetAuth.Metadata["token_endpoint"].(string)
+	}
+	refreshToken = strings.TrimSpace(refreshToken)
+	if refreshToken == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Claude account has no refresh_token; re-import with OAuth or Cookie"})
+		return
+	}
+
+	proxyURL := strings.TrimSpace(targetAuth.ProxyURL)
+	if proxyURL == "" {
+		proxyURL = authStringSetting(targetAuth, "proxy_url")
+	}
+	tokenData, err := refreshClaudeTokenForManagement(c.Request.Context(), h.cfg, proxyURL, refreshToken, claude.RefreshTokenOptions{
+		AuthSource:            authSource,
+		TokenEndpoint:         tokenEndpoint,
+		AllowEndpointFallback: true,
+	})
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to refresh Claude credentials: %v", err)})
+		return
+	}
+
+	now := time.Now()
+	if targetAuth.Metadata == nil {
+		targetAuth.Metadata = make(map[string]any)
+	}
+	applyClaudeTokenDataMetadata(targetAuth.Metadata, tokenData)
+	clearClaudeAuthFailureMetadata(targetAuth.Metadata)
+	targetAuth.Metadata["type"] = "claude"
+	targetAuth.Metadata["disabled"] = false
+
+	targetAuth.Disabled = false
+	targetAuth.Unavailable = false
+	targetAuth.Status = coreauth.StatusActive
+	targetAuth.StatusMessage = ""
+	targetAuth.LastError = nil
+	targetAuth.NextRefreshAfter = time.Time{}
+	targetAuth.NextRetryAfter = time.Time{}
+	targetAuth.LastRefreshedAt = now
+	targetAuth.UpdatedAt = now
+	clearClaudeUnauthorizedModelStates(targetAuth)
+
+	if _, err := h.authManager.Update(c.Request.Context(), targetAuth); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
+		return
+	}
+
+	entry := h.buildAuthFileEntry(targetAuth)
+	c.JSON(http.StatusOK, gin.H{
+		"status":      "ok",
+		"name":        targetAuth.FileName,
+		"auth_source": targetAuth.Metadata["auth_source"],
+		"expires_at":  targetAuth.Metadata["expired"],
+		"account":     entry,
+	})
+}
+
+func (h *Handler) findAuthByNameOrID(name string) *coreauth.Auth {
+	if h == nil || h.authManager == nil {
+		return nil
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	if auth, ok := h.authManager.GetByID(name); ok {
+		return auth
+	}
+	auths := h.authManager.List()
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		if auth.FileName == name || auth.ID == name {
+			return auth
+		}
+	}
+	return nil
+}
+
 // PatchAuthFileFields updates editable routing and Claude compatibility fields of an auth file.
 func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	if h.authManager == nil {
@@ -1671,6 +1792,137 @@ func defaultClaudeAuthMetadata(email string) map[string]any {
 	return metadata
 }
 
+func applyClaudeTokenStorageMetadata(metadata map[string]any, tokenStorage *claude.ClaudeTokenStorage) {
+	if metadata == nil || tokenStorage == nil {
+		return
+	}
+	if tokenStorage.AccessToken != "" {
+		metadata["access_token"] = tokenStorage.AccessToken
+	}
+	if tokenStorage.RefreshToken != "" {
+		metadata["refresh_token"] = tokenStorage.RefreshToken
+	}
+	if tokenStorage.TokenType != "" {
+		metadata["token_type"] = tokenStorage.TokenType
+	}
+	if tokenStorage.ExpiresIn > 0 {
+		metadata["expires_in"] = tokenStorage.ExpiresIn
+	}
+	if tokenStorage.Email != "" {
+		metadata["email"] = tokenStorage.Email
+	}
+	if tokenStorage.OrganizationUUID != "" {
+		metadata["organization_uuid"] = tokenStorage.OrganizationUUID
+	}
+	if tokenStorage.AccountUUID != "" {
+		metadata["account_uuid"] = tokenStorage.AccountUUID
+	}
+	if tokenStorage.Scope != "" {
+		metadata["scope"] = tokenStorage.Scope
+	}
+	if tokenStorage.AuthSource != "" {
+		metadata["auth_source"] = tokenStorage.AuthSource
+	}
+	if tokenStorage.TokenEndpoint != "" {
+		metadata["token_endpoint"] = tokenStorage.TokenEndpoint
+	}
+	if tokenStorage.RedirectURI != "" {
+		metadata["redirect_uri"] = tokenStorage.RedirectURI
+	}
+	if tokenStorage.Expire != "" {
+		metadata["expired"] = tokenStorage.Expire
+	}
+	if tokenStorage.LastRefresh != "" {
+		metadata["last_refresh"] = tokenStorage.LastRefresh
+	}
+}
+
+func applyClaudeTokenDataMetadata(metadata map[string]any, tokenData *claude.ClaudeTokenData) {
+	if metadata == nil || tokenData == nil {
+		return
+	}
+	if tokenData.AccessToken != "" {
+		metadata["access_token"] = tokenData.AccessToken
+	}
+	if tokenData.RefreshToken != "" {
+		metadata["refresh_token"] = tokenData.RefreshToken
+	}
+	if tokenData.TokenType != "" {
+		metadata["token_type"] = tokenData.TokenType
+	}
+	if tokenData.ExpiresIn > 0 {
+		metadata["expires_in"] = tokenData.ExpiresIn
+	}
+	if tokenData.Email != "" {
+		metadata["email"] = tokenData.Email
+	}
+	if tokenData.OrganizationUUID != "" {
+		metadata["organization_uuid"] = tokenData.OrganizationUUID
+	}
+	if tokenData.AccountUUID != "" {
+		metadata["account_uuid"] = tokenData.AccountUUID
+	}
+	if tokenData.Scope != "" {
+		metadata["scope"] = tokenData.Scope
+	}
+	if tokenData.AuthSource != "" {
+		metadata["auth_source"] = tokenData.AuthSource
+	}
+	if tokenData.TokenEndpoint != "" {
+		metadata["token_endpoint"] = tokenData.TokenEndpoint
+	}
+	if tokenData.RedirectURI != "" {
+		metadata["redirect_uri"] = tokenData.RedirectURI
+	}
+	if tokenData.Expire != "" {
+		metadata["expired"] = tokenData.Expire
+	}
+	metadata["last_refresh"] = time.Now().UTC().Format(time.RFC3339)
+}
+
+func clearClaudeAuthFailureMetadata(metadata map[string]any) {
+	if metadata == nil {
+		return
+	}
+	for _, key := range []string{
+		"status",
+		"status_message",
+		"unavailable",
+		"last_error",
+		"next_refresh_after",
+		"next_retry_after",
+	} {
+		delete(metadata, key)
+	}
+}
+
+func clearClaudeUnauthorizedModelStates(auth *coreauth.Auth) {
+	if auth == nil || len(auth.ModelStates) == 0 {
+		return
+	}
+	for model, state := range auth.ModelStates {
+		if state == nil {
+			continue
+		}
+		if isClaudeUnauthorizedAuthError(state.LastError) || strings.EqualFold(strings.TrimSpace(state.StatusMessage), "unauthorized") {
+			delete(auth.ModelStates, model)
+		}
+	}
+}
+
+func isClaudeUnauthorizedAuthError(err *coreauth.Error) bool {
+	if err == nil {
+		return false
+	}
+	if err.HTTPStatus == http.StatusUnauthorized {
+		return true
+	}
+	combined := strings.ToLower(strings.TrimSpace(err.Code + " " + err.Message))
+	return strings.Contains(combined, "unauthorized") ||
+		strings.Contains(combined, "invalid authentication credentials") ||
+		strings.Contains(combined, "invalid_grant")
+}
+
 func (h *Handler) disableAuth(ctx context.Context, id string) {
 	if h == nil || h.authManager == nil {
 		return
@@ -1779,9 +2031,11 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	anthropicAuth := claude.NewClaudeAuthWithProxyURL(h.cfg, proxyURL)
 
 	isWebUI := isWebUIRequest(c)
+	oauthMode := strings.ToLower(strings.TrimSpace(c.Query("oauth_mode")))
+	usePlatformOAuth := isWebUI && oauthMode == "platform"
 
 	var authURL string
-	if isWebUI {
+	if usePlatformOAuth {
 		authURL, state, err = anthropicAuth.GeneratePlatformAuthURL(state, pkceCodes)
 	} else {
 		authURL, state, err = anthropicAuth.GenerateAuthURL(state, pkceCodes)
@@ -1849,7 +2103,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		// Exchange code for tokens using internal auth service
 		var bundle *claude.ClaudeAuthBundle
 		var errExchange error
-		if isWebUI {
+		if usePlatformOAuth {
 			bundle, errExchange = anthropicAuth.ExchangePlatformCodeForTokens(ctx, code, state, pkceCodes)
 		} else {
 			bundle, errExchange = anthropicAuth.ExchangeCodeForTokens(ctx, code, state, pkceCodes)
@@ -1872,6 +2126,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		}
 		fileName := fmt.Sprintf("claude-%s.json", accountID)
 		metadata := defaultClaudeAuthMetadata(tokenStorage.Email)
+		applyClaudeTokenStorageMetadata(metadata, tokenStorage)
 		if proxyURL != "" {
 			metadata["proxy_url"] = proxyURL
 		}
@@ -1903,7 +2158,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		CompleteOAuthSessionsByProvider("anthropic")
 	}()
 
-	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state, "proxy_url": proxyURL})
+	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state, "proxy_url": proxyURL, "oauth_mode": oauthMode})
 }
 
 func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {

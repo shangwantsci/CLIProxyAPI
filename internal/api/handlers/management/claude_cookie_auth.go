@@ -60,6 +60,7 @@ func (h *Handler) PostAnthropicCookieAuth(c *gin.Context) {
 	fileName := fmt.Sprintf("claude-%s.json", accountID)
 
 	metadata := defaultClaudeAuthMetadata(tokenStorage.Email)
+	applyClaudeTokenStorageMetadata(metadata, tokenStorage)
 	if proxyURL != "" {
 		metadata["proxy_url"] = proxyURL
 	}

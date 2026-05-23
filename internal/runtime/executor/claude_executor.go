@@ -802,16 +802,28 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 		return nil, fmt.Errorf("claude executor: auth is nil")
 	}
 	var refreshToken string
+	var authSource string
+	var tokenEndpoint string
 	if auth.Metadata != nil {
 		if v, ok := auth.Metadata["refresh_token"].(string); ok && v != "" {
 			refreshToken = v
+		}
+		if v, ok := auth.Metadata["auth_source"].(string); ok {
+			authSource = strings.TrimSpace(v)
+		}
+		if v, ok := auth.Metadata["token_endpoint"].(string); ok {
+			tokenEndpoint = strings.TrimSpace(v)
 		}
 	}
 	if refreshToken == "" {
 		return auth, nil
 	}
 	svc := claudeauth.NewClaudeAuthWithProxyURL(e.cfg, auth.ProxyURL)
-	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
+	td, err := svc.RefreshTokensWithRetryOptions(ctx, refreshToken, 3, claudeauth.RefreshTokenOptions{
+		AuthSource:            authSource,
+		TokenEndpoint:         tokenEndpoint,
+		AllowEndpointFallback: true,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -825,6 +837,15 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	auth.Metadata["email"] = td.Email
 	auth.Metadata["expired"] = td.Expire
 	auth.Metadata["type"] = "claude"
+	if td.AuthSource != "" {
+		auth.Metadata["auth_source"] = td.AuthSource
+	}
+	if td.TokenEndpoint != "" {
+		auth.Metadata["token_endpoint"] = td.TokenEndpoint
+	}
+	if td.RedirectURI != "" {
+		auth.Metadata["redirect_uri"] = td.RedirectURI
+	}
 	now := time.Now().Format(time.RFC3339)
 	auth.Metadata["last_refresh"] = now
 	return auth, nil

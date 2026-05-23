@@ -45,10 +45,17 @@ var (
 	claudeRefreshMu    sync.Mutex
 	claudeRefreshBlock = make(map[string]time.Time)
 
+	claudeAPITokenURL        = TokenURL
 	claudeAIBaseURL          = "https://claude.ai"
 	claudePlatformTokenURL   = "https://platform.claude.com/v1/oauth/token"
 	claudePlatformHTTPOrigin = "https://claude.ai"
 )
+
+type RefreshTokenOptions struct {
+	TokenEndpoint         string
+	AuthSource            string
+	AllowEndpointFallback bool
+}
 
 type refreshHTTPError struct {
 	status    int
@@ -163,6 +170,10 @@ type cookieAuthorizeResponse struct {
 }
 
 func tokenDataFromResponse(tokenResp tokenResponse) ClaudeTokenData {
+	return tokenDataFromResponseForFlow(tokenResp, "", "", "")
+}
+
+func tokenDataFromResponseForFlow(tokenResp tokenResponse, authSource, tokenEndpoint, redirectURI string) ClaudeTokenData {
 	expiresAt := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 	return ClaudeTokenData{
 		AccessToken:      tokenResp.AccessToken,
@@ -174,6 +185,9 @@ func tokenDataFromResponse(tokenResp tokenResponse) ClaudeTokenData {
 		AccountUUID:      tokenResp.Account.UUID,
 		Scope:            tokenResp.Scope,
 		Expire:           expiresAt.Format(time.RFC3339),
+		AuthSource:       strings.TrimSpace(authSource),
+		TokenEndpoint:    strings.TrimSpace(tokenEndpoint),
+		RedirectURI:      strings.TrimSpace(redirectURI),
 	}
 }
 
@@ -326,7 +340,7 @@ func (o *ClaudeAuth) ExchangeCodeForTokens(ctx context.Context, code, state stri
 
 	// log.Debugf("Token exchange request: %s", string(jsonBody))
 
-	req, err := http.NewRequestWithContext(ctx, "POST", TokenURL, strings.NewReader(string(jsonBody)))
+	req, err := http.NewRequestWithContext(ctx, "POST", claudeAPITokenURL, strings.NewReader(string(jsonBody)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create token request: %w", err)
 	}
@@ -359,7 +373,7 @@ func (o *ClaudeAuth) ExchangeCodeForTokens(ctx context.Context, code, state stri
 		return nil, fmt.Errorf("failed to parse token response: %w", err)
 	}
 
-	tokenData := tokenDataFromResponse(tokenResp)
+	tokenData := tokenDataFromResponseForFlow(tokenResp, AuthSourceClaudeCodeCLI, claudeAPITokenURL, RedirectURI)
 
 	// Create auth bundle
 	bundle := &ClaudeAuthBundle{
@@ -382,9 +396,17 @@ func (o *ClaudeAuth) ExchangeCodeForTokens(ctx context.Context, code, state stri
 //   - *ClaudeTokenData: The new token data with updated access token
 //   - error: An error if token refresh fails
 func (o *ClaudeAuth) RefreshTokens(ctx context.Context, refreshToken string) (*ClaudeTokenData, error) {
+	return o.RefreshTokensWithOptions(ctx, refreshToken, RefreshTokenOptions{
+		TokenEndpoint: claudeAPITokenURL,
+		AuthSource:    AuthSourceClaudeCodeCLI,
+	})
+}
+
+func (o *ClaudeAuth) RefreshTokensWithOptions(ctx context.Context, refreshToken string, opts RefreshTokenOptions) (*ClaudeTokenData, error) {
 	if refreshToken == "" {
 		return nil, fmt.Errorf("refresh token is required")
 	}
+	opts = normalizeRefreshTokenOptions(opts)
 	if blockedUntil := claudeRefreshBlockedUntil(refreshToken); blockedUntil.After(time.Now()) {
 		return nil, &refreshHTTPError{
 			status:    http.StatusTooManyRequests,
@@ -393,8 +415,13 @@ func (o *ClaudeAuth) RefreshTokens(ctx context.Context, refreshToken string) (*C
 		}
 	}
 
-	result, err, _ := claudeRefreshGroup.Do(refreshToken, func() (interface{}, error) {
-		return o.refreshTokensSingleFlight(context.WithoutCancel(ctx), refreshToken)
+	singleflightKey := strings.Join([]string{
+		refreshToken,
+		opts.TokenEndpoint,
+		fmt.Sprintf("%t", opts.AllowEndpointFallback),
+	}, "|")
+	result, err, _ := claudeRefreshGroup.Do(singleflightKey, func() (interface{}, error) {
+		return o.refreshTokensSingleFlight(context.WithoutCancel(ctx), refreshToken, opts)
 	})
 	if err != nil {
 		return nil, err
@@ -406,7 +433,7 @@ func (o *ClaudeAuth) RefreshTokens(ctx context.Context, refreshToken string) (*C
 	return tokenData, nil
 }
 
-func (o *ClaudeAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken string) (*ClaudeTokenData, error) {
+func (o *ClaudeAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken string, opts RefreshTokenOptions) (*ClaudeTokenData, error) {
 	if blockedUntil := claudeRefreshBlockedUntil(refreshToken); blockedUntil.After(time.Now()) {
 		return nil, &refreshHTTPError{
 			status:    http.StatusTooManyRequests,
@@ -415,6 +442,21 @@ func (o *ClaudeAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken
 		}
 	}
 
+	tokenData, err := o.refreshTokenAtEndpoint(ctx, refreshToken, opts.TokenEndpoint, opts.AuthSource)
+	if err == nil {
+		return tokenData, nil
+	}
+	if !opts.AllowEndpointFallback || !shouldFallbackClaudeRefreshEndpoint(err) {
+		return nil, err
+	}
+	fallbackEndpoint := alternateClaudeTokenEndpoint(opts.TokenEndpoint)
+	if fallbackEndpoint == "" {
+		return nil, err
+	}
+	return o.refreshTokenAtEndpoint(ctx, refreshToken, fallbackEndpoint, authSourceForTokenEndpoint(fallbackEndpoint))
+}
+
+func (o *ClaudeAuth) refreshTokenAtEndpoint(ctx context.Context, refreshToken, endpoint, authSource string) (*ClaudeTokenData, error) {
 	reqBody := map[string]interface{}{
 		"client_id":     ClientID,
 		"grant_type":    "refresh_token",
@@ -426,7 +468,7 @@ func (o *ClaudeAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", TokenURL, strings.NewReader(string(jsonBody)))
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, strings.NewReader(string(jsonBody)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create refresh request: %w", err)
 	}
@@ -470,8 +512,72 @@ func (o *ClaudeAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken
 
 	clearClaudeRefreshBlockedUntil(refreshToken)
 
-	tokenData := tokenDataFromResponse(tokenResp)
+	tokenData := tokenDataFromResponseForFlow(tokenResp, authSource, endpoint, redirectURIForAuthSource(authSource))
 	return &tokenData, nil
+}
+
+func normalizeRefreshTokenOptions(opts RefreshTokenOptions) RefreshTokenOptions {
+	opts.TokenEndpoint = strings.TrimSpace(opts.TokenEndpoint)
+	opts.AuthSource = strings.TrimSpace(opts.AuthSource)
+	if opts.TokenEndpoint == "" {
+		if opts.AuthSource == AuthSourceClaudePlatform {
+			opts.TokenEndpoint = claudePlatformTokenURL
+		} else {
+			opts.TokenEndpoint = claudeAPITokenURL
+		}
+	}
+	if opts.AuthSource == "" {
+		opts.AuthSource = authSourceForTokenEndpoint(opts.TokenEndpoint)
+	}
+	return opts
+}
+
+func authSourceForTokenEndpoint(endpoint string) string {
+	if sameClaudeTokenEndpoint(endpoint, claudePlatformTokenURL) {
+		return AuthSourceClaudePlatform
+	}
+	return AuthSourceClaudeCodeCLI
+}
+
+func redirectURIForAuthSource(authSource string) string {
+	if authSource == AuthSourceClaudePlatform {
+		return PlatformRedirectURI
+	}
+	return RedirectURI
+}
+
+func sameClaudeTokenEndpoint(a, b string) bool {
+	parsedA, errA := url.Parse(strings.TrimSpace(a))
+	parsedB, errB := url.Parse(strings.TrimSpace(b))
+	if errA == nil && errB == nil && parsedA.Scheme != "" && parsedB.Scheme != "" {
+		return strings.EqualFold(parsedA.Scheme, parsedB.Scheme) &&
+			strings.EqualFold(parsedA.Host, parsedB.Host) &&
+			strings.TrimRight(parsedA.Path, "/") == strings.TrimRight(parsedB.Path, "/")
+	}
+	return strings.TrimSpace(a) == strings.TrimSpace(b)
+}
+
+func alternateClaudeTokenEndpoint(endpoint string) string {
+	if sameClaudeTokenEndpoint(endpoint, claudeAPITokenURL) {
+		return claudePlatformTokenURL
+	}
+	if sameClaudeTokenEndpoint(endpoint, claudePlatformTokenURL) {
+		return claudeAPITokenURL
+	}
+	return ""
+}
+
+func shouldFallbackClaudeRefreshEndpoint(err error) bool {
+	var httpErr *refreshHTTPError
+	if !errors.As(err, &httpErr) {
+		return false
+	}
+	switch httpErr.StatusCode() {
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden:
+		return true
+	default:
+		return false
+	}
 }
 
 func generateClaudeOAuthState() (string, error) {
@@ -603,13 +709,33 @@ func (o *ClaudeAuth) CookieAuth(ctx context.Context, sessionKey string) (*Claude
 	if err != nil {
 		return nil, fmt.Errorf("failed to get organization info: %w", err)
 	}
-	code, err := o.getCookieAuthorizationCode(ctx, sessionKey, orgUUID, claudeCookieScopeAPI, pkceCodes.CodeChallenge, state)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get authorization code: %w", err)
+	code, err := o.getCookieAuthorizationCode(ctx, sessionKey, orgUUID, claudeCookieScopeAPI, pkceCodes.CodeChallenge, state, RedirectURI)
+	if err == nil {
+		bundle, err := o.ExchangeCodeForTokens(ctx, code, state, pkceCodes)
+		if err == nil {
+			if bundle.TokenData.OrganizationUUID == "" {
+				bundle.TokenData.OrganizationUUID = orgUUID
+			}
+			return bundle, nil
+		}
+		log.WithError(err).Warn("claude cookie auth: CLI token exchange failed, falling back to platform OAuth")
+	} else {
+		log.WithError(err).Warn("claude cookie auth: CLI authorize failed, falling back to platform OAuth")
 	}
-	bundle, err := o.ExchangePlatformCodeForTokens(ctx, code, state, pkceCodes)
-	if err != nil {
-		return nil, fmt.Errorf("failed to exchange code: %w", err)
+
+	platformCode, platformErr := o.getCookieAuthorizationCode(ctx, sessionKey, orgUUID, claudeCookieScopeAPI, pkceCodes.CodeChallenge, state, PlatformRedirectURI)
+	if platformErr != nil {
+		if err != nil {
+			return nil, fmt.Errorf("failed to get authorization code: cli=%v; platform=%w", err, platformErr)
+		}
+		return nil, fmt.Errorf("failed to get authorization code: %w", platformErr)
+	}
+	bundle, platformErr := o.ExchangePlatformCodeForTokens(ctx, platformCode, state, pkceCodes)
+	if platformErr != nil {
+		if err != nil {
+			return nil, fmt.Errorf("failed to exchange code: cli=%v; platform=%w", err, platformErr)
+		}
+		return nil, fmt.Errorf("failed to exchange code: %w", platformErr)
 	}
 	if bundle.TokenData.OrganizationUUID == "" {
 		bundle.TokenData.OrganizationUUID = orgUUID
@@ -666,13 +792,13 @@ func (o *ClaudeAuth) getCookieOrganizationUUID(ctx context.Context, sessionKey s
 	return selectCookieOrganizationUUID(orgs)
 }
 
-func (o *ClaudeAuth) getCookieAuthorizationCode(ctx context.Context, sessionKey, orgUUID, scope, codeChallenge, state string) (string, error) {
+func (o *ClaudeAuth) getCookieAuthorizationCode(ctx context.Context, sessionKey, orgUUID, scope, codeChallenge, state, redirectURI string) (string, error) {
 	authURL := fmt.Sprintf("%s/v1/oauth/%s/authorize", strings.TrimRight(claudeAIBaseURL, "/"), url.PathEscape(orgUUID))
 	reqBody := map[string]any{
 		"response_type":         "code",
 		"client_id":             ClientID,
 		"organization_uuid":     orgUUID,
-		"redirect_uri":          PlatformRedirectURI,
+		"redirect_uri":          redirectURI,
 		"scope":                 scope,
 		"state":                 state,
 		"code_challenge":        codeChallenge,
@@ -782,7 +908,7 @@ func (o *ClaudeAuth) ExchangePlatformCodeForTokens(ctx context.Context, code, st
 			return nil, err
 		}
 		return &ClaudeAuthBundle{
-			TokenData:   tokenDataFromResponse(tokenResp),
+			TokenData:   tokenDataFromResponseForFlow(tokenResp, AuthSourceClaudePlatform, claudePlatformTokenURL, PlatformRedirectURI),
 			LastRefresh: time.Now().Format(time.RFC3339),
 		}, nil
 	}
@@ -819,7 +945,7 @@ func (o *ClaudeAuth) ExchangePlatformCodeForTokens(ctx context.Context, code, st
 	}
 
 	return &ClaudeAuthBundle{
-		TokenData:   tokenDataFromResponse(tokenResp),
+		TokenData:   tokenDataFromResponseForFlow(tokenResp, AuthSourceClaudePlatform, claudePlatformTokenURL, PlatformRedirectURI),
 		LastRefresh: time.Now().Format(time.RFC3339),
 	}, nil
 }
@@ -844,6 +970,9 @@ func (o *ClaudeAuth) CreateTokenStorage(bundle *ClaudeAuthBundle) *ClaudeTokenSt
 		OrganizationUUID: bundle.TokenData.OrganizationUUID,
 		AccountUUID:      bundle.TokenData.AccountUUID,
 		Scope:            bundle.TokenData.Scope,
+		AuthSource:       bundle.TokenData.AuthSource,
+		TokenEndpoint:    bundle.TokenData.TokenEndpoint,
+		RedirectURI:      bundle.TokenData.RedirectURI,
 		Expire:           bundle.TokenData.Expire,
 	}
 
@@ -863,6 +992,13 @@ func (o *ClaudeAuth) CreateTokenStorage(bundle *ClaudeAuthBundle) *ClaudeTokenSt
 //   - *ClaudeTokenData: The refreshed token data
 //   - error: An error if all retry attempts fail
 func (o *ClaudeAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken string, maxRetries int) (*ClaudeTokenData, error) {
+	return o.RefreshTokensWithRetryOptions(ctx, refreshToken, maxRetries, RefreshTokenOptions{
+		TokenEndpoint: claudeAPITokenURL,
+		AuthSource:    AuthSourceClaudeCodeCLI,
+	})
+}
+
+func (o *ClaudeAuth) RefreshTokensWithRetryOptions(ctx context.Context, refreshToken string, maxRetries int, opts RefreshTokenOptions) (*ClaudeTokenData, error) {
 	var lastErr error
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
@@ -875,7 +1011,7 @@ func (o *ClaudeAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken st
 			}
 		}
 
-		tokenData, err := o.RefreshTokens(ctx, refreshToken)
+		tokenData, err := o.RefreshTokensWithOptions(ctx, refreshToken, opts)
 		if err == nil {
 			return tokenData, nil
 		}
@@ -918,6 +1054,15 @@ func (o *ClaudeAuth) UpdateTokenStorage(storage *ClaudeTokenStorage, tokenData *
 	}
 	if tokenData.Scope != "" {
 		storage.Scope = tokenData.Scope
+	}
+	if tokenData.AuthSource != "" {
+		storage.AuthSource = tokenData.AuthSource
+	}
+	if tokenData.TokenEndpoint != "" {
+		storage.TokenEndpoint = tokenData.TokenEndpoint
+	}
+	if tokenData.RedirectURI != "" {
+		storage.RedirectURI = tokenData.RedirectURI
 	}
 	storage.Expire = tokenData.Expire
 }

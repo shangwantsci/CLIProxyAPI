@@ -204,6 +204,42 @@ waitForCallback:
 	metadata := map[string]any{
 		"email": tokenStorage.Email,
 	}
+	if tokenStorage.AccessToken != "" {
+		metadata["access_token"] = tokenStorage.AccessToken
+	}
+	if tokenStorage.RefreshToken != "" {
+		metadata["refresh_token"] = tokenStorage.RefreshToken
+	}
+	if tokenStorage.TokenType != "" {
+		metadata["token_type"] = tokenStorage.TokenType
+	}
+	if tokenStorage.ExpiresIn > 0 {
+		metadata["expires_in"] = tokenStorage.ExpiresIn
+	}
+	if tokenStorage.OrganizationUUID != "" {
+		metadata["organization_uuid"] = tokenStorage.OrganizationUUID
+	}
+	if tokenStorage.AccountUUID != "" {
+		metadata["account_uuid"] = tokenStorage.AccountUUID
+	}
+	if tokenStorage.Scope != "" {
+		metadata["scope"] = tokenStorage.Scope
+	}
+	if tokenStorage.AuthSource != "" {
+		metadata["auth_source"] = tokenStorage.AuthSource
+	}
+	if tokenStorage.TokenEndpoint != "" {
+		metadata["token_endpoint"] = tokenStorage.TokenEndpoint
+	}
+	if tokenStorage.RedirectURI != "" {
+		metadata["redirect_uri"] = tokenStorage.RedirectURI
+	}
+	if tokenStorage.Expire != "" {
+		metadata["expired"] = tokenStorage.Expire
+	}
+	if tokenStorage.LastRefresh != "" {
+		metadata["last_refresh"] = tokenStorage.LastRefresh
+	}
 
 	fmt.Println("Claude authentication successful")
 	if authBundle.APIKey != "" {

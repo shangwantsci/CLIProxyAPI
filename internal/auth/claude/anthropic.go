@@ -1,5 +1,10 @@
 package claude
 
+const (
+	AuthSourceClaudeCodeCLI  = "claude_code_cli"
+	AuthSourceClaudePlatform = "claude_platform"
+)
+
 // PKCECodes holds PKCE verification codes for OAuth2 PKCE flow
 type PKCECodes struct {
 	// CodeVerifier is the cryptographically random string used to correlate
@@ -29,6 +34,12 @@ type ClaudeTokenData struct {
 	Scope string `json:"scope,omitempty"`
 	// Expire is the timestamp of the token expire
 	Expire string `json:"expired"`
+	// AuthSource records which Claude OAuth flow produced the token.
+	AuthSource string `json:"auth_source,omitempty"`
+	// TokenEndpoint records which endpoint should refresh this token.
+	TokenEndpoint string `json:"token_endpoint,omitempty"`
+	// RedirectURI records the OAuth redirect URI used to produce the token.
+	RedirectURI string `json:"redirect_uri,omitempty"`
 }
 
 // ClaudeAuthBundle aggregates authentication data after OAuth flow completion

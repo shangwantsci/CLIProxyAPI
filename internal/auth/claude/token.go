@@ -46,6 +46,15 @@ type ClaudeTokenStorage struct {
 	// Scope is the granted OAuth scope.
 	Scope string `json:"scope,omitempty"`
 
+	// AuthSource records which Claude OAuth flow produced the token.
+	AuthSource string `json:"auth_source,omitempty"`
+
+	// TokenEndpoint records which endpoint should refresh this token.
+	TokenEndpoint string `json:"token_endpoint,omitempty"`
+
+	// RedirectURI records the OAuth redirect URI used to produce the token.
+	RedirectURI string `json:"redirect_uri,omitempty"`
+
 	// Type indicates the authentication provider type, always "claude" for this storage.
 	Type string `json:"type"`
 

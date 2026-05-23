@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -119,5 +120,67 @@ func TestRefreshTokens_DeduplicatesConcurrentRefresh(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Fatalf("expected exactly 1 upstream refresh call, got %d", got)
+	}
+}
+
+func TestRefreshTokensWithRetryOptionsFallsBackToPlatformEndpoint(t *testing.T) {
+	resetClaudeRefreshState()
+	defer resetClaudeRefreshState()
+
+	var apiCalls int32
+	var platformCalls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/token":
+			atomic.AddInt32(&apiCalls, 1)
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
+		case "/platform/token":
+			atomic.AddInt32(&platformCalls, 1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"access_token":"platform-access",
+				"refresh_token":"platform-refresh",
+				"token_type":"Bearer",
+				"expires_in":3600,
+				"account":{"email_address":"user@example.com"}
+			}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	oldAPITokenURL := claudeAPITokenURL
+	oldPlatformTokenURL := claudePlatformTokenURL
+	defer func() {
+		claudeAPITokenURL = oldAPITokenURL
+		claudePlatformTokenURL = oldPlatformTokenURL
+	}()
+	claudeAPITokenURL = server.URL + "/api/token"
+	claudePlatformTokenURL = server.URL + "/platform/token"
+
+	auth := &ClaudeAuth{httpClient: server.Client()}
+	td, err := auth.RefreshTokensWithRetryOptions(context.Background(), "refresh-token", 1, RefreshTokenOptions{
+		TokenEndpoint:         claudeAPITokenURL,
+		AllowEndpointFallback: true,
+	})
+	if err != nil {
+		t.Fatalf("RefreshTokensWithRetryOptions returned error: %v", err)
+	}
+	if got := atomic.LoadInt32(&apiCalls); got != 1 {
+		t.Fatalf("api refresh calls = %d, want 1", got)
+	}
+	if got := atomic.LoadInt32(&platformCalls); got != 1 {
+		t.Fatalf("platform refresh calls = %d, want 1", got)
+	}
+	if td.AccessToken != "platform-access" || td.RefreshToken != "platform-refresh" {
+		t.Fatalf("token data = %#v, want platform tokens", td)
+	}
+	if td.TokenEndpoint != claudePlatformTokenURL {
+		t.Fatalf("token endpoint = %q, want platform endpoint", td.TokenEndpoint)
+	}
+	if td.AuthSource != AuthSourceClaudePlatform {
+		t.Fatalf("auth source = %q, want %q", td.AuthSource, AuthSourceClaudePlatform)
 	}
 }
