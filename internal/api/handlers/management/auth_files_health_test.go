@@ -35,9 +35,12 @@ func TestListClaudeAuthHealth_ExposesClaudeAccountRuntimeState(t *testing.T) {
 			"path": "claude-1.json",
 		},
 		Metadata: map[string]any{
-			"type":       "claude",
-			"email":      "x@example.test",
-			"expires_at": expiresAt.Format(time.RFC3339),
+			"type":           "claude",
+			"email":          "x@example.test",
+			"expires_at":     expiresAt.Format(time.RFC3339),
+			"auth_source":    "claude_code_cli",
+			"token_endpoint": "https://api.anthropic.com/v1/oauth/token",
+			"redirect_uri":   "http://localhost:54545/callback",
 			"claude_device_profile": map[string]any{
 				"user_agent":      "claude-cli/2.1.93 (external, cli)",
 				"package_version": "0.71.0",
@@ -94,5 +97,11 @@ func TestListClaudeAuthHealth_ExposesClaudeAccountRuntimeState(t *testing.T) {
 	}
 	if got, _ := account["quota_reason"].(string); got != "rate limited" {
 		t.Fatalf("quota_reason = %q, want rate limited", got)
+	}
+	if got, _ := account["auth_source"].(string); got != "claude_code_cli" {
+		t.Fatalf("auth_source = %q, want claude_code_cli", got)
+	}
+	if got, _ := account["auth_method_label"].(string); got != "Claude Code CLI OAuth" {
+		t.Fatalf("auth_method_label = %q, want Claude Code CLI OAuth", got)
 	}
 }

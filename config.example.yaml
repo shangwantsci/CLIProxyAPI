@@ -95,6 +95,14 @@ max-retry-interval: 30
 # When true, disable auth/model cooldown scheduling globally (prevents blackout windows after failure states).
 disable-cooling: false
 
+# Claude OAuth usage protection. When the remaining subscription quota is at
+# or below these percentages, the account enters temporary cooldown until the
+# corresponding Claude usage window resets. Set either value to 0 to cool only
+# when that window is fully exhausted.
+claude-quota-cooling-thresholds:
+  five-hour-remaining-percent: 20
+  weekly-remaining-percent: 10
+
 # disable-image-generation supports: false (default), true, or "chat".
 # - true: disable image_generation everywhere (also returns 404 for /v1/images/generations and /v1/images/edits).
 # - "chat": disable image_generation injection on non-images endpoints, but keep /v1/images/generations and /v1/images/edits enabled.

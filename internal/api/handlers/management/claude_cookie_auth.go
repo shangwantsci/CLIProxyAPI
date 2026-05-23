@@ -93,9 +93,13 @@ func (h *Handler) PostAnthropicCookieAuth(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"status":    "ok",
-		"auth_file": fileName,
-		"path":      savedPath,
-		"email":     tokenStorage.Email,
+		"status":            "ok",
+		"auth_file":         fileName,
+		"path":              savedPath,
+		"email":             tokenStorage.Email,
+		"auth_source":       tokenStorage.AuthSource,
+		"auth_method_label": claudeAuthMethodLabel(tokenStorage.AuthSource),
+		"token_endpoint":    tokenStorage.TokenEndpoint,
+		"redirect_uri":      tokenStorage.RedirectURI,
 	})
 }

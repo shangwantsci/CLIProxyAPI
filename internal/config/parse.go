@@ -28,6 +28,10 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.RequestRetry = DefaultRequestRetry
 	cfg.MaxRetryCredentials = DefaultMaxRetryCredentials
 	cfg.MaxRetryInterval = DefaultMaxRetryInterval
+	cfg.ClaudeQuotaCoolingThresholds = ClaudeQuotaCoolingThresholds{
+		FiveHourRemainingPercent: DefaultClaudeFiveHourQuotaCoolingRemainingPercent,
+		WeeklyRemainingPercent:   DefaultClaudeWeeklyQuotaCoolingRemainingPercent,
+	}
 	cfg.Routing.SessionAffinity = true
 	cfg.Routing.SessionAffinityTTL = DefaultSessionAffinityTTL
 	cfg.DisableImageGeneration = DisableImageGenerationOff
@@ -79,6 +83,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	}
 
 	// Apply the same sanitization pipeline.
+	cfg.SanitizeClaudeQuotaCoolingThresholds()
 	cfg.SanitizeGeminiKeys()
 	cfg.SanitizeVertexCompatKeys()
 	cfg.SanitizeCodexKeys()

@@ -537,9 +537,40 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		entry["cloak_strict_mode"] = authBoolSetting(auth, "cloak_strict_mode", false)
 		entry["cloak_cache_user_id"] = authBoolSetting(auth, "cloak_cache_user_id", true)
 		entry["cloak_sensitive_words"] = authStringListSetting(auth, "cloak_sensitive_words")
+		addClaudeAuthMethodFields(entry, auth)
 		addClaudeAuthHealthFields(entry, auth, time.Now())
 	}
 	return entry
+}
+
+func addClaudeAuthMethodFields(entry gin.H, auth *coreauth.Auth) {
+	if entry == nil || auth == nil || auth.Metadata == nil {
+		return
+	}
+	authSource := strings.TrimSpace(authStringSetting(auth, "auth_source"))
+	tokenEndpoint := strings.TrimSpace(authStringSetting(auth, "token_endpoint"))
+	redirectURI := strings.TrimSpace(authStringSetting(auth, "redirect_uri"))
+	if authSource != "" {
+		entry["auth_source"] = authSource
+		entry["auth_method_label"] = claudeAuthMethodLabel(authSource)
+	}
+	if tokenEndpoint != "" {
+		entry["token_endpoint"] = tokenEndpoint
+	}
+	if redirectURI != "" {
+		entry["redirect_uri"] = redirectURI
+	}
+}
+
+func claudeAuthMethodLabel(authSource string) string {
+	switch strings.ToLower(strings.TrimSpace(authSource)) {
+	case claude.AuthSourceClaudeCodeCLI:
+		return "Claude Code CLI OAuth"
+	case claude.AuthSourceClaudePlatform:
+		return "Platform OAuth"
+	default:
+		return "未知认证来源"
+	}
 }
 
 func addClaudeAuthHealthFields(entry gin.H, auth *coreauth.Auth, now time.Time) {
@@ -2154,7 +2185,12 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 			fmt.Println("API key obtained and saved")
 		}
 		fmt.Println("You can now use Claude services through this CLI")
-		CompleteOAuthSession(state)
+		CompleteOAuthSessionWithDetails(state, map[string]string{
+			"auth_source":       tokenStorage.AuthSource,
+			"auth_method_label": claudeAuthMethodLabel(tokenStorage.AuthSource),
+			"token_endpoint":    tokenStorage.TokenEndpoint,
+			"redirect_uri":      tokenStorage.RedirectURI,
+		})
 		CompleteOAuthSessionsByProvider("anthropic")
 	}()
 
@@ -3375,13 +3411,23 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 		return
 	}
 
-	_, status, ok := GetOAuthSession(state)
+	session, ok := oauthSessions.Get(state)
 	if !ok {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 		return
 	}
-	if status != "" {
-		c.JSON(http.StatusOK, gin.H{"status": "error", "error": status})
+	if session.Completed {
+		payload := gin.H{"status": "ok"}
+		for key, value := range session.Details {
+			if strings.TrimSpace(key) != "" && strings.TrimSpace(value) != "" {
+				payload[key] = value
+			}
+		}
+		c.JSON(http.StatusOK, payload)
+		return
+	}
+	if session.Status != "" {
+		c.JSON(http.StatusOK, gin.H{"status": "error", "error": session.Status})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "wait"})

@@ -306,7 +306,7 @@ func (h *Handler) recordClaudeOAuthUsageSuccess(ctx context.Context, auth *corea
 	if now.IsZero() {
 		now = time.Now()
 	}
-	usage, ok := claudeOAuthUsageQuotaState(body, now)
+	usage, ok := claudeOAuthUsageQuotaState(body, now, h.claudeOAuthUsageThresholds())
 	if !ok {
 		return
 	}
@@ -352,6 +352,11 @@ type claudeOAuthUsageProbeState struct {
 	recoverAt time.Time
 }
 
+type claudeOAuthUsageThresholds struct {
+	fiveHourRemaining float64
+	weeklyRemaining   float64
+}
+
 var claudeOAuthUsageWindowKeys = []string{
 	"five_hour",
 	"seven_day",
@@ -362,7 +367,27 @@ var claudeOAuthUsageWindowKeys = []string{
 	"iguana_necktie",
 }
 
-func claudeOAuthUsageQuotaState(body []byte, now time.Time) (claudeOAuthUsageProbeState, bool) {
+func (h *Handler) claudeOAuthUsageThresholds() claudeOAuthUsageThresholds {
+	if h == nil || h.cfg == nil {
+		return claudeOAuthUsageThresholds{}
+	}
+	return claudeOAuthUsageThresholds{
+		fiveHourRemaining: float64(clampManagementPercent(h.cfg.ClaudeQuotaCoolingThresholds.FiveHourRemainingPercent)),
+		weeklyRemaining:   float64(clampManagementPercent(h.cfg.ClaudeQuotaCoolingThresholds.WeeklyRemainingPercent)),
+	}
+}
+
+func clampManagementPercent(value int) int {
+	if value < 0 {
+		return 0
+	}
+	if value > 100 {
+		return 100
+	}
+	return value
+}
+
+func claudeOAuthUsageQuotaState(body []byte, now time.Time, thresholds claudeOAuthUsageThresholds) (claudeOAuthUsageProbeState, bool) {
 	if !gjson.ValidBytes(body) {
 		return claudeOAuthUsageProbeState{}, false
 	}
@@ -370,7 +395,7 @@ func claudeOAuthUsageQuotaState(body []byte, now time.Time) (claudeOAuthUsagePro
 		now = time.Now()
 	}
 
-	var exhausted []string
+	var limited []string
 	recoverAt := time.Time{}
 	seenWindow := false
 	for _, key := range claudeOAuthUsageWindowKeys {
@@ -383,7 +408,14 @@ func claudeOAuthUsageQuotaState(body []byte, now time.Time) (claudeOAuthUsagePro
 			continue
 		}
 		seenWindow = true
-		if utilization.Float() < 99.999 {
+		remainingThreshold := claudeOAuthUsageWindowRemainingThreshold(key, thresholds)
+		remaining := 100 - utilization.Float()
+		if remaining < 0 {
+			remaining = 0
+		} else if remaining > 100 {
+			remaining = 100
+		}
+		if !claudeOAuthUsageWindowShouldCool(remaining, remainingThreshold) {
 			continue
 		}
 		resetAt := parseClaudeUsageResetTime(window.Get("resets_at"), now)
@@ -393,7 +425,7 @@ func claudeOAuthUsageQuotaState(body []byte, now time.Time) (claudeOAuthUsagePro
 		if resetAt.Before(now) {
 			resetAt = now
 		}
-		exhausted = append(exhausted, key)
+		limited = append(limited, claudeOAuthUsageWindowReason(key, remaining, remainingThreshold))
 		if recoverAt.IsZero() || resetAt.Before(recoverAt) {
 			recoverAt = resetAt
 		}
@@ -401,14 +433,38 @@ func claudeOAuthUsageQuotaState(body []byte, now time.Time) (claudeOAuthUsagePro
 	if !seenWindow {
 		return claudeOAuthUsageProbeState{}, false
 	}
-	if len(exhausted) == 0 {
+	if len(limited) == 0 {
 		return claudeOAuthUsageProbeState{}, true
 	}
 	return claudeOAuthUsageProbeState{
 		exceeded:  true,
-		reason:    "Claude quota exhausted: " + strings.Join(exhausted, ", "),
+		reason:    "Claude quota cooldown: " + strings.Join(limited, ", "),
 		recoverAt: recoverAt,
 	}, true
+}
+
+func claudeOAuthUsageWindowRemainingThreshold(key string, thresholds claudeOAuthUsageThresholds) float64 {
+	if key == "five_hour" {
+		return thresholds.fiveHourRemaining
+	}
+	if strings.HasPrefix(key, "seven_day") {
+		return thresholds.weeklyRemaining
+	}
+	return 0
+}
+
+func claudeOAuthUsageWindowShouldCool(remaining, threshold float64) bool {
+	if threshold <= 0 {
+		return remaining <= 0.001
+	}
+	return remaining <= threshold
+}
+
+func claudeOAuthUsageWindowReason(key string, remaining, threshold float64) string {
+	if threshold <= 0 {
+		return key
+	}
+	return fmt.Sprintf("%s remaining %.0f%% <= %.0f%%", key, remaining, threshold)
 }
 
 func parseClaudeUsageResetTime(value gjson.Result, now time.Time) time.Time {

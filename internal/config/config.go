@@ -20,13 +20,15 @@ import (
 )
 
 const (
-	DefaultPanelGitHubRepository = "https://github.com/shangwantsci/Cli-Proxy-API-Management-Center"
-	DefaultPprofAddr             = "127.0.0.1:8316"
-	DefaultAuthDir               = "~/.cli-proxy-api"
-	DefaultRequestRetry          = 2
-	DefaultMaxRetryCredentials   = 0
-	DefaultMaxRetryInterval      = 30
-	DefaultSessionAffinityTTL    = "1h"
+	DefaultPanelGitHubRepository                      = "https://github.com/shangwantsci/Cli-Proxy-API-Management-Center"
+	DefaultPprofAddr                                  = "127.0.0.1:8316"
+	DefaultAuthDir                                    = "~/.cli-proxy-api"
+	DefaultRequestRetry                               = 2
+	DefaultMaxRetryCredentials                        = 0
+	DefaultMaxRetryInterval                           = 30
+	DefaultSessionAffinityTTL                         = "1h"
+	DefaultClaudeFiveHourQuotaCoolingRemainingPercent = 20
+	DefaultClaudeWeeklyQuotaCoolingRemainingPercent   = 10
 )
 
 // Config represents the application's configuration, loaded from a YAML file.
@@ -92,6 +94,9 @@ type Config struct {
 	MaxRetryCredentials int `yaml:"max-retry-credentials" json:"max-retry-credentials"`
 	// MaxRetryInterval defines the maximum wait time in seconds before retrying a cooled-down credential.
 	MaxRetryInterval int `yaml:"max-retry-interval" json:"max-retry-interval"`
+
+	// ClaudeQuotaCoolingThresholds defines remaining quota percentages that trigger temporary Claude account cooldown.
+	ClaudeQuotaCoolingThresholds ClaudeQuotaCoolingThresholds `yaml:"claude-quota-cooling-thresholds" json:"claude-quota-cooling-thresholds"`
 
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
@@ -166,6 +171,13 @@ type ClaudeHeaderDefaults struct {
 	Arch                   string `yaml:"arch" json:"arch"`
 	Timeout                string `yaml:"timeout" json:"timeout"`
 	StabilizeDeviceProfile *bool  `yaml:"stabilize-device-profile,omitempty" json:"stabilize-device-profile,omitempty"`
+}
+
+// ClaudeQuotaCoolingThresholds configures protective cooldown thresholds based
+// on remaining Claude subscription quota. Values are percentages in [0, 100].
+type ClaudeQuotaCoolingThresholds struct {
+	FiveHourRemainingPercent int `yaml:"five-hour-remaining-percent" json:"five-hour-remaining-percent"`
+	WeeklyRemainingPercent   int `yaml:"weekly-remaining-percent" json:"weekly-remaining-percent"`
 }
 
 // CodexHeaderDefaults configures fallback header values injected into Codex
@@ -648,6 +660,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.RequestRetry = DefaultRequestRetry
 	cfg.MaxRetryCredentials = DefaultMaxRetryCredentials
 	cfg.MaxRetryInterval = DefaultMaxRetryInterval
+	cfg.ClaudeQuotaCoolingThresholds = ClaudeQuotaCoolingThresholds{
+		FiveHourRemainingPercent: DefaultClaudeFiveHourQuotaCoolingRemainingPercent,
+		WeeklyRemainingPercent:   DefaultClaudeWeeklyQuotaCoolingRemainingPercent,
+	}
 	cfg.Routing.SessionAffinity = true
 	cfg.Routing.SessionAffinityTTL = DefaultSessionAffinityTTL
 	cfg.DisableImageGeneration = DisableImageGenerationOff
@@ -721,6 +737,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if cfg.MaxRetryCredentials < 0 {
 		cfg.MaxRetryCredentials = 0
 	}
+
+	cfg.SanitizeClaudeQuotaCoolingThresholds()
 
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
@@ -834,6 +852,30 @@ func (cfg *Config) SanitizeCodexHeaderDefaults() {
 	}
 	cfg.CodexHeaderDefaults.UserAgent = strings.TrimSpace(cfg.CodexHeaderDefaults.UserAgent)
 	cfg.CodexHeaderDefaults.BetaFeatures = strings.TrimSpace(cfg.CodexHeaderDefaults.BetaFeatures)
+}
+
+// SanitizeClaudeQuotaCoolingThresholds clamps Claude quota protection
+// thresholds to valid percentages. Zero means "only cool at 0%".
+func (cfg *Config) SanitizeClaudeQuotaCoolingThresholds() {
+	if cfg == nil {
+		return
+	}
+	cfg.ClaudeQuotaCoolingThresholds.FiveHourRemainingPercent = clampPercent(
+		cfg.ClaudeQuotaCoolingThresholds.FiveHourRemainingPercent,
+	)
+	cfg.ClaudeQuotaCoolingThresholds.WeeklyRemainingPercent = clampPercent(
+		cfg.ClaudeQuotaCoolingThresholds.WeeklyRemainingPercent,
+	)
+}
+
+func clampPercent(value int) int {
+	if value < 0 {
+		return 0
+	}
+	if value > 100 {
+		return 100
+	}
+	return value
 }
 
 // SanitizeClaudeHeaderDefaults trims surrounding whitespace from the

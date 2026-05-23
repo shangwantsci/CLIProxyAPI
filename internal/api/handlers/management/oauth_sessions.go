@@ -25,6 +25,8 @@ var (
 type oauthSession struct {
 	Provider  string
 	Status    string
+	Completed bool
+	Details   map[string]string
 	CreatedAt time.Time
 	ExpiresAt time.Time
 }
@@ -111,6 +113,37 @@ func (s *oauthSessionStore) Complete(state string) {
 	delete(s.sessions, state)
 }
 
+func (s *oauthSessionStore) CompleteWithDetails(state string, details map[string]string) {
+	state = strings.TrimSpace(state)
+	if state == "" {
+		return
+	}
+	now := time.Now()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.purgeExpiredLocked(now)
+	session, ok := s.sessions[state]
+	if !ok {
+		return
+	}
+	session.Completed = true
+	session.Status = ""
+	session.ExpiresAt = now.Add(s.ttl)
+	if len(details) > 0 {
+		session.Details = make(map[string]string, len(details))
+		for key, value := range details {
+			key = strings.TrimSpace(key)
+			value = strings.TrimSpace(value)
+			if key != "" && value != "" {
+				session.Details[key] = value
+			}
+		}
+	}
+	s.sessions[state] = session
+}
+
 func (s *oauthSessionStore) CompleteProvider(provider string) int {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	if provider == "" {
@@ -124,6 +157,9 @@ func (s *oauthSessionStore) CompleteProvider(provider string) int {
 	s.purgeExpiredLocked(now)
 	removed := 0
 	for state, session := range s.sessions {
+		if session.Completed {
+			continue
+		}
 		if strings.EqualFold(session.Provider, provider) {
 			delete(s.sessions, state)
 			removed++
@@ -160,6 +196,9 @@ func (s *oauthSessionStore) IsPending(state, provider string) bool {
 	if session.Status != "" {
 		return false
 	}
+	if session.Completed {
+		return false
+	}
 	if provider == "" {
 		return true
 	}
@@ -173,6 +212,10 @@ func RegisterOAuthSession(state, provider string) { oauthSessions.Register(state
 func SetOAuthSessionError(state, message string) { oauthSessions.SetError(state, message) }
 
 func CompleteOAuthSession(state string) { oauthSessions.Complete(state) }
+
+func CompleteOAuthSessionWithDetails(state string, details map[string]string) {
+	oauthSessions.CompleteWithDetails(state, details)
+}
 
 func CompleteOAuthSessionsByProvider(provider string) int {
 	return oauthSessions.CompleteProvider(provider)

@@ -75,3 +75,40 @@ func TestPostOAuthCallbackParsesFragmentCallbackURL(t *testing.T) {
 		t.Fatalf("state = %q, want %q", response["state"], state)
 	}
 }
+
+func TestGetAuthStatusReturnsOAuthCompletionDetails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	oldSessions := oauthSessions
+	oauthSessions = newOAuthSessionStore(time.Minute)
+	defer func() { oauthSessions = oldSessions }()
+
+	state := "state-complete"
+	RegisterOAuthSession(state, "anthropic")
+	CompleteOAuthSessionWithDetails(state, map[string]string{
+		"auth_source":       "claude_code_cli",
+		"auth_method_label": "Claude Code CLI OAuth",
+	})
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/get-auth-status?state="+state, nil)
+
+	h.GetAuthStatus(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GetAuthStatus status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var response map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if response["status"] != "ok" {
+		t.Fatalf("status = %q, want ok", response["status"])
+	}
+	if response["auth_source"] != "claude_code_cli" {
+		t.Fatalf("auth_source = %q, want claude_code_cli", response["auth_source"])
+	}
+	if response["auth_method_label"] != "Claude Code CLI OAuth" {
+		t.Fatalf("auth_method_label = %q", response["auth_method_label"])
+	}
+}
