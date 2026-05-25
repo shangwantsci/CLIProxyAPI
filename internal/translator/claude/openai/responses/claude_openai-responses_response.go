@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -54,6 +56,13 @@ func pickRequestJSON(originalRequestRawJSON, requestRawJSON []byte) []byte {
 
 func emitEvent(event string, payload []byte) []byte {
 	return translatorcommon.SSEEventData(event, payload)
+}
+
+func openAIResponsesBillableInputTokens(ctx context.Context, modelName string, originalRequestRawJSON []byte, fallback int64) int64 {
+	if billableInput, ok := helps.ClaudeBillableInputTokens(ctx, modelName, "openai-response", originalRequestRawJSON); ok {
+		return billableInput
+	}
+	return fallback
 }
 
 // ConvertClaudeResponseToOpenAIResponses converts Claude SSE to OpenAI Responses SSE events.
@@ -248,6 +257,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 					args = buf.String()
 				}
 			}
+			args = repairOpenAIResponsesToolArguments(args)
 			fcDone := []byte(`{"type":"response.function_call_arguments.done","sequence_number":0,"item_id":"","output_index":0,"arguments":""}`)
 			fcDone, _ = sjson.SetBytes(fcDone, "sequence_number", nextSeq())
 			fcDone, _ = sjson.SetBytes(fcDone, "item_id", fmt.Sprintf("fc_%s", st.CurrentFCID))
@@ -400,6 +410,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				if b := st.FuncArgsBuf[idx]; b != nil {
 					args = b.String()
 				}
+				args = repairOpenAIResponsesToolArguments(args)
 				callID := st.FuncCallIDs[idx]
 				name := st.FuncNames[idx]
 				if callID == "" && st.CurrentFCID != "" {
@@ -423,13 +434,14 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 		}
 		usagePresent := st.UsageSeen || reasoningTokens > 0
 		if usagePresent {
-			completed, _ = sjson.SetBytes(completed, "response.usage.input_tokens", st.InputTokens)
+			billableInputTokens := openAIResponsesBillableInputTokens(ctx, modelName, pickRequestJSON(originalRequestRawJSON, requestRawJSON), st.InputTokens)
+			completed, _ = sjson.SetBytes(completed, "response.usage.input_tokens", billableInputTokens)
 			completed, _ = sjson.SetBytes(completed, "response.usage.input_tokens_details.cached_tokens", 0)
 			completed, _ = sjson.SetBytes(completed, "response.usage.output_tokens", st.OutputTokens)
 			if reasoningTokens > 0 {
 				completed, _ = sjson.SetBytes(completed, "response.usage.output_tokens_details.reasoning_tokens", reasoningTokens)
 			}
-			total := st.InputTokens + st.OutputTokens
+			total := billableInputTokens + st.OutputTokens
 			if total > 0 || st.UsageSeen {
 				completed, _ = sjson.SetBytes(completed, "response.usage.total_tokens", total)
 			}
@@ -441,7 +453,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 }
 
 // ConvertClaudeResponseToOpenAIResponsesNonStream aggregates Claude SSE into a single OpenAI Responses JSON.
-func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
+func ConvertClaudeResponseToOpenAIResponsesNonStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
 	// Aggregate Claude SSE lines into a single OpenAI Responses JSON (non-stream)
 	// We follow the same aggregation logic as the streaming variant but produce
 	// one final object matching docs/out.json structure.
@@ -668,6 +680,7 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 			if args == "" {
 				args = "{}"
 			}
+			args = repairOpenAIResponsesToolArguments(args)
 			item := []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
 			item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("fc_%s", st.id))
 			item, _ = sjson.SetBytes(item, "arguments", args)
@@ -681,6 +694,7 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	}
 
 	// Usage
+	inputTokens = openAIResponsesBillableInputTokens(ctx, modelName, reqBytes, inputTokens)
 	total := inputTokens + outputTokens
 	out, _ = sjson.SetBytes(out, "usage.input_tokens", inputTokens)
 	out, _ = sjson.SetBytes(out, "usage.output_tokens", outputTokens)
@@ -694,4 +708,54 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	}
 
 	return out
+}
+
+func repairOpenAIResponsesToolArguments(arguments string) string {
+	trimmed := strings.TrimSpace(arguments)
+	if trimmed == "" {
+		return "{}"
+	}
+	if json.Valid([]byte(trimmed)) && gjson.Parse(trimmed).IsObject() {
+		return compactOpenAIResponsesJSONObject(trimmed)
+	}
+
+	decoder := json.NewDecoder(strings.NewReader(trimmed))
+	var last map[string]any
+	for {
+		var value map[string]any
+		if err := decoder.Decode(&value); err != nil {
+			break
+		}
+		if value != nil {
+			last = value
+		}
+	}
+	if last != nil {
+		if b, err := json.Marshal(last); err == nil {
+			return string(b)
+		}
+	}
+
+	for i := len(trimmed) - 1; i >= 0; i-- {
+		if trimmed[i] != '{' {
+			continue
+		}
+		candidate := trimmed[i:]
+		if json.Valid([]byte(candidate)) && gjson.Parse(candidate).IsObject() {
+			return compactOpenAIResponsesJSONObject(candidate)
+		}
+	}
+	return "{}"
+}
+
+func compactOpenAIResponsesJSONObject(raw string) string {
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(raw), &obj); err != nil || obj == nil {
+		return "{}"
+	}
+	b, err := json.Marshal(obj)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
 }

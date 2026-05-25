@@ -8,10 +8,12 @@ package chat_completions
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -26,6 +28,7 @@ type ConvertAnthropicResponseToOpenAIParams struct {
 	ResponseID   string
 	FinishReason string
 	Usage        claudeUsageTokens
+	StopFilter   *openAIStopFilter
 	// Tool calls accumulator for streaming
 	ToolCallsAccumulator map[int]*ToolCallAccumulator
 }
@@ -72,6 +75,16 @@ func (u claudeUsageTokens) OpenAIUsage() (promptTokens, completionTokens, totalT
 	return promptTokens, completionTokens, totalTokens, cachedTokens
 }
 
+func openAIUsageWithBillableInput(ctx context.Context, modelName string, originalRequestRawJSON []byte, usage claudeUsageTokens) (promptTokens, completionTokens, totalTokens, cachedTokens int64) {
+	promptTokens, completionTokens, totalTokens, cachedTokens = usage.OpenAIUsage()
+	if billableInput, ok := helps.ClaudeBillableInputTokens(ctx, modelName, "openai", originalRequestRawJSON); ok {
+		promptTokens = billableInput
+		cachedTokens = 0
+		totalTokens = promptTokens + completionTokens
+	}
+	return promptTokens, completionTokens, totalTokens, cachedTokens
+}
+
 // ConvertClaudeResponseToOpenAI converts Claude Code streaming response format to OpenAI Chat Completions format.
 // This function processes various Claude Code event types and transforms them into OpenAI-compatible JSON responses.
 // It handles text content, tool calls, reasoning content, and usage metadata, outputting responses that match
@@ -85,7 +98,7 @@ func (u claudeUsageTokens) OpenAIUsage() (promptTokens, completionTokens, totalT
 //
 // Returns:
 //   - [][]byte: A slice of OpenAI-compatible JSON responses
-func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
+func ConvertClaudeResponseToOpenAI(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	if *param == nil {
 		*param = &ConvertAnthropicResponseToOpenAIParams{
 			CreatedAt:    0,
@@ -176,8 +189,15 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 			case "text_delta":
 				// Text content delta - send incremental text updates
 				if text := delta.Get("text"); text.Exists() {
-					template, _ = sjson.SetBytes(template, "choices.0.delta.content", text.String())
-					hasContent = true
+					filtered, emit := filterOpenAIStreamStopDelta(
+						(*param).(*ConvertAnthropicResponseToOpenAIParams),
+						originalRequestRawJSON,
+						text.String(),
+					)
+					if emit {
+						template, _ = sjson.SetBytes(template, "choices.0.delta.content", filtered)
+						hasContent = true
+					}
 				}
 			case "thinking_delta":
 				// Accumulate reasoning/thinking content
@@ -211,7 +231,7 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 		if (*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator != nil {
 			if accumulator, exists := (*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator[index]; exists {
 				// Build complete tool call with accumulated arguments
-				arguments := accumulator.Arguments.String()
+				arguments := repairOpenAIToolArguments(accumulator.Arguments.String())
 				if arguments == "" {
 					arguments = "{}"
 				}
@@ -241,11 +261,22 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 		// Handle usage information for token counts
 		if usage := root.Get("usage"); usage.Exists() {
 			(*param).(*ConvertAnthropicResponseToOpenAIParams).Usage.Merge(usage)
-			promptTokens, completionTokens, totalTokens, cachedTokens := (*param).(*ConvertAnthropicResponseToOpenAIParams).Usage.OpenAIUsage()
+			promptTokens, completionTokens, totalTokens, cachedTokens := openAIUsageWithBillableInput(
+				ctx,
+				modelName,
+				originalRequestRawJSON,
+				(*param).(*ConvertAnthropicResponseToOpenAIParams).Usage,
+			)
 			template, _ = sjson.SetBytes(template, "usage.prompt_tokens", promptTokens)
 			template, _ = sjson.SetBytes(template, "usage.completion_tokens", completionTokens)
 			template, _ = sjson.SetBytes(template, "usage.total_tokens", totalTokens)
 			template, _ = sjson.SetBytes(template, "usage.prompt_tokens_details.cached_tokens", cachedTokens)
+		}
+		if pending, ok := flushOpenAIStreamStopFilter((*param).(*ConvertAnthropicResponseToOpenAIParams)); ok {
+			contentChunk := template
+			contentChunk, _ = sjson.SetBytes(contentChunk, "choices.0.delta.content", pending)
+			contentChunk, _ = sjson.SetBytes(contentChunk, "choices.0.finish_reason", nil)
+			return [][]byte{contentChunk, template}
 		}
 		return [][]byte{template}
 
@@ -302,7 +333,7 @@ func mapAnthropicStopReasonToOpenAI(anthropicReason string) string {
 //
 // Returns:
 //   - []byte: An OpenAI-compatible JSON response containing all message content and metadata
-func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
+func ConvertClaudeResponseToOpenAINonStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
 	chunks := make([][]byte, 0)
 
 	lines := bytes.Split(rawJSON, []byte("\n"))
@@ -405,7 +436,10 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 	}
 
 	if usageTokens.HasUsage {
-		promptTokens, completionTokens, totalTokens, cachedTokens := usageTokens.OpenAIUsage()
+		if modelName == "" {
+			modelName = model
+		}
+		promptTokens, completionTokens, totalTokens, cachedTokens := openAIUsageWithBillableInput(ctx, modelName, originalRequestRawJSON, usageTokens)
 		out, _ = sjson.SetBytes(out, "usage.prompt_tokens", promptTokens)
 		out, _ = sjson.SetBytes(out, "usage.completion_tokens", completionTokens)
 		out, _ = sjson.SetBytes(out, "usage.total_tokens", totalTokens)
@@ -419,6 +453,7 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 
 	// Set message content by combining all text parts
 	messageContent := strings.Join(contentParts, "")
+	messageContent, _ = applyOpenAIStopSequences(originalRequestRawJSON, messageContent)
 	out, _ = sjson.SetBytes(out, "choices.0.message.content", messageContent)
 
 	// Add reasoning content if available (following OpenAI reasoning format)
@@ -444,7 +479,7 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 				continue
 			}
 
-			arguments := accumulator.Arguments.String()
+			arguments := repairOpenAIToolArguments(accumulator.Arguments.String())
 
 			idPath := fmt.Sprintf("choices.0.message.tool_calls.%d.id", toolCallsCount)
 			typePath := fmt.Sprintf("choices.0.message.tool_calls.%d.type", toolCallsCount)
@@ -467,4 +502,158 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 	}
 
 	return out
+}
+
+func openAIStopSequences(originalRequestRawJSON []byte) []string {
+	stop := gjson.GetBytes(originalRequestRawJSON, "stop")
+	if !stop.Exists() {
+		return nil
+	}
+	var out []string
+	if stop.IsArray() {
+		stop.ForEach(func(_, item gjson.Result) bool {
+			if s := item.String(); s != "" {
+				out = append(out, s)
+			}
+			return true
+		})
+		return out
+	}
+	if s := stop.String(); s != "" {
+		out = append(out, s)
+	}
+	return out
+}
+
+func applyOpenAIStopSequences(originalRequestRawJSON []byte, text string) (string, bool) {
+	stops := openAIStopSequences(originalRequestRawJSON)
+	if len(stops) == 0 || text == "" {
+		return text, false
+	}
+	cut := -1
+	for _, stop := range stops {
+		if stop == "" {
+			continue
+		}
+		if idx := strings.Index(text, stop); idx >= 0 && (cut < 0 || idx < cut) {
+			cut = idx
+		}
+	}
+	if cut < 0 {
+		return text, false
+	}
+	return text[:cut], true
+}
+
+type openAIStopFilter struct {
+	Stops      []string
+	MaxLen     int
+	Pending    string
+	Terminated bool
+}
+
+func newOpenAIStopFilter(originalRequestRawJSON []byte) *openAIStopFilter {
+	stops := openAIStopSequences(originalRequestRawJSON)
+	if len(stops) == 0 {
+		return nil
+	}
+	maxLen := 0
+	for _, stop := range stops {
+		if len(stop) > maxLen {
+			maxLen = len(stop)
+		}
+	}
+	if maxLen <= 0 {
+		return nil
+	}
+	return &openAIStopFilter{Stops: stops, MaxLen: maxLen}
+}
+
+func filterOpenAIStreamStopDelta(state *ConvertAnthropicResponseToOpenAIParams, originalRequestRawJSON []byte, delta string) (string, bool) {
+	if state == nil {
+		return delta, delta != ""
+	}
+	if state.StopFilter == nil {
+		state.StopFilter = newOpenAIStopFilter(originalRequestRawJSON)
+	}
+	filter := state.StopFilter
+	if filter == nil {
+		return delta, delta != ""
+	}
+	if filter.Terminated {
+		return "", false
+	}
+	combined := filter.Pending + delta
+	if cutText, stopped := applyOpenAIStopSequences(originalRequestRawJSON, combined); stopped {
+		filter.Pending = ""
+		filter.Terminated = true
+		return cutText, cutText != ""
+	}
+	hold := filter.MaxLen - 1
+	if hold <= 0 || len(combined) <= hold {
+		filter.Pending = combined
+		return "", false
+	}
+	emitLen := len(combined) - hold
+	filter.Pending = combined[emitLen:]
+	return combined[:emitLen], emitLen > 0
+}
+
+func flushOpenAIStreamStopFilter(state *ConvertAnthropicResponseToOpenAIParams) (string, bool) {
+	if state == nil || state.StopFilter == nil || state.StopFilter.Terminated || state.StopFilter.Pending == "" {
+		return "", false
+	}
+	out := state.StopFilter.Pending
+	state.StopFilter.Pending = ""
+	return out, true
+}
+
+func repairOpenAIToolArguments(arguments string) string {
+	trimmed := strings.TrimSpace(arguments)
+	if trimmed == "" {
+		return "{}"
+	}
+	if json.Valid([]byte(trimmed)) && gjson.Parse(trimmed).IsObject() {
+		return compactJSONObject(trimmed)
+	}
+
+	decoder := json.NewDecoder(strings.NewReader(trimmed))
+	var last map[string]any
+	for {
+		var value map[string]any
+		if err := decoder.Decode(&value); err != nil {
+			break
+		}
+		if value != nil {
+			last = value
+		}
+	}
+	if last != nil {
+		if b, err := json.Marshal(last); err == nil {
+			return string(b)
+		}
+	}
+
+	for i := len(trimmed) - 1; i >= 0; i-- {
+		if trimmed[i] != '{' {
+			continue
+		}
+		candidate := trimmed[i:]
+		if json.Valid([]byte(candidate)) && gjson.Parse(candidate).IsObject() {
+			return compactJSONObject(candidate)
+		}
+	}
+	return "{}"
+}
+
+func compactJSONObject(raw string) string {
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(raw), &obj); err != nil || obj == nil {
+		return "{}"
+	}
+	b, err := json.Marshal(obj)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
 }

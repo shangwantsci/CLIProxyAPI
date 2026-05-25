@@ -1503,7 +1503,11 @@ func TestClaudeExecutor_CountTokens_AppliesCacheControlGuards(t *testing.T) {
 	}))
 	defer server.Close()
 
-	executor := NewClaudeExecutor(&config.Config{})
+	disabled := false
+	executor := NewClaudeExecutor(&config.Config{
+		ClaudeBillableUsage: config.ClaudeBillableUsageConfig{Enabled: &disabled},
+		ClaudeMimicryGuard:  config.ClaudeMimicryGuardConfig{Mode: "observe"},
+	})
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{
 		"api_key":  "key-123",
 		"base_url": server.URL,
@@ -1561,7 +1565,11 @@ func TestClaudeExecutor_CountTokens_AppliesClaudeCodeCloaking(t *testing.T) {
 	ginCtx.Request = ginReq
 	ctx := context.WithValue(context.Background(), "gin", ginCtx)
 
-	executor := NewClaudeExecutor(&config.Config{})
+	disabled := false
+	executor := NewClaudeExecutor(&config.Config{
+		ClaudeBillableUsage: config.ClaudeBillableUsageConfig{Enabled: &disabled},
+		ClaudeMimicryGuard:  config.ClaudeMimicryGuardConfig{Mode: "observe"},
+	})
 	auth := &cliproxyauth.Auth{
 		Attributes: map[string]string{
 			"base_url": server.URL,
@@ -1627,6 +1635,7 @@ func TestClaudeExecutor_Execute_BillingVersionMatchesLearnedDeviceProfile(t *tes
 	ginCtx := newClaudeGinContext(t, incoming)
 	ctx := context.WithValue(context.Background(), "gin", ginCtx)
 	executor := NewClaudeExecutor(&config.Config{
+		ClaudeMimicryGuard: config.ClaudeMimicryGuardConfig{Mode: "observe"},
 		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
 			UserAgent:              "claude-cli/2.1.148 (external, cli)",
 			PackageVersion:         "0.98.0",
@@ -1735,12 +1744,46 @@ func TestClaudeExecutor_ExecuteStream_InvalidGzipErrorBodyReturnsDecodeMessage(t
 
 func TestClaudeExecutor_CountTokens_InvalidGzipErrorBodyReturnsDecodeMessage(t *testing.T) {
 	testClaudeExecutorInvalidCompressedErrorBody(t, func(executor *ClaudeExecutor, auth *cliproxyauth.Auth, payload []byte) error {
+		disabled := false
+		executor.cfg.ClaudeBillableUsage.Enabled = &disabled
 		_, err := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
 			Model:   "claude-3-5-sonnet-20241022",
 			Payload: payload,
 		}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
 		return err
 	})
+}
+
+func TestClaudeExecutor_CountTokens_ReturnsBillableCountWithoutUpstream(t *testing.T) {
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"should not be called"}}`))
+	}))
+	defer server.Close()
+
+	enabled := true
+	executor := NewClaudeExecutor(&config.Config{ClaudeBillableUsage: config.ClaudeBillableUsageConfig{Enabled: &enabled}})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"model":"claude-opus-4-7","messages":[{"role":"user","content":"hi"}]}`)
+
+	resp, err := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-opus-4-7",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("CountTokens error: %v", err)
+	}
+	if called {
+		t.Fatal("billable count_tokens should not call upstream")
+	}
+	if got := gjson.GetBytes(resp.Payload, "input_tokens").Int(); got <= 0 || got >= 20 {
+		t.Fatalf("input_tokens = %d, want small billable count; payload=%s", got, string(resp.Payload))
+	}
 }
 
 func testClaudeExecutorInvalidCompressedErrorBody(
@@ -1757,7 +1800,9 @@ func testClaudeExecutorInvalidCompressedErrorBody(
 	}))
 	defer server.Close()
 
-	executor := NewClaudeExecutor(&config.Config{})
+	executor := NewClaudeExecutor(&config.Config{
+		ClaudeMimicryGuard: config.ClaudeMimicryGuardConfig{Mode: "observe"},
+	})
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{
 		"api_key":  "key-123",
 		"base_url": server.URL,

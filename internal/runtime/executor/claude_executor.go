@@ -255,6 +255,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, stream)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
+	ctx = helps.WithClaudeBillableUsage(ctx, config.ClaudeBillableUsageEnabled(e.cfg), baseModel, from.String(), originalPayloadSource)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -405,6 +406,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		reporter.Publish(ctx, helps.ParseClaudeUsage(data))
 	}
 	data = restoreClaudeOAuthToolNamesFromResponse(data, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
+	if from == to {
+		data = helps.RewriteClaudeUsageForBillable(ctx, data)
+	}
 	var param any
 	out := sdktranslator.TranslateNonStream(
 		ctx,
@@ -444,6 +448,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
+	ctx = helps.WithClaudeBillableUsage(ctx, config.ClaudeBillableUsageEnabled(e.cfg), baseModel, from.String(), originalPayloadSource)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -591,6 +596,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					reporter.Publish(ctx, detail)
 				}
 				line = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
+				line = helps.RewriteClaudeStreamUsageForBillable(ctx, line)
 				// Forward the line as-is to preserve SSE format
 				cloned := make([]byte, len(line)+1)
 				copy(cloned, line)
@@ -723,6 +729,12 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("claude")
+	ctx = helps.WithClaudeBillableUsage(ctx, config.ClaudeBillableUsageEnabled(e.cfg), baseModel, from.String(), req.Payload)
+	if config.ClaudeBillableUsageEnabled(e.cfg) {
+		count, _ := helps.ClaudeBillableInputTokens(ctx, baseModel, from.String(), req.Payload)
+		out := sdktranslator.TranslateTokenCount(ctx, to, from, count, helps.BuildClaudeTokenCountJSON(count))
+		return cliproxyexecutor.Response{Payload: out}, nil
+	}
 	// Use streaming translation to preserve function calling, except for claude.
 	stream := from != to
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)

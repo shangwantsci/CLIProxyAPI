@@ -54,7 +54,8 @@ func CountOpenAIChatTokens(enc tokenizer.Codec, payload []byte) (int64, error) {
 	collectOpenAIFunctions(root.Get("functions"), &segments)
 	collectOpenAIToolChoice(root.Get("tool_choice"), &segments)
 	collectOpenAIResponseFormat(root.Get("response_format"), &segments)
-	addIfNotEmpty(&segments, root.Get("input").String())
+	collectOpenAIContent(root.Get("input"), &segments)
+	addIfNotEmpty(&segments, root.Get("instructions").String())
 	addIfNotEmpty(&segments, root.Get("prompt").String())
 
 	joined := strings.TrimSpace(strings.Join(segments, "\n"))
@@ -217,6 +218,9 @@ func appendToolPayload(tool gjson.Result, segments *[]string) {
 	addIfNotEmpty(segments, tool.Get("type").String())
 	addIfNotEmpty(segments, tool.Get("name").String())
 	addIfNotEmpty(segments, tool.Get("description").String())
+	if schema := tool.Get("input_schema"); schema.Exists() {
+		addIfNotEmpty(segments, schema.Raw)
+	}
 	if function := tool.Get("function"); function.Exists() {
 		addIfNotEmpty(segments, function.Get("name").String())
 		addIfNotEmpty(segments, function.Get("description").String())

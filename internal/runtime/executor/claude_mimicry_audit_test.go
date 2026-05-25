@@ -138,6 +138,86 @@ func TestEvaluateClaudeMimicryGuard_DegradeAllowsUnknownTools(t *testing.T) {
 	}
 }
 
+func TestEvaluateClaudeMimicryGuard_DegradeDoesNotBlockKnownClaudeCodeToolDescription(t *testing.T) {
+	payload := buildSignedClaudeMimicryTestPayload(t)
+	payload, _ = sjson.SetRawBytes(payload, "tools", []byte(`[{"name":"Agent","description":"Launch an official Claude Code subagent that may relay work back to the main session.","input_schema":{"type":"object","properties":{"prompt":{"type":"string"}}}}]`))
+	payload = signAnthropicMessagesBody(payload)
+
+	req := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent": []string{"claude-cli/2.1.148 (external, cli)"},
+	})
+	applyClaudeHeaders(req, &cliproxyauth.Auth{}, "sk-ant-oat-test", false, nil, &config.Config{})
+	audit := AuditClaudeMimicryRequest("claude-sonnet-4-6", "/v1/messages", payload, req.Header, &config.Config{})
+
+	decision := EvaluateClaudeMimicryGuard(audit, &config.Config{
+		ClaudeMimicryGuard: config.ClaudeMimicryGuardConfig{Mode: "degrade"},
+	})
+
+	if decision.Blocked {
+		t.Fatalf("decision.Blocked = true, want false for known Claude Code Agent tool; reasons=%v", decision.Reasons)
+	}
+}
+
+func TestEvaluateClaudeMimicryGuard_DegradeAllowsFutureClaudeCodeToolSchema(t *testing.T) {
+	payload := buildSignedClaudeMimicryTestPayload(t)
+	payload, _ = sjson.SetRawBytes(payload, "tools", []byte(`[{"name":"ExitPlanMode","description":"Request permission to leave planning mode.","input_schema":{"type":"object","properties":{"session_id":{"type":"string"},"plan":{"type":"string"}}}}]`))
+	payload = signAnthropicMessagesBody(payload)
+
+	req := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent": []string{"claude-cli/2.1.148 (external, cli)"},
+	})
+	applyClaudeHeaders(req, &cliproxyauth.Auth{}, "sk-ant-oat-test", false, nil, &config.Config{})
+	audit := AuditClaudeMimicryRequest("claude-sonnet-4-6", "/v1/messages", payload, req.Header, &config.Config{})
+
+	decision := EvaluateClaudeMimicryGuard(audit, &config.Config{
+		ClaudeMimicryGuard: config.ClaudeMimicryGuardConfig{Mode: "degrade"},
+	})
+
+	if decision.Blocked {
+		t.Fatalf("decision.Blocked = true, want false for future Claude Code tool schema; reasons=%v", decision.Reasons)
+	}
+}
+
+func TestEvaluateClaudeMimicryGuard_DegradeAllowsMCPToolSchema(t *testing.T) {
+	payload := buildSignedClaudeMimicryTestPayload(t)
+	payload, _ = sjson.SetRawBytes(payload, "tools", []byte(`[{"name":"mcp__workspace__query","description":"Query a workspace MCP server.","input_schema":{"type":"object","properties":{"session_id":{"type":"string"},"query":{"type":"string"}}}}]`))
+	payload = signAnthropicMessagesBody(payload)
+
+	req := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent": []string{"claude-cli/2.1.148 (external, cli)"},
+	})
+	applyClaudeHeaders(req, &cliproxyauth.Auth{}, "sk-ant-oat-test", false, nil, &config.Config{})
+	audit := AuditClaudeMimicryRequest("claude-sonnet-4-6", "/v1/messages", payload, req.Header, &config.Config{})
+
+	decision := EvaluateClaudeMimicryGuard(audit, &config.Config{
+		ClaudeMimicryGuard: config.ClaudeMimicryGuardConfig{Mode: "degrade"},
+	})
+
+	if decision.Blocked {
+		t.Fatalf("decision.Blocked = true, want false for MCP tool schema; reasons=%v", decision.Reasons)
+	}
+}
+
+func TestEvaluateClaudeMimicryGuard_DegradeAllowsSuspiciousDescriptionWithoutHardToolLeak(t *testing.T) {
+	payload := buildSignedClaudeMimicryTestPayload(t)
+	payload, _ = sjson.SetRawBytes(payload, "tools", []byte(`[{"name":"CustomWorkflow","description":"Relay work to a local helper.","input_schema":{"type":"object","properties":{"task":{"type":"string"}}}}]`))
+	payload = signAnthropicMessagesBody(payload)
+
+	req := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent": []string{"claude-cli/2.1.148 (external, cli)"},
+	})
+	applyClaudeHeaders(req, &cliproxyauth.Auth{}, "sk-ant-oat-test", false, nil, &config.Config{})
+	audit := AuditClaudeMimicryRequest("claude-sonnet-4-6", "/v1/messages", payload, req.Header, &config.Config{})
+
+	decision := EvaluateClaudeMimicryGuard(audit, &config.Config{
+		ClaudeMimicryGuard: config.ClaudeMimicryGuardConfig{Mode: "degrade"},
+	})
+
+	if decision.Blocked {
+		t.Fatalf("decision.Blocked = true, want false for description-only suspicion; reasons=%v", decision.Reasons)
+	}
+}
+
 func TestEvaluateClaudeMimicryGuard_DegradeBlocksHardLeak(t *testing.T) {
 	audit := AuditClaudeMimicryRequest("claude-sonnet-4-6", "/v1/messages", []byte(`{
 		"system":[{"type":"text","text":"You are Hermes proxy."}],

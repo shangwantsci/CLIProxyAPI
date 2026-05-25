@@ -583,10 +583,12 @@ func auditClaudeMimicryTools(body []byte) ClaudeMimicryToolAudit {
 			audit.Unknown = append(audit.Unknown, name)
 		}
 		description := strings.ToLower(tool.Get("description").String())
-		for _, marker := range []string{"openclaw", "hermes", "opencode", "cherrystudio", "cherry studio", "proxy", "relay", "sub2api", "newapi"} {
-			if strings.Contains(description, marker) {
-				audit.DescriptionWarnings = append(audit.DescriptionWarnings, name)
-				break
+		if !knownUpstream[name] {
+			for _, marker := range []string{"openclaw", "hermes", "opencode", "cherrystudio", "cherry studio", "proxy", "relay", "sub2api", "newapi"} {
+				if strings.Contains(description, marker) {
+					audit.DescriptionWarnings = append(audit.DescriptionWarnings, name)
+					break
+				}
 			}
 		}
 		properties := tool.Get("input_schema.properties")
@@ -603,9 +605,9 @@ func auditClaudeMimicryTools(body []byte) ClaudeMimicryToolAudit {
 	sort.Strings(schemaParts)
 	audit.SchemaSignature = shortSHA256(strings.Join(schemaParts, "\n"))
 	audit.ToolChoice = gjson.GetBytes(body, "tool_choice.type").String()
-	if len(audit.LeakyNames) > 0 || len(audit.DescriptionWarnings) > 0 || len(audit.SchemaWarnings) > 0 {
+	if len(audit.LeakyNames) > 0 || len(hardClaudeToolSchemaWarnings(audit.SchemaWarnings)) > 0 {
 		audit.Status = ClaudeMimicryStatusFailed
-	} else if len(audit.Unknown) > 0 {
+	} else if len(audit.Unknown) > 0 || len(audit.DescriptionWarnings) > 0 || len(audit.SchemaWarnings) > 0 {
 		audit.Status = ClaudeMimicryStatusWarning
 	}
 	return audit
@@ -768,6 +770,24 @@ func isTitleCaseLikeToolName(name string) bool {
 	return first >= 'A' && first <= 'Z'
 }
 
+func hardClaudeToolSchemaWarnings(warnings []string) []string {
+	if len(warnings) == 0 {
+		return nil
+	}
+	var hard []string
+	for _, warning := range warnings {
+		name := warning
+		if idx := strings.Index(warning, "."); idx >= 0 {
+			name = warning[:idx]
+		}
+		if _, leaky := oauthToolRenameMap[name]; leaky {
+			hard = append(hard, warning)
+		}
+	}
+	sort.Strings(hard)
+	return hard
+}
+
 func normalizeClaudeMimicryGuardMode(cfg *config.Config) string {
 	if cfg == nil {
 		return config.DefaultClaudeMimicryGuardMode
@@ -813,11 +833,8 @@ func hardClaudeMimicryFailures(audit ClaudeMimicryAuditSnapshot) []string {
 	if len(audit.Tools.LeakyNames) > 0 {
 		reasons = append(reasons, "leaky tool names: "+strings.Join(audit.Tools.LeakyNames, ", "))
 	}
-	if len(audit.Tools.DescriptionWarnings) > 0 {
-		reasons = append(reasons, "leaky tool descriptions: "+strings.Join(audit.Tools.DescriptionWarnings, ", "))
-	}
-	if len(audit.Tools.SchemaWarnings) > 0 {
-		reasons = append(reasons, "leaky tool schema properties: "+strings.Join(audit.Tools.SchemaWarnings, ", "))
+	if hardSchemas := hardClaudeToolSchemaWarnings(audit.Tools.SchemaWarnings); len(hardSchemas) > 0 {
+		reasons = append(reasons, "leaky tool schema properties: "+strings.Join(hardSchemas, ", "))
 	}
 	return uniqueSortedStrings(reasons)
 }

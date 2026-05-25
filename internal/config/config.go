@@ -103,6 +103,9 @@ type Config struct {
 	// ClaudeMimicryGuard controls final outbound Claude Code mimicry checks.
 	ClaudeMimicryGuard ClaudeMimicryGuardConfig `yaml:"claude-mimicry-guard" json:"claude-mimicry-guard"`
 
+	// ClaudeBillableUsage controls the downstream/customer-facing token usage view.
+	ClaudeBillableUsage ClaudeBillableUsageConfig `yaml:"claude-billable-usage" json:"claude-billable-usage"`
+
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
 
@@ -191,6 +194,23 @@ type ClaudeMimicryGuardConfig struct {
 	Mode string `yaml:"mode" json:"mode"`
 	// EventsLimit controls the in-memory ring buffer size for mimicry diagnostics.
 	EventsLimit int `yaml:"events-limit" json:"events-limit"`
+}
+
+// ClaudeBillableUsageConfig controls whether Claude Code wrapper tokens are
+// deducted from downstream usage fields. Raw upstream usage is still retained
+// internally for quota and health decisions.
+type ClaudeBillableUsageConfig struct {
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+}
+
+// ClaudeBillableUsageEnabled returns the effective downstream billing mode.
+// It defaults to true so Claude account pools do not bill customers for proxy
+// wrapper tokens unless explicitly disabled.
+func ClaudeBillableUsageEnabled(cfg *Config) bool {
+	if cfg == nil || cfg.ClaudeBillableUsage.Enabled == nil {
+		return true
+	}
+	return *cfg.ClaudeBillableUsage.Enabled
 }
 
 // CodexHeaderDefaults configures fallback header values injected into Codex
@@ -681,6 +701,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		Mode:        DefaultClaudeMimicryGuardMode,
 		EventsLimit: DefaultClaudeMimicryGuardEventsLimit,
 	}
+	claudeBillableUsageEnabled := true
+	cfg.ClaudeBillableUsage.Enabled = &claudeBillableUsageEnabled
 	cfg.Routing.SessionAffinity = true
 	cfg.Routing.SessionAffinityTTL = DefaultSessionAffinityTTL
 	cfg.DisableImageGeneration = DisableImageGenerationOff
