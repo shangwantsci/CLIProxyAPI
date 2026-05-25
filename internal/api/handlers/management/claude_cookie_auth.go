@@ -91,6 +91,9 @@ func (h *Handler) PostAnthropicCookieAuth(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save authentication tokens"})
 		return
 	}
+	if err := h.autoAddProxyURL(ctx, proxyURL); err != nil {
+		log.WithError(err).Warn("failed to auto add cookie auth proxy to proxy pool")
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"status":            "ok",

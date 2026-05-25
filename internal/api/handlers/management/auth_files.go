@@ -1929,6 +1929,11 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
 		return
 	}
+	if req.ProxyURL != nil {
+		if err := h.autoAddProxyURL(ctx, *req.ProxyURL); err != nil {
+			log.WithError(err).Warn("failed to auto add auth proxy to proxy pool")
+		}
+	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
@@ -2319,6 +2324,9 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 			log.Errorf("Failed to save authentication tokens: %v", errSave)
 			SetOAuthSessionError(state, "Failed to save authentication tokens")
 			return
+		}
+		if err := h.autoAddProxyURL(ctx, proxyURL); err != nil {
+			log.WithError(err).Warn("failed to auto add oauth proxy to proxy pool")
 		}
 
 		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
