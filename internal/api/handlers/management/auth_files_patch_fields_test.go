@@ -42,7 +42,7 @@ func TestPatchAuthFileFields_MergeHeadersAndDeleteEmptyValues(t *testing.T) {
 
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
 
-	body := `{"name":"test.json","prefix":"p1","proxy_url":"http://proxy.local","headers":{"X-Old":"new","X-New":"v","X-Remove":"  ","X-Nope":""},"cloak_mode":"always","cloak_strict_mode":true,"cloak_sensitive_words":["Claude"," account ","Claude"],"cloak_cache_user_id":false}`
+	body := `{"name":"test.json","prefix":"p1","proxy_url":"http://proxy.local","headers":{"X-Old":"new","X-New":"v","X-Remove":"  ","X-Nope":""},"priority":2,"rpm_limit":42,"max_sessions":7,"cloak_mode":"always","cloak_strict_mode":true,"cloak_sensitive_words":["Claude"," account ","Claude"],"cloak_cache_user_id":false}`
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
 	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
@@ -118,6 +118,12 @@ func TestPatchAuthFileFields_MergeHeadersAndDeleteEmptyValues(t *testing.T) {
 	if got := updated.Attributes["cloak_cache_user_id"]; got != "false" {
 		t.Fatalf("attrs cloak_cache_user_id = %q, want false", got)
 	}
+	if got := updated.Attributes["rpm_limit"]; got != "42" {
+		t.Fatalf("attrs rpm_limit = %q, want 42", got)
+	}
+	if got := updated.Attributes["max_sessions"]; got != "7" {
+		t.Fatalf("attrs max_sessions = %q, want 7", got)
+	}
 	if got, _ := updated.Metadata["cloak_mode"].(string); got != "always" {
 		t.Fatalf("metadata.cloak_mode = %q, want always", got)
 	}
@@ -133,6 +139,12 @@ func TestPatchAuthFileFields_MergeHeadersAndDeleteEmptyValues(t *testing.T) {
 	}
 	if got, _ := updated.Metadata["cloak_cache_user_id"].(bool); got {
 		t.Fatalf("metadata.cloak_cache_user_id = %v, want false", got)
+	}
+	if got, _ := updated.Metadata["rpm_limit"].(int); got != 42 {
+		t.Fatalf("metadata.rpm_limit = %#v, want 42", updated.Metadata["rpm_limit"])
+	}
+	if got, _ := updated.Metadata["max_sessions"].(int); got != 7 {
+		t.Fatalf("metadata.max_sessions = %#v, want 7", updated.Metadata["max_sessions"])
 	}
 }
 

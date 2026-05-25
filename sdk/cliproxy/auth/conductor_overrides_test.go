@@ -791,6 +791,43 @@ func TestManager_Execute_DisableCooling_DoesNotBlackoutAfter429RetryAfter(t *tes
 	}
 }
 
+func TestManager_Execute_LocalMimicryGuardErrorDoesNotCooldownAuth(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"auth-guard": &Error{
+				Code:       LocalRequestGuardErrorCode,
+				HTTPStatus: http.StatusBadRequest,
+				Message:    "Claude mimicry guard blocked request",
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	auth := &Auth{ID: "auth-guard", Provider: "claude"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "claude-sonnet-4-6"
+	_, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatal("expected guard error")
+	}
+
+	updated, ok := m.GetByID("auth-guard")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to remain registered")
+	}
+	if updated.Unavailable {
+		t.Fatalf("auth.Unavailable = true, want false for local guard block")
+	}
+	if state := updated.ModelStates[model]; state != nil && state.Unavailable {
+		t.Fatalf("model state should not be cooled down by local guard block: %#v", state)
+	}
+}
+
 func TestManager_Execute_DisableCooling_RetriesAfter429RetryAfter(t *testing.T) {
 	prev := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)

@@ -374,6 +374,7 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 			auth.Attributes["note"] = note
 		}
 	}
+	applyRuntimeLimitMetadata(auth, metadata)
 	applyClaudeCloakMetadata(auth, metadata)
 	cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
 	return auth, nil
@@ -539,6 +540,22 @@ func applyClaudeCloakMetadata(auth *cliproxyauth.Auth, metadata map[string]any) 
 	words := cloakWordsFromMetadata(metadata["cloak_sensitive_words"])
 	if len(words) > 0 {
 		auth.Attributes["cloak_sensitive_words"] = strings.Join(words, ",")
+	}
+}
+
+func applyRuntimeLimitMetadata(auth *cliproxyauth.Auth, metadata map[string]any) {
+	if auth == nil || metadata == nil {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	for _, key := range []string{"rpm_limit", "max_sessions"} {
+		if raw, ok := metadata[key]; ok {
+			if value, ok := metadataIntValue(raw); ok && value >= 0 {
+				auth.Attributes[key] = strconv.Itoa(value)
+			}
+		}
 	}
 }
 

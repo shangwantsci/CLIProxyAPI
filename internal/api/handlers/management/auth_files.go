@@ -579,6 +579,24 @@ func addClaudeAuthHealthFields(entry gin.H, auth *coreauth.Auth, now time.Time) 
 	}
 	healthStatus := claudeAuthHealthStatus(auth, now)
 	entry["health_status"] = healthStatus
+	statusReason := claudeAuthStatusReason(auth, now)
+	entry["status_reason"] = statusReason
+	entry["status_reason_label"] = claudeAuthStatusReasonLabel(statusReason)
+	runtimeStats := auth.RuntimeUsageStats(now)
+	entry["rpm_limit"] = runtimeStats.RPMLimit
+	entry["current_rpm"] = runtimeStats.CurrentRPM
+	if !runtimeStats.RPMResetAt.IsZero() {
+		entry["rpm_reset_at"] = runtimeStats.RPMResetAt
+	}
+	entry["max_sessions"] = runtimeStats.MaxSessions
+	entry["active_sessions"] = runtimeStats.ActiveSessions
+	if !runtimeStats.SessionResetAt.IsZero() {
+		entry["session_reset_at"] = runtimeStats.SessionResetAt
+	}
+	if !auth.LastUsedAt.IsZero() {
+		entry["last_used_at"] = auth.LastUsedAt
+	}
+	entry["quality_24h"] = auth.Quality24hStats(now)
 	entry["quota"] = auth.Quota
 	entry["quota_exceeded"] = auth.Quota.Exceeded
 	if auth.Quota.Reason != "" {
@@ -677,6 +695,102 @@ func claudeAuthHealthStatus(auth *coreauth.Auth, now time.Time) string {
 	default:
 		return string(auth.Status)
 	}
+}
+
+func claudeAuthStatusReason(auth *coreauth.Auth, now time.Time) string {
+	if auth == nil {
+		return "unknown"
+	}
+	if auth.LastError != nil {
+		switch strings.ToLower(strings.TrimSpace(auth.LastError.Code)) {
+		case "account_banned":
+			return "account_banned"
+		case "organization_disabled":
+			return "organization_disabled"
+		case "account_disabled":
+			return "account_disabled"
+		case "unauthorized":
+			return "auth_expired"
+		}
+	}
+	if auth.Disabled || auth.Status == coreauth.StatusDisabled {
+		return "disabled"
+	}
+	if expiresAt, ok := auth.ExpirationTime(); ok && !expiresAt.After(now) {
+		return "auth_expired"
+	}
+	if isClaudeUnauthorizedAuthError(auth.LastError) {
+		return "auth_expired"
+	}
+	if auth.Quota.Exceeded && (auth.Quota.NextRecoverAt.IsZero() || auth.Quota.NextRecoverAt.After(now)) {
+		return "quota_cooldown"
+	}
+	runtimeStats := auth.RuntimeUsageStats(now)
+	if runtimeStats.RPMLimit > 0 && runtimeStats.CurrentRPM >= runtimeStats.RPMLimit {
+		return "rpm_cooldown"
+	}
+	if runtimeStats.MaxSessions > 0 && runtimeStats.ActiveSessions >= runtimeStats.MaxSessions {
+		return "session_full"
+	}
+	if isClaudeSubscriptionError(auth.LastError) {
+		return "subscription_issue"
+	}
+	if auth.Unavailable {
+		return "unavailable"
+	}
+	if auth.Status == coreauth.StatusError || auth.LastError != nil {
+		return "upstream_error"
+	}
+	return "healthy"
+}
+
+func claudeAuthStatusReasonLabel(reason string) string {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "healthy":
+		return "正常"
+	case "quota_cooldown":
+		return "限额冷却"
+	case "rpm_cooldown":
+		return "RPM 冷却"
+	case "session_full":
+		return "会话满"
+	case "auth_expired":
+		return "认证失效"
+	case "account_banned", "organization_disabled", "account_disabled":
+		return "封禁/组织禁用"
+	case "subscription_issue":
+		return "退款/订阅异常"
+	case "upstream_error":
+		return "上游异常"
+	case "unavailable":
+		return "不可用"
+	case "disabled":
+		return "已停用"
+	default:
+		return "未知"
+	}
+}
+
+func isClaudeSubscriptionError(err *coreauth.Error) bool {
+	if err == nil {
+		return false
+	}
+	if err.HTTPStatus == http.StatusPaymentRequired {
+		return true
+	}
+	if err.HTTPStatus == http.StatusForbidden {
+		raw := strings.ToLower(strings.TrimSpace(err.Message + " " + err.Code))
+		return strings.Contains(raw, "subscription") ||
+			strings.Contains(raw, "payment") ||
+			strings.Contains(raw, "billing") ||
+			strings.Contains(raw, "refund") ||
+			strings.Contains(raw, "cancel")
+	}
+	raw := strings.ToLower(strings.TrimSpace(err.Message + " " + err.Code))
+	return strings.Contains(raw, "subscription") ||
+		strings.Contains(raw, "payment required") ||
+		strings.Contains(raw, "billing") ||
+		strings.Contains(raw, "refund")
 }
 
 func authProjectID(auth *coreauth.Auth) string {
@@ -1567,6 +1681,8 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		Headers             map[string]string `json:"headers"`
 		Priority            *int              `json:"priority"`
 		Note                *string           `json:"note"`
+		RPMLimit            *int              `json:"rpm_limit"`
+		MaxSessions         *int              `json:"max_sessions"`
 		CloakMode           *string           `json:"cloak_mode"`
 		CloakStrictMode     *bool             `json:"cloak_strict_mode"`
 		CloakSensitiveWords *[]string         `json:"cloak_sensitive_words"`
@@ -1733,6 +1849,31 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 				targetAuth.Metadata["note"] = trimmedNote
 				targetAuth.Attributes["note"] = trimmedNote
 			}
+		}
+		changed = true
+	}
+	if req.RPMLimit != nil || req.MaxSessions != nil {
+		if targetAuth.Metadata == nil {
+			targetAuth.Metadata = make(map[string]any)
+		}
+		if targetAuth.Attributes == nil {
+			targetAuth.Attributes = make(map[string]string)
+		}
+		if req.RPMLimit != nil {
+			if *req.RPMLimit < 0 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "rpm_limit must be greater than or equal to 0"})
+				return
+			}
+			targetAuth.Metadata["rpm_limit"] = *req.RPMLimit
+			targetAuth.Attributes["rpm_limit"] = strconv.Itoa(*req.RPMLimit)
+		}
+		if req.MaxSessions != nil {
+			if *req.MaxSessions < 0 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "max_sessions must be greater than or equal to 0"})
+				return
+			}
+			targetAuth.Metadata["max_sessions"] = *req.MaxSessions
+			targetAuth.Attributes["max_sessions"] = strconv.Itoa(*req.MaxSessions)
 		}
 		changed = true
 	}

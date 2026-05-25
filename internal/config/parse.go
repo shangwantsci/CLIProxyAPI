@@ -32,6 +32,10 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 		FiveHourRemainingPercent: DefaultClaudeFiveHourQuotaCoolingRemainingPercent,
 		WeeklyRemainingPercent:   DefaultClaudeWeeklyQuotaCoolingRemainingPercent,
 	}
+	cfg.ClaudeMimicryGuard = ClaudeMimicryGuardConfig{
+		Mode:        DefaultClaudeMimicryGuardMode,
+		EventsLimit: DefaultClaudeMimicryGuardEventsLimit,
+	}
 	cfg.Routing.SessionAffinity = true
 	cfg.Routing.SessionAffinityTTL = DefaultSessionAffinityTTL
 	cfg.DisableImageGeneration = DisableImageGenerationOff
@@ -84,6 +88,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 
 	// Apply the same sanitization pipeline.
 	cfg.SanitizeClaudeQuotaCoolingThresholds()
+	cfg.SanitizeClaudeMimicryGuard()
 	cfg.SanitizeGeminiKeys()
 	cfg.SanitizeVertexCompatKeys()
 	cfg.SanitizeCodexKeys()

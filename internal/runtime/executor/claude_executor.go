@@ -20,6 +20,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -309,6 +310,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
+	mimicryEvent, _, errGuard := prepareClaudeMimicryGuardEvent(ctx, e.cfg, auth, opts, baseModel, "/v1/messages", bodyForUpstream, httpReq.Header)
+	if errGuard != nil {
+		return resp, errGuard
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -330,6 +335,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	httpClient := helps.NewUtlsHTTPClient(e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
+		recordClaudeMimicryGuardEvent(mimicryEvent, true, 0, err.Error())
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
@@ -340,6 +346,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		// compression.  This keeps error-path behaviour consistent with the success path.
 		errBody, decErr := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
 		if decErr != nil {
+			recordClaudeMimicryGuardEvent(mimicryEvent, true, httpResp.StatusCode, decErr.Error())
 			helps.RecordAPIResponseError(ctx, e.cfg, decErr)
 			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
 			helps.LogWithRequestID(ctx).Warn(msg)
@@ -355,6 +362,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		err = newClaudeStatusErr(httpResp.StatusCode, b, httpResp.Header)
+		recordClaudeMimicryGuardEvent(mimicryEvent, true, httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
@@ -362,6 +370,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
 	if err != nil {
+		recordClaudeMimicryGuardEvent(mimicryEvent, true, httpResp.StatusCode, err.Error())
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
@@ -375,12 +384,14 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}()
 	data, err := io.ReadAll(decodedBody)
 	if err != nil {
+		recordClaudeMimicryGuardEvent(mimicryEvent, true, httpResp.StatusCode, err.Error())
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	if stream {
 		if errValidate := validateClaudeStreamingResponse(data); errValidate != nil {
+			recordClaudeMimicryGuardEvent(mimicryEvent, true, httpResp.StatusCode, errValidate.Error())
 			helps.RecordAPIResponseError(ctx, e.cfg, errValidate)
 			return resp, errValidate
 		}
@@ -406,6 +417,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		&param,
 	)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
+	recordClaudeMimicryGuardEvent(mimicryEvent, true, httpResp.StatusCode, "")
 	return resp, nil
 }
 
@@ -483,6 +495,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, err
 	}
 	applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg)
+	mimicryEvent, _, errGuard := prepareClaudeMimicryGuardEvent(ctx, e.cfg, auth, opts, baseModel, "/v1/messages", bodyForUpstream, httpReq.Header)
+	if errGuard != nil {
+		return nil, errGuard
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -504,6 +520,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	httpClient := helps.NewUtlsHTTPClient(e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
+		recordClaudeMimicryGuardEvent(mimicryEvent, true, 0, err.Error())
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
@@ -514,6 +531,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		// compression.  This keeps error-path behaviour consistent with the success path.
 		errBody, decErr := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
 		if decErr != nil {
+			recordClaudeMimicryGuardEvent(mimicryEvent, true, httpResp.StatusCode, decErr.Error())
 			helps.RecordAPIResponseError(ctx, e.cfg, decErr)
 			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
 			helps.LogWithRequestID(ctx).Warn(msg)
@@ -528,6 +546,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		recordClaudeMimicryGuardEvent(mimicryEvent, true, httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
@@ -536,6 +555,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
 	if err != nil {
+		recordClaudeMimicryGuardEvent(mimicryEvent, true, httpResp.StatusCode, err.Error())
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
@@ -544,8 +564,17 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
+		recordedMimicryEvent := false
+		recordStreamMimicryEvent := func(message string) {
+			if recordedMimicryEvent {
+				return
+			}
+			recordedMimicryEvent = true
+			recordClaudeMimicryGuardEvent(mimicryEvent, true, httpResp.StatusCode, message)
+		}
 		defer close(out)
 		defer func() {
+			recordStreamMimicryEvent("")
 			if errClose := decodedBody.Close(); errClose != nil {
 				log.Errorf("response body close error: %v", errClose)
 			}
@@ -573,6 +602,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				}
 			}
 			if errScan := scanner.Err(); errScan != nil {
+				recordStreamMimicryEvent(errScan.Error())
 				helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 				reporter.PublishFailure(ctx, errScan)
 				select {
@@ -613,6 +643,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
+			recordStreamMimicryEvent(errScan.Error())
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.PublishFailure(ctx, errScan)
 			select {
@@ -720,6 +751,10 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		return cliproxyexecutor.Response{}, err
 	}
 	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
+	mimicryEvent, _, errGuard := prepareClaudeMimicryGuardEvent(ctx, e.cfg, auth, opts, baseModel, "/v1/messages/count_tokens", body, httpReq.Header)
+	if errGuard != nil {
+		return cliproxyexecutor.Response{}, errGuard
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -741,6 +776,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	httpClient := helps.NewUtlsHTTPClient(e.cfg, auth, 0)
 	resp, err := httpClient.Do(httpReq)
 	if err != nil {
+		recordClaudeMimicryGuardEvent(mimicryEvent, true, 0, err.Error())
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return cliproxyexecutor.Response{}, err
 	}
@@ -751,6 +787,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		// compression.  This keeps error-path behaviour consistent with the success path.
 		errBody, decErr := decodeResponseBody(resp.Body, resp.Header.Get("Content-Encoding"))
 		if decErr != nil {
+			recordClaudeMimicryGuardEvent(mimicryEvent, true, resp.StatusCode, decErr.Error())
 			helps.RecordAPIResponseError(ctx, e.cfg, decErr)
 			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
 			helps.LogWithRequestID(ctx).Warn(msg)
@@ -767,10 +804,12 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
+		recordClaudeMimicryGuardEvent(mimicryEvent, true, resp.StatusCode, helps.SummarizeErrorBody(resp.Header.Get("Content-Type"), b))
 		return cliproxyexecutor.Response{}, newClaudeStatusErr(resp.StatusCode, b, resp.Header)
 	}
 	decodedBody, err := decodeResponseBody(resp.Body, resp.Header.Get("Content-Encoding"))
 	if err != nil {
+		recordClaudeMimicryGuardEvent(mimicryEvent, true, resp.StatusCode, err.Error())
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		if errClose := resp.Body.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
@@ -784,12 +823,14 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	}()
 	data, err := io.ReadAll(decodedBody)
 	if err != nil {
+		recordClaudeMimicryGuardEvent(mimicryEvent, true, resp.StatusCode, err.Error())
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return cliproxyexecutor.Response{}, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	count := gjson.GetBytes(data, "input_tokens").Int()
 	out := sdktranslator.TranslateTokenCount(ctx, to, from, count, data)
+	recordClaudeMimicryGuardEvent(mimicryEvent, true, resp.StatusCode, "")
 	return cliproxyexecutor.Response{Payload: out, Headers: resp.Header.Clone()}, nil
 }
 
@@ -958,6 +999,63 @@ func extractAndRemoveBetas(body []byte) ([]string, []byte) {
 	return betas, body
 }
 
+func prepareClaudeMimicryGuardEvent(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, opts cliproxyexecutor.Options, model, requestPath string, body []byte, upstreamHeaders http.Header) (ClaudeMimicryEvent, ClaudeMimicryGuardDecision, error) {
+	audit := RecordClaudeMimicryAudit(model, requestPath, body, upstreamHeaders, cfg)
+	decision := EvaluateClaudeMimicryGuard(audit, cfg)
+	event := ClaudeMimicryEvent{
+		RequestID:    logging.GetRequestID(ctx),
+		ClientSource: ClassifyClaudeMimicryClientSource(opts.SourceFormat.String(), inboundClaudeMimicryHeaders(ctx, opts)),
+		SourceFormat: strings.TrimSpace(opts.SourceFormat.String()),
+		Action:       decision.Action,
+		GuardMode:    decision.Mode,
+		AuditStatus:  audit.Status,
+		Model:        audit.Model,
+		RequestPath:  audit.RequestPath,
+		Reasons:      append([]string(nil), decision.Reasons...),
+		Warnings:     append([]string(nil), audit.Warnings...),
+		Failures:     append([]string(nil), audit.Failures...),
+	}
+	if cfg != nil {
+		event.EventLimit = cfg.ClaudeMimicryGuard.EventsLimit
+	}
+	if auth != nil {
+		event.AuthID = auth.ID
+		event.AuthLabel = auth.Label
+	}
+	if decision.Blocked {
+		RecordClaudeMimicryEvent(event)
+		return event, decision, claudeMimicryGuardBlockedError(decision)
+	}
+	return event, decision, nil
+}
+
+func recordClaudeMimicryGuardEvent(event ClaudeMimicryEvent, upstreamAttempted bool, upstreamStatus int, upstreamError string) {
+	event.UpstreamAttempted = upstreamAttempted
+	event.UpstreamStatus = upstreamStatus
+	event.UpstreamError = strings.TrimSpace(upstreamError)
+	RecordClaudeMimicryEvent(event)
+}
+
+func inboundClaudeMimicryHeaders(ctx context.Context, opts cliproxyexecutor.Options) http.Header {
+	if len(opts.Headers) > 0 {
+		return opts.Headers
+	}
+	return ginHeadersFromContext(ctx)
+}
+
+func claudeMimicryGuardBlockedError(decision ClaudeMimicryGuardDecision) error {
+	message := "Claude Code mimicry guard blocked request"
+	if len(decision.Reasons) > 0 {
+		message += ": " + strings.Join(decision.Reasons, "; ")
+	}
+	return &cliproxyauth.Error{
+		Code:       cliproxyauth.LocalRequestGuardErrorCode,
+		Message:    message,
+		Retryable:  false,
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
 // disableThinkingIfToolChoiceForced checks if tool_choice forces tool use and disables thinking.
 // Anthropic API does not allow thinking when tool_choice is set to "any" or a specific tool.
 // See: https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking#important-considerations
@@ -1095,6 +1193,10 @@ func filterClaudeBetaList(betas []string) []string {
 func sanitizeClaudeUpstreamHeaders(headers http.Header) {
 	for key := range headers {
 		lowerKey := strings.ToLower(strings.TrimSpace(key))
+		if _, allowed := claudeAllowedUpstreamHeaderNames[lowerKey]; !allowed {
+			headers.Del(key)
+			continue
+		}
 		for _, prefix := range claudeBlockedUpstreamHeaderPrefixes {
 			if strings.HasPrefix(lowerKey, prefix) {
 				headers.Del(key)

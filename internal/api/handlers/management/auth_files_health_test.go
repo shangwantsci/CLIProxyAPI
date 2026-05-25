@@ -32,7 +32,9 @@ func TestListClaudeAuthHealth_ExposesClaudeAccountRuntimeState(t *testing.T) {
 			NextRecoverAt: time.Now().UTC().Add(15 * time.Minute),
 		},
 		Attributes: map[string]string{
-			"path": "claude-1.json",
+			"path":         "claude-1.json",
+			"rpm_limit":    "60",
+			"max_sessions": "5",
 		},
 		Metadata: map[string]any{
 			"type":           "claude",
@@ -103,5 +105,30 @@ func TestListClaudeAuthHealth_ExposesClaudeAccountRuntimeState(t *testing.T) {
 	}
 	if got, _ := account["auth_method_label"].(string); got != "Claude Code CLI OAuth" {
 		t.Fatalf("auth_method_label = %q, want Claude Code CLI OAuth", got)
+	}
+	if got, _ := account["rpm_limit"].(float64); got != 60 {
+		t.Fatalf("rpm_limit = %#v, want 60", account["rpm_limit"])
+	}
+	if got, _ := account["current_rpm"].(float64); got != 0 {
+		t.Fatalf("current_rpm = %#v, want 0", account["current_rpm"])
+	}
+	if got, _ := account["max_sessions"].(float64); got != 5 {
+		t.Fatalf("max_sessions = %#v, want 5", account["max_sessions"])
+	}
+	if got, _ := account["active_sessions"].(float64); got != 0 {
+		t.Fatalf("active_sessions = %#v, want 0", account["active_sessions"])
+	}
+	if got, _ := account["status_reason"].(string); got != "quota_cooldown" {
+		t.Fatalf("status_reason = %q, want quota_cooldown", got)
+	}
+	if got, _ := account["status_reason_label"].(string); got != "限额冷却" {
+		t.Fatalf("status_reason_label = %q, want 限额冷却", got)
+	}
+	quality, ok := account["quality_24h"].(map[string]any)
+	if !ok {
+		t.Fatalf("quality_24h = %T, want map[string]any", account["quality_24h"])
+	}
+	if got, _ := quality["requests"].(float64); got != 0 {
+		t.Fatalf("quality_24h.requests = %#v, want 0", quality["requests"])
 	}
 }

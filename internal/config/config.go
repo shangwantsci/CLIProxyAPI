@@ -29,6 +29,8 @@ const (
 	DefaultSessionAffinityTTL                         = "1h"
 	DefaultClaudeFiveHourQuotaCoolingRemainingPercent = 20
 	DefaultClaudeWeeklyQuotaCoolingRemainingPercent   = 10
+	DefaultClaudeMimicryGuardMode                     = "degrade"
+	DefaultClaudeMimicryGuardEventsLimit              = 500
 )
 
 // Config represents the application's configuration, loaded from a YAML file.
@@ -97,6 +99,9 @@ type Config struct {
 
 	// ClaudeQuotaCoolingThresholds defines remaining quota percentages that trigger temporary Claude account cooldown.
 	ClaudeQuotaCoolingThresholds ClaudeQuotaCoolingThresholds `yaml:"claude-quota-cooling-thresholds" json:"claude-quota-cooling-thresholds"`
+
+	// ClaudeMimicryGuard controls final outbound Claude Code mimicry checks.
+	ClaudeMimicryGuard ClaudeMimicryGuardConfig `yaml:"claude-mimicry-guard" json:"claude-mimicry-guard"`
 
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
@@ -178,6 +183,14 @@ type ClaudeHeaderDefaults struct {
 type ClaudeQuotaCoolingThresholds struct {
 	FiveHourRemainingPercent int `yaml:"five-hour-remaining-percent" json:"five-hour-remaining-percent"`
 	WeeklyRemainingPercent   int `yaml:"weekly-remaining-percent" json:"weekly-remaining-percent"`
+}
+
+// ClaudeMimicryGuardConfig configures outbound Claude Code mimicry guard behavior.
+type ClaudeMimicryGuardConfig struct {
+	// Mode controls guard enforcement: "observe", "degrade" (default), or "strict".
+	Mode string `yaml:"mode" json:"mode"`
+	// EventsLimit controls the in-memory ring buffer size for mimicry diagnostics.
+	EventsLimit int `yaml:"events-limit" json:"events-limit"`
 }
 
 // CodexHeaderDefaults configures fallback header values injected into Codex
@@ -664,6 +677,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		FiveHourRemainingPercent: DefaultClaudeFiveHourQuotaCoolingRemainingPercent,
 		WeeklyRemainingPercent:   DefaultClaudeWeeklyQuotaCoolingRemainingPercent,
 	}
+	cfg.ClaudeMimicryGuard = ClaudeMimicryGuardConfig{
+		Mode:        DefaultClaudeMimicryGuardMode,
+		EventsLimit: DefaultClaudeMimicryGuardEventsLimit,
+	}
 	cfg.Routing.SessionAffinity = true
 	cfg.Routing.SessionAffinityTTL = DefaultSessionAffinityTTL
 	cfg.DisableImageGeneration = DisableImageGenerationOff
@@ -739,6 +756,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	}
 
 	cfg.SanitizeClaudeQuotaCoolingThresholds()
+	cfg.SanitizeClaudeMimicryGuard()
 
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
@@ -876,6 +894,30 @@ func clampPercent(value int) int {
 		return 100
 	}
 	return value
+}
+
+// SanitizeClaudeMimicryGuard normalizes guard mode and clamps event retention.
+func (cfg *Config) SanitizeClaudeMimicryGuard() {
+	if cfg == nil {
+		return
+	}
+	mode := strings.ToLower(strings.TrimSpace(cfg.ClaudeMimicryGuard.Mode))
+	switch mode {
+	case "observe", "off", "disabled":
+		cfg.ClaudeMimicryGuard.Mode = "observe"
+	case "strict":
+		cfg.ClaudeMimicryGuard.Mode = "strict"
+	case "", "degrade", "auto", "protect":
+		cfg.ClaudeMimicryGuard.Mode = DefaultClaudeMimicryGuardMode
+	default:
+		cfg.ClaudeMimicryGuard.Mode = DefaultClaudeMimicryGuardMode
+	}
+	if cfg.ClaudeMimicryGuard.EventsLimit <= 0 {
+		cfg.ClaudeMimicryGuard.EventsLimit = DefaultClaudeMimicryGuardEventsLimit
+	}
+	if cfg.ClaudeMimicryGuard.EventsLimit > 2000 {
+		cfg.ClaudeMimicryGuard.EventsLimit = 2000
+	}
 }
 
 // SanitizeClaudeHeaderDefaults trims surrounding whitespace from the

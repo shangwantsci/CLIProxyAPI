@@ -236,8 +236,9 @@ func TestApplyClaudeHeaders_StripsKnownRelayClientHeaders(t *testing.T) {
 		"X-Llm-Proxy",
 	}
 	attrs := map[string]string{
-		"api_key":      "key-relay-headers",
-		"header:X-App": "cli",
+		"api_key":               "key-relay-headers",
+		"header:X-App":          "cli",
+		"header:X-Custom-Trace": "custom-leak",
 	}
 	for _, headerName := range leakyHeaders {
 		attrs["header:"+headerName] = "leak"
@@ -253,6 +254,9 @@ func TestApplyClaudeHeaders_StripsKnownRelayClientHeaders(t *testing.T) {
 	}
 	if got := req.Header.Get("X-App"); got != "cli" {
 		t.Fatalf("X-App = %q, want cli", got)
+	}
+	if got := req.Header.Get("X-Custom-Trace"); got != "" {
+		t.Fatalf("X-Custom-Trace leaked upstream as %q", got)
 	}
 }
 

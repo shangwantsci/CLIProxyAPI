@@ -1,5 +1,7 @@
 package auth
 
+const LocalRequestGuardErrorCode = "claude_mimicry_guard_blocked"
+
 // Error describes an authentication related failure in a provider agnostic format.
 type Error struct {
 	// Code is a short machine readable identifier.

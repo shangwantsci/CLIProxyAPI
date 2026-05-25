@@ -96,13 +96,24 @@ type Auth struct {
 	Success int64 `json:"-"`
 	Failed  int64 `json:"-"`
 
+	LastUsedAt time.Time `json:"-"`
+
 	recentRequests recentRequestRing `json:"-"`
+	quality24h     quality24hRing    `json:"-"`
+	runtimeUsage   authRuntimeUsage  `json:"-"`
 	indexAssigned  bool              `json:"-"`
 }
 
 const (
 	recentRequestBucketSeconds int64 = 10 * 60
 	recentRequestBucketCount         = 20
+
+	quality24hBucketSeconds int64 = 60 * 60
+	quality24hBucketCount         = 24
+
+	defaultClaudeRPMLimit    = 60
+	defaultClaudeMaxSessions = 5
+	accountRPMWindow         = time.Minute
 )
 
 type recentRequestBucket struct {
@@ -119,6 +130,39 @@ type RecentRequestBucket struct {
 	Time    string `json:"time"`
 	Success int64  `json:"success"`
 	Failed  int64  `json:"failed"`
+}
+
+type quality24hBucket struct {
+	bucketID    int64
+	success     int64
+	failed      int64
+	rateLimited int64
+}
+
+type quality24hRing struct {
+	buckets [quality24hBucketCount]quality24hBucket
+}
+
+type AuthQualityStats struct {
+	Requests    int64   `json:"requests"`
+	Success     int64   `json:"success"`
+	Failed      int64   `json:"failed"`
+	RateLimited int64   `json:"rate_limited"`
+	SuccessRate float64 `json:"success_rate"`
+}
+
+type authRuntimeUsage struct {
+	RequestTimes []time.Time
+	Sessions     map[string]time.Time
+}
+
+type AuthRuntimeUsageStats struct {
+	RPMLimit       int       `json:"rpm_limit"`
+	CurrentRPM     int       `json:"current_rpm"`
+	RPMResetAt     time.Time `json:"rpm_reset_at,omitempty"`
+	MaxSessions    int       `json:"max_sessions"`
+	ActiveSessions int       `json:"active_sessions"`
+	SessionResetAt time.Time `json:"session_reset_at,omitempty"`
 }
 
 // QuotaState contains limiter tracking data for a credential.
@@ -215,6 +259,288 @@ func (a *Auth) RecentRequestsSnapshot(now time.Time) []RecentRequestBucket {
 	return out
 }
 
+func quality24hBucketID(now time.Time) int64 {
+	if now.IsZero() {
+		return 0
+	}
+	return now.Unix() / quality24hBucketSeconds
+}
+
+func quality24hBucketIndex(bucketID int64) int {
+	mod := bucketID % int64(quality24hBucketCount)
+	if mod < 0 {
+		mod += int64(quality24hBucketCount)
+	}
+	return int(mod)
+}
+
+func (a *Auth) recordQuality24h(now time.Time, success bool, rateLimited bool) {
+	if a == nil {
+		return
+	}
+	bucketID := quality24hBucketID(now)
+	idx := quality24hBucketIndex(bucketID)
+	bucket := &a.quality24h.buckets[idx]
+	if bucket.bucketID != bucketID {
+		bucket.bucketID = bucketID
+		bucket.success = 0
+		bucket.failed = 0
+		bucket.rateLimited = 0
+	}
+	if success {
+		bucket.success++
+		return
+	}
+	bucket.failed++
+	if rateLimited {
+		bucket.rateLimited++
+	}
+}
+
+func (a *Auth) Quality24hStats(now time.Time) AuthQualityStats {
+	stats := AuthQualityStats{}
+	if a == nil {
+		return stats
+	}
+	currentBucketID := quality24hBucketID(now)
+	for i := 0; i < quality24hBucketCount; i++ {
+		bucketID := currentBucketID - int64(i)
+		idx := quality24hBucketIndex(bucketID)
+		bucket := a.quality24h.buckets[idx]
+		if bucket.bucketID != bucketID {
+			continue
+		}
+		stats.Success += bucket.success
+		stats.Failed += bucket.failed
+		stats.RateLimited += bucket.rateLimited
+	}
+	stats.Requests = stats.Success + stats.Failed
+	if stats.Requests > 0 {
+		stats.SuccessRate = float64(stats.Success) * 100 / float64(stats.Requests)
+	}
+	return stats
+}
+
+func (a *Auth) EffectiveRPMLimit() int {
+	if a == nil {
+		return 0
+	}
+	if value, ok := authOptionalIntSetting(a, "rpm_limit"); ok {
+		return value
+	}
+	if strings.EqualFold(strings.TrimSpace(a.Provider), "claude") {
+		return defaultClaudeRPMLimit
+	}
+	return 0
+}
+
+func (a *Auth) EffectiveMaxSessions() int {
+	if a == nil {
+		return 0
+	}
+	if value, ok := authOptionalIntSetting(a, "max_sessions"); ok {
+		return value
+	}
+	if strings.EqualFold(strings.TrimSpace(a.Provider), "claude") {
+		return defaultClaudeMaxSessions
+	}
+	return 0
+}
+
+func authOptionalIntSetting(auth *Auth, key string) (int, bool) {
+	if auth == nil {
+		return 0, false
+	}
+	if auth.Attributes != nil {
+		if raw, ok := auth.Attributes[key]; ok {
+			if parsed, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil {
+				if parsed < 0 {
+					parsed = 0
+				}
+				return parsed, true
+			}
+		}
+	}
+	if auth.Metadata != nil {
+		if raw, ok := auth.Metadata[key]; ok {
+			if parsed, ok := parseRuntimeIntSetting(raw); ok {
+				if parsed < 0 {
+					parsed = 0
+				}
+				return parsed, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func parseRuntimeIntSetting(raw any) (int, bool) {
+	switch v := raw.(type) {
+	case int:
+		return v, true
+	case int64:
+		return int(v), true
+	case float64:
+		return int(v), true
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(v))
+		return parsed, err == nil
+	case json.Number:
+		parsed, err := v.Int64()
+		return int(parsed), err == nil
+	default:
+		return 0, false
+	}
+}
+
+func (u *authRuntimeUsage) prune(now time.Time, sessionTTL time.Duration) {
+	if u == nil {
+		return
+	}
+	cutoff := now.Add(-accountRPMWindow)
+	if len(u.RequestTimes) > 0 {
+		keep := u.RequestTimes[:0]
+		for _, ts := range u.RequestTimes {
+			if ts.After(cutoff) {
+				keep = append(keep, ts)
+			}
+		}
+		u.RequestTimes = keep
+	}
+	if sessionTTL <= 0 {
+		sessionTTL = time.Hour
+	}
+	if len(u.Sessions) > 0 {
+		for id, expiresAt := range u.Sessions {
+			if !expiresAt.After(now) {
+				delete(u.Sessions, id)
+			}
+		}
+	}
+}
+
+func (u authRuntimeUsage) currentRPM(now time.Time) int {
+	cutoff := now.Add(-accountRPMWindow)
+	count := 0
+	for _, ts := range u.RequestTimes {
+		if ts.After(cutoff) {
+			count++
+		}
+	}
+	return count
+}
+
+func (u authRuntimeUsage) rpmResetAt(now time.Time, limit int) time.Time {
+	if limit <= 0 {
+		return time.Time{}
+	}
+	cutoff := now.Add(-accountRPMWindow)
+	oldest := time.Time{}
+	count := 0
+	for _, ts := range u.RequestTimes {
+		if !ts.After(cutoff) {
+			continue
+		}
+		count++
+		if oldest.IsZero() || ts.Before(oldest) {
+			oldest = ts
+		}
+	}
+	if count < limit || oldest.IsZero() {
+		return time.Time{}
+	}
+	return oldest.Add(accountRPMWindow)
+}
+
+func (u authRuntimeUsage) activeSessionCount(now time.Time) int {
+	count := 0
+	for _, expiresAt := range u.Sessions {
+		if expiresAt.After(now) {
+			count++
+		}
+	}
+	return count
+}
+
+func (u authRuntimeUsage) sessionResetAt(now time.Time) time.Time {
+	earliest := time.Time{}
+	for _, expiresAt := range u.Sessions {
+		if !expiresAt.After(now) {
+			continue
+		}
+		if earliest.IsZero() || expiresAt.Before(earliest) {
+			earliest = expiresAt
+		}
+	}
+	return earliest
+}
+
+func (a *Auth) RuntimeUsageStats(now time.Time) AuthRuntimeUsageStats {
+	if a == nil {
+		return AuthRuntimeUsageStats{}
+	}
+	limit := a.EffectiveRPMLimit()
+	maxSessions := a.EffectiveMaxSessions()
+	return AuthRuntimeUsageStats{
+		RPMLimit:       limit,
+		CurrentRPM:     a.runtimeUsage.currentRPM(now),
+		RPMResetAt:     a.runtimeUsage.rpmResetAt(now, limit),
+		MaxSessions:    maxSessions,
+		ActiveSessions: a.runtimeUsage.activeSessionCount(now),
+		SessionResetAt: a.runtimeUsage.sessionResetAt(now),
+	}
+}
+
+func (a *Auth) isRPMLimited(now time.Time) (bool, time.Time) {
+	if a == nil {
+		return false, time.Time{}
+	}
+	limit := a.EffectiveRPMLimit()
+	if limit <= 0 {
+		return false, time.Time{}
+	}
+	stats := a.RuntimeUsageStats(now)
+	if stats.CurrentRPM < limit {
+		return false, time.Time{}
+	}
+	next := stats.RPMResetAt
+	if next.IsZero() || next.Before(now) {
+		next = now.Add(time.Second)
+	}
+	return true, next
+}
+
+func (a *Auth) reserveRuntimeSlot(now time.Time, sessionID string, sessionTTL time.Duration) (bool, string, time.Time) {
+	if a == nil {
+		return false, "unknown", time.Time{}
+	}
+	a.runtimeUsage.prune(now, sessionTTL)
+	if limited, resetAt := a.isRPMLimited(now); limited {
+		return false, "rpm", resetAt
+	}
+	maxSessions := a.EffectiveMaxSessions()
+	if maxSessions > 0 && strings.TrimSpace(sessionID) != "" {
+		sessionID = strings.TrimSpace(sessionID)
+		if a.runtimeUsage.Sessions == nil {
+			a.runtimeUsage.Sessions = make(map[string]time.Time)
+		}
+		if expiresAt, ok := a.runtimeUsage.Sessions[sessionID]; ok && expiresAt.After(now) {
+			a.runtimeUsage.Sessions[sessionID] = now.Add(sessionTTL)
+		} else if a.runtimeUsage.activeSessionCount(now) >= maxSessions {
+			resetAt := a.runtimeUsage.sessionResetAt(now)
+			if resetAt.IsZero() || resetAt.Before(now) {
+				resetAt = now.Add(sessionTTL)
+			}
+			return false, "session", resetAt
+		} else {
+			a.runtimeUsage.Sessions[sessionID] = now.Add(sessionTTL)
+		}
+	}
+	a.runtimeUsage.RequestTimes = append(a.runtimeUsage.RequestTimes, now)
+	a.LastUsedAt = now
+	return true, "", time.Time{}
+}
+
 // Clone shallow copies the Auth structure, duplicating maps to avoid accidental mutation.
 func (a *Auth) Clone() *Auth {
 	if a == nil {
@@ -237,6 +563,15 @@ func (a *Auth) Clone() *Auth {
 		copyAuth.ModelStates = make(map[string]*ModelState, len(a.ModelStates))
 		for key, state := range a.ModelStates {
 			copyAuth.ModelStates[key] = state.Clone()
+		}
+	}
+	if len(a.runtimeUsage.RequestTimes) > 0 {
+		copyAuth.runtimeUsage.RequestTimes = append([]time.Time(nil), a.runtimeUsage.RequestTimes...)
+	}
+	if len(a.runtimeUsage.Sessions) > 0 {
+		copyAuth.runtimeUsage.Sessions = make(map[string]time.Time, len(a.runtimeUsage.Sessions))
+		for key, value := range a.runtimeUsage.Sessions {
+			copyAuth.runtimeUsage.Sessions[key] = value
 		}
 	}
 	copyAuth.Runtime = a.Runtime
