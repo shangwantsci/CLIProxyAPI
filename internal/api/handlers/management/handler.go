@@ -3,6 +3,7 @@
 package management
 
 import (
+	"context"
 	"crypto/subtle"
 	"fmt"
 	"net/http"
@@ -47,6 +48,12 @@ type Handler struct {
 	envSecret           string
 	logDir              string
 	postAuthHook        coreauth.PostAuthHook
+	sessionImportMu     sync.Mutex
+	sessionImportJobs   map[string]*claudeSessionImportJob
+	sessionImportActive string
+
+	sessionImportAuthenticate        func(context.Context, claudeSessionImportAuthRequest) (claudeSessionImportAuthResult, error)
+	sessionImportAllowPrivateSources bool
 }
 
 // NewHandler creates a new management handler instance.

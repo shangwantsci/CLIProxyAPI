@@ -706,6 +706,9 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/proxy-pool/:id", s.mgmt.PatchProxyPoolEntry)
 		mgmt.DELETE("/proxy-pool/:id", s.mgmt.DeleteProxyPoolEntry)
 		mgmt.POST("/vertex/import", s.mgmt.ImportVertexCredential)
+		mgmt.POST("/claude-session-import-jobs", s.mgmt.PostClaudeSessionImportJob)
+		mgmt.GET("/claude-session-import-jobs/:id", s.mgmt.GetClaudeSessionImportJob)
+		mgmt.POST("/claude-session-import-jobs/:id/cancel", s.mgmt.CancelClaudeSessionImportJob)
 
 		mgmt.GET("/anthropic-auth-url", s.mgmt.RequestAnthropicToken)
 		mgmt.POST("/anthropic-cookie-auth", s.mgmt.PostAnthropicCookieAuth)

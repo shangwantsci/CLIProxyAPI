@@ -210,7 +210,7 @@ func (b *Builder) Build() (*Service, error) {
 
 		strategy := ""
 		sessionAffinity := false
-		sessionAffinityTTL := time.Hour
+		sessionAffinityTTL := 5 * time.Minute
 		if b.cfg != nil {
 			strategy = strings.ToLower(strings.TrimSpace(b.cfg.Routing.Strategy))
 			// Support both legacy ClaudeCodeSessionAffinity and new universal SessionAffinity

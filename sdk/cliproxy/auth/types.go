@@ -408,7 +408,7 @@ func (u *authRuntimeUsage) prune(now time.Time, sessionTTL time.Duration) {
 		u.RequestTimes = keep
 	}
 	if sessionTTL <= 0 {
-		sessionTTL = time.Hour
+		sessionTTL = 5 * time.Minute
 	}
 	if len(u.Sessions) > 0 {
 		for id, expiresAt := range u.Sessions {
@@ -510,6 +510,19 @@ func (a *Auth) isRPMLimited(now time.Time) (bool, time.Time) {
 	return true, next
 }
 
+func isCountedRuntimeSessionID(sessionID string) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return false
+	}
+	for _, prefix := range []string{"claude:", "header:", "codex:", "amp:", "conv:"} {
+		if strings.HasPrefix(sessionID, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *Auth) reserveRuntimeSlot(now time.Time, sessionID string, sessionTTL time.Duration) (bool, string, time.Time) {
 	if a == nil {
 		return false, "unknown", time.Time{}
@@ -519,6 +532,9 @@ func (a *Auth) reserveRuntimeSlot(now time.Time, sessionID string, sessionTTL ti
 		return false, "rpm", resetAt
 	}
 	maxSessions := a.EffectiveMaxSessions()
+	if !isCountedRuntimeSessionID(sessionID) {
+		sessionID = ""
+	}
 	if maxSessions > 0 && strings.TrimSpace(sessionID) != "" {
 		sessionID = strings.TrimSpace(sessionID)
 		if a.runtimeUsage.Sessions == nil {

@@ -1696,7 +1696,7 @@ func (m *Manager) accountSessionTTL() time.Duration {
 			}
 		}
 	}
-	return time.Hour
+	return 5 * time.Minute
 }
 
 func accountRuntimeLimitError(authID, reason string, resetAt time.Time) *Error {

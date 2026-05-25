@@ -531,7 +531,7 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 		}
 
 		if nextSessionAffinity {
-			ttl := time.Hour
+			ttl := 5 * time.Minute
 			if ttlStr := strings.TrimSpace(nextSessionAffinityTTL); ttlStr != "" {
 				if parsed, err := time.ParseDuration(ttlStr); err == nil && parsed > 0 {
 					ttl = parsed

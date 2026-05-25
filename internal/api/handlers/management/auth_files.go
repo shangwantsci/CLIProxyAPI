@@ -753,7 +753,7 @@ func claudeAuthStatusReasonLabel(reason string) string {
 	case "rpm_cooldown":
 		return "RPM 冷却"
 	case "session_full":
-		return "会话满"
+		return "新会话已满"
 	case "auth_expired":
 		return "认证失效"
 	case "account_banned", "organization_disabled", "account_disabled":

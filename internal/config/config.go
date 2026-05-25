@@ -26,7 +26,7 @@ const (
 	DefaultRequestRetry                               = 2
 	DefaultMaxRetryCredentials                        = 0
 	DefaultMaxRetryInterval                           = 30
-	DefaultSessionAffinityTTL                         = "1h"
+	DefaultSessionAffinityTTL                         = "5m"
 	DefaultClaudeFiveHourQuotaCoolingRemainingPercent = 20
 	DefaultClaudeWeeklyQuotaCoolingRemainingPercent   = 10
 	DefaultClaudeMimicryGuardMode                     = "degrade"
@@ -285,7 +285,7 @@ type RoutingConfig struct {
 	SessionAffinity bool `yaml:"session-affinity,omitempty" json:"session-affinity,omitempty"`
 
 	// SessionAffinityTTL specifies how long session-to-auth bindings are retained.
-	// Default: 1h. Accepts duration strings like "30m", "1h", "2h30m".
+	// Default: 5m. Accepts duration strings like "5m", "30m", "1h".
 	SessionAffinityTTL string `yaml:"session-affinity-ttl,omitempty" json:"session-affinity-ttl,omitempty"`
 }
 

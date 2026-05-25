@@ -452,7 +452,7 @@ type SessionAffinityConfig struct {
 func NewSessionAffinitySelector(fallback Selector) *SessionAffinitySelector {
 	return NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
 		Fallback: fallback,
-		TTL:      time.Hour,
+		TTL:      5 * time.Minute,
 	})
 }
 
@@ -462,7 +462,7 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 		cfg.Fallback = &RoundRobinSelector{}
 	}
 	if cfg.TTL <= 0 {
-		cfg.TTL = time.Hour
+		cfg.TTL = 5 * time.Minute
 	}
 	return &SessionAffinitySelector{
 		fallback: cfg.Fallback,

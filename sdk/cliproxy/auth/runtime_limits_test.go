@@ -129,6 +129,79 @@ func TestManagerSkipsClaudeAuthWhenNewSessionWouldExceedMax(t *testing.T) {
 	}
 }
 
+func TestManagerDoesNotCountMessageHashFallbackTowardMaxSessions(t *testing.T) {
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	exec := &runtimeLimitExecutor{}
+	manager.RegisterExecutor(exec)
+	registerClaudeRuntimeLimitAuth(t, manager, "auth-a", map[string]string{"max_sessions": "1"})
+	model := "claude-sonnet-4-5"
+	registerSchedulerModels(t, "claude", model, "auth-a")
+
+	first := cliproxyexecutor.Request{Model: model, Payload: []byte(`{"messages":[{"role":"user","content":"first unrelated prompt"}]}`)}
+	if _, err := manager.Execute(context.Background(), []string{"claude"}, first, cliproxyexecutor.Options{}); err != nil {
+		t.Fatalf("first Execute returned error: %v", err)
+	}
+	second := cliproxyexecutor.Request{Model: model, Payload: []byte(`{"messages":[{"role":"user","content":"second unrelated prompt"}]}`)}
+	if _, err := manager.Execute(context.Background(), []string{"claude"}, second, cliproxyexecutor.Options{}); err != nil {
+		t.Fatalf("second Execute returned error: %v", err)
+	}
+
+	if got := exec.snapshotCalls(); len(got) != 2 {
+		t.Fatalf("executor calls = %#v, want 2 successful calls", got)
+	}
+}
+
+func TestManagerDoesNotCountClientRequestIDTowardMaxSessions(t *testing.T) {
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	exec := &runtimeLimitExecutor{}
+	manager.RegisterExecutor(exec)
+	registerClaudeRuntimeLimitAuth(t, manager, "auth-a", map[string]string{"max_sessions": "1"})
+	model := "claude-sonnet-4-5"
+	registerSchedulerModels(t, "claude", model, "auth-a")
+	req := cliproxyexecutor.Request{Model: model, Payload: []byte(`{"messages":[{"role":"user","content":"hello"}]}`)}
+
+	if _, err := manager.Execute(context.Background(), []string{"claude"}, req, cliproxyexecutor.Options{
+		Headers: http.Header{"X-Client-Request-Id": []string{"request-1"}},
+	}); err != nil {
+		t.Fatalf("first Execute returned error: %v", err)
+	}
+	if _, err := manager.Execute(context.Background(), []string{"claude"}, req, cliproxyexecutor.Options{
+		Headers: http.Header{"X-Client-Request-Id": []string{"request-2"}},
+	}); err != nil {
+		t.Fatalf("second Execute returned error: %v", err)
+	}
+
+	if got := exec.snapshotCalls(); len(got) != 2 {
+		t.Fatalf("executor calls = %#v, want 2 successful calls", got)
+	}
+}
+
+func TestManagerAllowsExistingRealSessionWhenMaxSessionsReached(t *testing.T) {
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	exec := &runtimeLimitExecutor{}
+	manager.RegisterExecutor(exec)
+	registerClaudeRuntimeLimitAuth(t, manager, "auth-a", map[string]string{"max_sessions": "1"})
+	model := "claude-sonnet-4-5"
+	registerSchedulerModels(t, "claude", model, "auth-a")
+	req := cliproxyexecutor.Request{Model: model, Payload: []byte(`{"messages":[{"role":"user","content":"hello"}]}`)}
+	sessionOne := cliproxyexecutor.Options{Headers: http.Header{"X-Session-Id": []string{"session-1"}}}
+	sessionTwo := cliproxyexecutor.Options{Headers: http.Header{"X-Session-Id": []string{"session-2"}}}
+
+	if _, err := manager.Execute(context.Background(), []string{"claude"}, req, sessionOne); err != nil {
+		t.Fatalf("first Execute returned error: %v", err)
+	}
+	if _, err := manager.Execute(context.Background(), []string{"claude"}, req, sessionTwo); err == nil {
+		t.Fatalf("second Execute with new session returned nil error, want session limit error")
+	}
+	if _, err := manager.Execute(context.Background(), []string{"claude"}, req, sessionOne); err != nil {
+		t.Fatalf("existing session Execute returned error: %v", err)
+	}
+
+	if got := exec.snapshotCalls(); len(got) != 2 {
+		t.Fatalf("executor calls = %#v, want first and existing-session calls only", got)
+	}
+}
+
 func TestManagerMarkResultRecordsQuality24h(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	registerClaudeRuntimeLimitAuth(t, manager, "auth-a", nil)
