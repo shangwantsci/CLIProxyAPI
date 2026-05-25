@@ -49,15 +49,18 @@ type claudeSessionImportStartRequest struct {
 }
 
 type normalizedClaudeSessionImportRequest struct {
-	SourceURL   string
-	APIEndpoint string
-	ProxyURL    string
-	Prefix      string
-	Note        string
-	Concurrency int
-	Timeout     time.Duration
-	DelayMin    time.Duration
-	DelayMax    time.Duration
+	SourceURL          string
+	APIEndpoint        string
+	DisplaySourceURL   string
+	DisplayAPIEndpoint string
+	ProxyURL           string
+	ProxyCandidates    []string
+	Prefix             string
+	Note               string
+	Concurrency        int
+	Timeout            time.Duration
+	DelayMin           time.Duration
+	DelayMax           time.Duration
 }
 
 type claudeSessionImportAuthRequest struct {
@@ -125,6 +128,14 @@ func (h *Handler) PostClaudeSessionImportJob(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if normalized.ProxyURL == "" {
+		proxyCandidates, err := h.enabledClaudeSessionImportProxyURLs(c.Request.Context())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		normalized.ProxyCandidates = proxyCandidates
+	}
 
 	ctx, cancel := context.WithCancel(PopulateAuthContext(context.Background(), c))
 	now := time.Now().UTC()
@@ -133,10 +144,10 @@ func (h *Handler) PostClaudeSessionImportJob(c *gin.Context) {
 		data: claudeSessionImportJobSnapshot{
 			ID:               fmt.Sprintf("claude-session-import-%d", now.UnixNano()),
 			Status:           claudeSessionImportStatusRunning,
-			SourceURL:        normalized.SourceURL,
-			APIEndpoint:      normalized.APIEndpoint,
+			SourceURL:        normalized.DisplaySourceURL,
+			APIEndpoint:      normalized.DisplayAPIEndpoint,
 			ProxyURL:         normalized.ProxyURL,
-			RedactedProxyURL: proxyutil.Redact(normalized.ProxyURL),
+			RedactedProxyURL: redactedClaudeSessionImportProxy(normalized),
 			Concurrency:      normalized.Concurrency,
 			StartedAt:        now,
 			UpdatedAt:        now,
@@ -251,6 +262,12 @@ func (h *Handler) normalizeClaudeSessionImportRequest(req claudeSessionImportSta
 	if err := h.validateClaudeSessionImportURL(&endpoint); err != nil {
 		return normalizedClaudeSessionImportRequest{}, err
 	}
+	displaySourceURL := source.String()
+	displayAPIEndpoint := endpoint.String()
+	if shouldHideClaudeSessionImportSource(source.Hostname()) {
+		displaySourceURL = ""
+		displayAPIEndpoint = ""
+	}
 
 	concurrency := req.Concurrency
 	if concurrency <= 0 {
@@ -279,15 +296,17 @@ func (h *Handler) normalizeClaudeSessionImportRequest(req claudeSessionImportSta
 	}
 
 	return normalizedClaudeSessionImportRequest{
-		SourceURL:   source.String(),
-		APIEndpoint: endpoint.String(),
-		ProxyURL:    strings.TrimSpace(req.ProxyURL),
-		Prefix:      strings.TrimSpace(req.Prefix),
-		Note:        strings.TrimSpace(req.Note),
-		Concurrency: concurrency,
-		Timeout:     time.Duration(timeoutSeconds) * time.Second,
-		DelayMin:    delayMin,
-		DelayMax:    delayMax,
+		SourceURL:          source.String(),
+		APIEndpoint:        endpoint.String(),
+		DisplaySourceURL:   displaySourceURL,
+		DisplayAPIEndpoint: displayAPIEndpoint,
+		ProxyURL:           strings.TrimSpace(req.ProxyURL),
+		Prefix:             strings.TrimSpace(req.Prefix),
+		Note:               strings.TrimSpace(req.Note),
+		Concurrency:        concurrency,
+		Timeout:            time.Duration(timeoutSeconds) * time.Second,
+		DelayMin:           delayMin,
+		DelayMax:           delayMax,
 	}, nil
 }
 
@@ -317,7 +336,7 @@ func (h *Handler) runClaudeSessionImportJob(ctx context.Context, job *claudeSess
 		finished := time.Now().UTC()
 		job.update(func(snapshot *claudeSessionImportJobSnapshot) {
 			snapshot.Status = claudeSessionImportStatusFailed
-			snapshot.Error = err.Error()
+			snapshot.Error = sanitizeClaudeSessionImportError(req, err)
 			snapshot.FinishedAt = &finished
 		})
 		return
@@ -450,9 +469,13 @@ func (h *Handler) processClaudeSessionImportKey(ctx context.Context, sessionKey 
 		SessionKeyHash: shortSessionKeyHash(sessionKey),
 		Status:         "failed",
 	}
+	proxyURL := strings.TrimSpace(req.ProxyURL)
+	if proxyURL == "" {
+		proxyURL = randomClaudeSessionImportProxy(req.ProxyCandidates)
+	}
 	authResult, err := h.authenticateClaudeSessionKey(ctx, claudeSessionImportAuthRequest{
 		SessionKey: sessionKey,
-		ProxyURL:   req.ProxyURL,
+		ProxyURL:   proxyURL,
 		Prefix:     req.Prefix,
 		Note:       req.Note,
 	})
@@ -564,6 +587,81 @@ func randomClaudeSessionImportDelay(minDelay, maxDelay time.Duration) time.Durat
 		return minDelay
 	}
 	return minDelay + time.Duration(binary.BigEndian.Uint64(buf[:])%span)
+}
+
+func randomClaudeSessionImportProxy(candidates []string) string {
+	if len(candidates) == 0 {
+		return ""
+	}
+	idx := randomClaudeSessionImportInt(len(candidates))
+	return strings.TrimSpace(candidates[idx])
+}
+
+func randomClaudeSessionImportInt(max int) int {
+	if max <= 0 {
+		return 0
+	}
+	var buf [8]byte
+	if _, err := cryptorand.Read(buf[:]); err != nil {
+		return 0
+	}
+	return int(binary.BigEndian.Uint64(buf[:]) % uint64(max))
+}
+
+func (h *Handler) enabledClaudeSessionImportProxyURLs(ctx context.Context) ([]string, error) {
+	if h == nil {
+		return nil, nil
+	}
+	h.proxyPoolMu.Lock()
+	defer h.proxyPoolMu.Unlock()
+
+	proxies, err := h.loadProxyPool(ctx)
+	if err != nil {
+		return nil, err
+	}
+	candidates := make([]string, 0, len(proxies))
+	for _, entry := range proxies {
+		if !entry.Enabled || !shouldStoreProxyURL(entry.URL) {
+			continue
+		}
+		candidates = append(candidates, strings.TrimSpace(entry.URL))
+	}
+	return candidates, nil
+}
+
+func shouldHideClaudeSessionImportSource(host string) bool {
+	return strings.EqualFold(strings.TrimSpace(host), "sessionkeytest.globalpays.shop")
+}
+
+func redactedClaudeSessionImportProxy(req normalizedClaudeSessionImportRequest) string {
+	if strings.TrimSpace(req.ProxyURL) != "" {
+		return proxyutil.Redact(req.ProxyURL)
+	}
+	if len(req.ProxyCandidates) > 0 {
+		return fmt.Sprintf("代理池随机 · %d 个已启用代理", len(req.ProxyCandidates))
+	}
+	return ""
+}
+
+func sanitizeClaudeSessionImportError(req normalizedClaudeSessionImportRequest, err error) string {
+	if err == nil {
+		return ""
+	}
+	message := err.Error()
+	if req.DisplaySourceURL != "" || req.DisplayAPIEndpoint != "" {
+		return message
+	}
+	replacements := []string{
+		strings.TrimSpace(req.APIEndpoint),
+		strings.TrimSpace(req.SourceURL),
+	}
+	for _, replacement := range replacements {
+		if replacement == "" {
+			continue
+		}
+		message = strings.ReplaceAll(message, replacement, "默认抓取来源")
+	}
+	return message
 }
 
 func shortSessionKeyHash(sessionKey string) string {
