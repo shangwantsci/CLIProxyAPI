@@ -71,3 +71,33 @@ func TestConvertClaudeResponseToOpenAIResponsesStream_RewritesUsageToBillableInp
 		t.Fatalf("stream response.usage.input_tokens = %d, want small billable count; payload=%s", got, string(completed))
 	}
 }
+
+func TestConvertClaudeResponseToOpenAIResponsesStreamReadsCacheBreakdownWhenBillableDisabled(t *testing.T) {
+	ctx := helps.WithClaudeBillableUsage(context.Background(), false, "claude-opus-4-7", "openai-response", nil)
+	var param any
+
+	_ = ConvertClaudeResponseToOpenAIResponses(ctx, "claude-opus-4-7", nil, nil, []byte(`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-opus-4-7","usage":{"input_tokens":13,"cached_tokens":20,"cache_creation":{"ephemeral_5m_input_tokens":3,"ephemeral_1h_input_tokens":4}}}}`), &param)
+	_ = ConvertClaudeResponseToOpenAIResponses(ctx, "claude-opus-4-7", nil, nil, []byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}`), &param)
+	chunks := ConvertClaudeResponseToOpenAIResponses(ctx, "claude-opus-4-7", nil, nil, []byte(`data: {"type":"message_stop"}`), &param)
+
+	var completed []byte
+	for _, chunk := range chunks {
+		if strings.HasPrefix(string(chunk), "event: response.completed") {
+			if idx := strings.Index(string(chunk), "\ndata: "); idx >= 0 {
+				completed = chunk[idx+7:]
+			}
+		}
+	}
+	if len(completed) == 0 {
+		t.Fatalf("response.completed event not found: %q", chunks)
+	}
+	if got := gjson.GetBytes(completed, "response.usage.input_tokens").Int(); got != 40 {
+		t.Fatalf("response.usage.input_tokens = %d, want %d; payload=%s", got, 40, string(completed))
+	}
+	if got := gjson.GetBytes(completed, "response.usage.input_tokens_details.cached_tokens").Int(); got != 20 {
+		t.Fatalf("response.usage cached_tokens = %d, want %d; payload=%s", got, 20, string(completed))
+	}
+	if got := gjson.GetBytes(completed, "response.usage.total_tokens").Int(); got != 45 {
+		t.Fatalf("response.usage.total_tokens = %d, want %d; payload=%s", got, 45, string(completed))
+	}
+}

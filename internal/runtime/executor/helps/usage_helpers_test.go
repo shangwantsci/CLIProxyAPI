@@ -2,6 +2,7 @@ package helps
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,6 +84,132 @@ func TestParseOpenAIStreamUsageResponsesFields(t *testing.T) {
 	}
 	if detail.ReasoningTokens != 2 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 2)
+	}
+}
+
+func TestParseOpenAIUsageCopiesCachedTokensToCacheRead(t *testing.T) {
+	data := []byte(`{"usage":{"input_tokens":10,"output_tokens":2,"input_tokens_details":{"cached_tokens":4},"cache_creation_input_tokens":7}}`)
+	detail := ParseOpenAIUsage(data)
+	if detail.InputTokens != 10 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 10)
+	}
+	if detail.OutputTokens != 2 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 2)
+	}
+	if detail.CachedTokens != 4 || detail.CacheReadTokens != 4 {
+		t.Fatalf("cached/cache read tokens = %d/%d, want 4/4", detail.CachedTokens, detail.CacheReadTokens)
+	}
+	if detail.CacheCreationTokens != 7 {
+		t.Fatalf("cache creation tokens = %d, want %d", detail.CacheCreationTokens, 7)
+	}
+}
+
+func TestParseClaudeUsageReadsCacheCreationBreakdown(t *testing.T) {
+	data := []byte(`{"usage":{"input_tokens":10,"output_tokens":2,"cache_creation":{"ephemeral_5m_input_tokens":3,"ephemeral_1h_input_tokens":4},"cache_read_input_tokens":5}}`)
+	detail := ParseClaudeUsage(data)
+	if detail.InputTokens != 10 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 10)
+	}
+	if detail.OutputTokens != 2 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 2)
+	}
+	if detail.CacheCreationTokens != 7 {
+		t.Fatalf("cache creation tokens = %d, want %d", detail.CacheCreationTokens, 7)
+	}
+	if detail.CacheReadTokens != 5 {
+		t.Fatalf("cache read tokens = %d, want %d", detail.CacheReadTokens, 5)
+	}
+	if detail.CachedTokens != 5 {
+		t.Fatalf("cached tokens = %d, want cache read tokens %d", detail.CachedTokens, 5)
+	}
+	if detail.TotalTokens != 24 {
+		t.Fatalf("total tokens = %d, want input+output+cache %d", detail.TotalTokens, 24)
+	}
+}
+
+func TestParseClaudeStreamUsageReadsMessageStartUsage(t *testing.T) {
+	line := []byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":11,"cache_creation_input_tokens":13,"cache_read_input_tokens":17}}}`)
+	detail, ok := ParseClaudeStreamUsage(line)
+	if !ok {
+		t.Fatal("ParseClaudeStreamUsage() ok = false, want true")
+	}
+	if detail.InputTokens != 11 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 11)
+	}
+	if detail.CacheCreationTokens != 13 {
+		t.Fatalf("cache creation tokens = %d, want %d", detail.CacheCreationTokens, 13)
+	}
+	if detail.CacheReadTokens != 17 {
+		t.Fatalf("cache read tokens = %d, want %d", detail.CacheReadTokens, 17)
+	}
+}
+
+func TestMergeUsageDetailKeepsStartInputAndFinalOutput(t *testing.T) {
+	start := usage.Detail{InputTokens: 11, CacheCreationTokens: 13, CacheReadTokens: 17, CachedTokens: 17}
+	final := usage.Detail{OutputTokens: 19}
+	merged := MergeUsageDetail(start, final)
+
+	if merged.InputTokens != 11 {
+		t.Fatalf("input tokens = %d, want %d", merged.InputTokens, 11)
+	}
+	if merged.OutputTokens != 19 {
+		t.Fatalf("output tokens = %d, want %d", merged.OutputTokens, 19)
+	}
+	if merged.CacheCreationTokens != 13 {
+		t.Fatalf("cache creation tokens = %d, want %d", merged.CacheCreationTokens, 13)
+	}
+	if merged.CacheReadTokens != 17 || merged.CachedTokens != 17 {
+		t.Fatalf("cache read/cached tokens = %d/%d, want 17/17", merged.CacheReadTokens, merged.CachedTokens)
+	}
+	if merged.TotalTokens != 60 {
+		t.Fatalf("total tokens = %d, want input+output+cache %d", merged.TotalTokens, 60)
+	}
+}
+
+func TestMergeParsedClaudeStreamUsageComputesAggregateTotal(t *testing.T) {
+	start, ok := ParseClaudeStreamUsage([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":11,"cache_creation_input_tokens":13,"cache_read_input_tokens":17}}}`))
+	if !ok {
+		t.Fatal("message_start usage not parsed")
+	}
+	delta, ok := ParseClaudeStreamUsage([]byte(`data: {"type":"message_delta","usage":{"output_tokens":19}}`))
+	if !ok {
+		t.Fatal("message_delta usage not parsed")
+	}
+
+	merged := MergeUsageDetail(MergeUsageDetail(usage.Detail{}, start), delta)
+
+	if merged.InputTokens != 11 || merged.OutputTokens != 19 {
+		t.Fatalf("merged input/output = %d/%d, want 11/19", merged.InputTokens, merged.OutputTokens)
+	}
+	if merged.CacheCreationTokens != 13 || merged.CacheReadTokens != 17 {
+		t.Fatalf("merged cache create/read = %d/%d, want 13/17", merged.CacheCreationTokens, merged.CacheReadTokens)
+	}
+	if merged.TotalTokens != 60 {
+		t.Fatalf("merged total tokens = %d, want input+output+cache 60", merged.TotalTokens)
+	}
+}
+
+func TestMergeClaudeStreamUsageLinesKeepsInputOutputAndCache(t *testing.T) {
+	data := []byte(strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"usage":{"input_tokens":11,"cache_creation_input_tokens":13,"cache_read_input_tokens":17}}}`,
+		`event: message_delta`,
+		`data: {"type":"message_delta","usage":{"output_tokens":19}}`,
+	}, "\n"))
+
+	merged, ok := MergeClaudeStreamUsageLines(data)
+
+	if !ok {
+		t.Fatal("MergeClaudeStreamUsageLines() ok = false, want true")
+	}
+	if merged.InputTokens != 11 || merged.OutputTokens != 19 {
+		t.Fatalf("merged input/output = %d/%d, want 11/19", merged.InputTokens, merged.OutputTokens)
+	}
+	if merged.CacheCreationTokens != 13 || merged.CacheReadTokens != 17 {
+		t.Fatalf("merged cache create/read = %d/%d, want 13/17", merged.CacheCreationTokens, merged.CacheReadTokens)
+	}
+	if merged.TotalTokens != 60 {
+		t.Fatalf("merged total tokens = %d, want input+output+cache 60", merged.TotalTokens)
 	}
 }
 

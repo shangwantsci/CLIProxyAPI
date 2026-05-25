@@ -137,6 +137,11 @@ type ClaudeMimicryGuardDecision struct {
 	Audit   ClaudeMimicryAuditSnapshot `json:"audit"`
 }
 
+type ClaudeMimicryGuardPolicy struct {
+	RequireSignedCCH    bool
+	RequireSystemBlocks bool
+}
+
 type ClaudeMimicryEvent struct {
 	ID                string                   `json:"id"`
 	RequestID         string                   `json:"request_id,omitempty"`
@@ -282,6 +287,10 @@ func ResetClaudeMimicryEventsForTest() {
 }
 
 func EvaluateClaudeMimicryGuard(audit ClaudeMimicryAuditSnapshot, cfg *config.Config) ClaudeMimicryGuardDecision {
+	return EvaluateClaudeMimicryGuardWithPolicy(audit, cfg, ClaudeMimicryGuardPolicy{RequireSignedCCH: true, RequireSystemBlocks: true})
+}
+
+func EvaluateClaudeMimicryGuardWithPolicy(audit ClaudeMimicryAuditSnapshot, cfg *config.Config, policy ClaudeMimicryGuardPolicy) ClaudeMimicryGuardDecision {
 	mode := normalizeClaudeMimicryGuardMode(cfg)
 	decision := ClaudeMimicryGuardDecision{
 		Mode:   mode,
@@ -293,9 +302,9 @@ func EvaluateClaudeMimicryGuard(audit ClaudeMimicryAuditSnapshot, cfg *config.Co
 		return decision
 	}
 
-	hardReasons := hardClaudeMimicryFailures(audit)
+	hardReasons := hardClaudeMimicryFailures(audit, policy)
 	if mode == "strict" {
-		hardReasons = append(hardReasons, audit.Warnings...)
+		hardReasons = append(append(hardReasons, audit.Failures...), audit.Warnings...)
 	}
 	if len(hardReasons) > 0 {
 		decision.Action = ClaudeMimicryGuardActionBlock
@@ -573,9 +582,13 @@ func auditClaudeMimicryTools(body []byte) ClaudeMimicryToolAudit {
 		if name == "" {
 			return true
 		}
+		typedBuiltin := isClaudeTypedBuiltinTool(tool)
 		audit.Count++
 		audit.Names = append(audit.Names, name)
 		schemaParts = append(schemaParts, name+"\x00"+tool.Get("input_schema").Raw)
+		if typedBuiltin {
+			return true
+		}
 		if _, leaky := oauthToolRenameMap[name]; leaky {
 			audit.LeakyNames = append(audit.LeakyNames, name)
 		}
@@ -611,6 +624,24 @@ func auditClaudeMimicryTools(body []byte) ClaudeMimicryToolAudit {
 		audit.Status = ClaudeMimicryStatusWarning
 	}
 	return audit
+}
+
+func isClaudeTypedBuiltinTool(tool gjson.Result) bool {
+	toolType := strings.ToLower(strings.TrimSpace(tool.Get("type").String()))
+	if toolType == "" {
+		return false
+	}
+	for _, prefix := range []string{
+		"web_search",
+		"code_execution",
+		"text_editor",
+		"computer",
+	} {
+		if toolType == prefix || strings.HasPrefix(toolType, prefix+"_") {
+			return true
+		}
+	}
+	return false
 }
 
 func auditClaudeMimicryHeaders(headers http.Header) ClaudeMimicryHeaderAudit {
@@ -803,12 +834,12 @@ func normalizeClaudeMimicryGuardMode(cfg *config.Config) string {
 	}
 }
 
-func hardClaudeMimicryFailures(audit ClaudeMimicryAuditSnapshot) []string {
+func hardClaudeMimicryFailures(audit ClaudeMimicryAuditSnapshot, policy ClaudeMimicryGuardPolicy) []string {
 	var reasons []string
-	if audit.System.Status == ClaudeMimicryStatusFailed {
+	if policy.RequireSystemBlocks && audit.System.Status == ClaudeMimicryStatusFailed {
 		reasons = append(reasons, "system blocks mismatch")
 	}
-	if audit.CCH.Status == ClaudeMimicryStatusFailed {
+	if policy.RequireSignedCCH && audit.CCH.Status == ClaudeMimicryStatusFailed {
 		reasons = append(reasons, "cch signature mismatch")
 	}
 	if audit.Betas.Status == ClaudeMimicryStatusFailed {

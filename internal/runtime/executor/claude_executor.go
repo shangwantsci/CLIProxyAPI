@@ -27,6 +27,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -62,6 +63,7 @@ var oauthToolRenameMap = map[string]string{
 	"webfetch":     "WebFetch",
 	"web_fetch":    "WebFetch",
 	"web_search":   "WebSearch",
+	"websearch":    "WebSearch",
 	"todowrite":    "TodoWrite",
 	"question":     "Question",
 	"skill":        "Skill",
@@ -396,11 +398,8 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			helps.RecordAPIResponseError(ctx, e.cfg, errValidate)
 			return resp, errValidate
 		}
-		lines := bytes.Split(data, []byte("\n"))
-		for _, line := range lines {
-			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
-				reporter.Publish(ctx, detail)
-			}
+		if detail, ok := helps.MergeClaudeStreamUsageLines(data); ok {
+			reporter.Publish(ctx, detail)
 		}
 	} else {
 		reporter.Publish(ctx, helps.ParseClaudeUsage(data))
@@ -570,6 +569,15 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		recordedMimicryEvent := false
+		var streamUsage usage.Detail
+		streamUsageSeen := false
+		streamFailed := false
+		mergeStreamUsage := func(line []byte) {
+			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
+				streamUsage = helps.MergeUsageDetail(streamUsage, detail)
+				streamUsageSeen = true
+			}
+		}
 		recordStreamMimicryEvent := func(message string) {
 			if recordedMimicryEvent {
 				return
@@ -580,6 +588,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		defer close(out)
 		defer func() {
 			recordStreamMimicryEvent("")
+			if streamUsageSeen && !streamFailed {
+				reporter.Publish(ctx, streamUsage)
+			}
 			if errClose := decodedBody.Close(); errClose != nil {
 				log.Errorf("response body close error: %v", errClose)
 			}
@@ -592,9 +603,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			for scanner.Scan() {
 				line := scanner.Bytes()
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-				if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
-					reporter.Publish(ctx, detail)
-				}
+				mergeStreamUsage(line)
 				line = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
 				line = helps.RewriteClaudeStreamUsageForBillable(ctx, line)
 				// Forward the line as-is to preserve SSE format
@@ -608,6 +617,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				}
 			}
 			if errScan := scanner.Err(); errScan != nil {
+				streamFailed = true
 				recordStreamMimicryEvent(errScan.Error())
 				helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 				reporter.PublishFailure(ctx, errScan)
@@ -626,9 +636,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
-				reporter.Publish(ctx, detail)
-			}
+			mergeStreamUsage(line)
 			line = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
 			chunks := sdktranslator.TranslateStream(
 				ctx,
@@ -649,6 +657,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
+			streamFailed = true
 			recordStreamMimicryEvent(errScan.Error())
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.PublishFailure(ctx, errScan)
@@ -1013,7 +1022,11 @@ func extractAndRemoveBetas(body []byte) ([]string, []byte) {
 
 func prepareClaudeMimicryGuardEvent(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, opts cliproxyexecutor.Options, model, requestPath string, body []byte, upstreamHeaders http.Header) (ClaudeMimicryEvent, ClaudeMimicryGuardDecision, error) {
 	audit := RecordClaudeMimicryAudit(model, requestPath, body, upstreamHeaders, cfg)
-	decision := EvaluateClaudeMimicryGuard(audit, cfg)
+	requireSystemBlocks := claudeRequestRequiresSystemBlocks(model)
+	decision := EvaluateClaudeMimicryGuardWithPolicy(audit, cfg, ClaudeMimicryGuardPolicy{
+		RequireSignedCCH:    requireSystemBlocks && claudeRequestRequiresCCHSigning(cfg, auth),
+		RequireSystemBlocks: requireSystemBlocks,
+	})
 	event := ClaudeMimicryEvent{
 		RequestID:    logging.GetRequestID(ctx),
 		ClientSource: ClassifyClaudeMimicryClientSource(opts.SourceFormat.String(), inboundClaudeMimicryHeaders(ctx, opts)),
@@ -1039,6 +1052,15 @@ func prepareClaudeMimicryGuardEvent(ctx context.Context, cfg *config.Config, aut
 		return event, decision, claudeMimicryGuardBlockedError(decision)
 	}
 	return event, decision, nil
+}
+
+func claudeRequestRequiresCCHSigning(cfg *config.Config, auth *cliproxyauth.Auth) bool {
+	apiKey, _ := claudeCreds(auth)
+	return isClaudeOAuthToken(apiKey) || experimentalCCHSigningEnabled(cfg, auth)
+}
+
+func claudeRequestRequiresSystemBlocks(model string) bool {
+	return !strings.HasPrefix(model, "claude-3-5-haiku")
 }
 
 func recordClaudeMimicryGuardEvent(event ClaudeMimicryEvent, upstreamAttempted bool, upstreamStatus int, upstreamError string) {

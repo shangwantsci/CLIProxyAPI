@@ -37,6 +37,33 @@ func TestConvertClaudeResponseToOpenAI_StreamUsageIncludesCachedTokens(t *testin
 	}
 }
 
+func TestConvertClaudeResponseToOpenAI_StreamUsageReadsCacheCreationBreakdown(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	out := ConvertClaudeResponseToOpenAI(
+		ctx,
+		"claude-opus-4-6",
+		nil,
+		nil,
+		[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":13,"output_tokens":4,"cached_tokens":20,"cache_creation":{"ephemeral_5m_input_tokens":3,"ephemeral_1h_input_tokens":4}}}`),
+		&param,
+	)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(out))
+	}
+
+	if gotPromptTokens := gjson.GetBytes(out[0], "usage.prompt_tokens").Int(); gotPromptTokens != 40 {
+		t.Fatalf("expected prompt_tokens %d, got %d", 40, gotPromptTokens)
+	}
+	if gotTotalTokens := gjson.GetBytes(out[0], "usage.total_tokens").Int(); gotTotalTokens != 44 {
+		t.Fatalf("expected total_tokens %d, got %d", 44, gotTotalTokens)
+	}
+	if gotCachedTokens := gjson.GetBytes(out[0], "usage.prompt_tokens_details.cached_tokens").Int(); gotCachedTokens != 20 {
+		t.Fatalf("expected cached_tokens %d, got %d", 20, gotCachedTokens)
+	}
+}
+
 func TestConvertClaudeResponseToOpenAI_StreamUsageMergesMessageStartUsage(t *testing.T) {
 	ctx := context.Background()
 	var param any

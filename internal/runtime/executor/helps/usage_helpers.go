@@ -112,6 +112,33 @@ func normalizeUsageDetailTotal(detail usage.Detail) usage.Detail {
 	return detail
 }
 
+func MergeUsageDetail(base, next usage.Detail) usage.Detail {
+	if next.InputTokens != 0 {
+		base.InputTokens = next.InputTokens
+	}
+	if next.OutputTokens != 0 {
+		base.OutputTokens = next.OutputTokens
+	}
+	if next.ReasoningTokens != 0 {
+		base.ReasoningTokens = next.ReasoningTokens
+	}
+	if next.CacheCreationTokens != 0 {
+		base.CacheCreationTokens = next.CacheCreationTokens
+	}
+	if next.CacheReadTokens != 0 {
+		base.CacheReadTokens = next.CacheReadTokens
+		base.CachedTokens = next.CacheReadTokens
+	} else if next.CachedTokens != 0 {
+		base.CachedTokens = next.CachedTokens
+	}
+	if next.TotalTokens != 0 {
+		base.TotalTokens = next.TotalTokens
+	} else {
+		base.TotalTokens = base.InputTokens + base.OutputTokens + base.ReasoningTokens + base.CacheCreationTokens + base.CacheReadTokens
+	}
+	return base
+}
+
 func hasNonZeroTokenUsage(detail usage.Detail) bool {
 	return detail.InputTokens != 0 ||
 		detail.OutputTokens != 0 ||
@@ -312,6 +339,8 @@ func hasOpenAIStyleUsageTokenFields(usageNode gjson.Result) bool {
 		usageNode.Get("total_tokens").Exists() ||
 		usageNode.Get("prompt_tokens_details.cached_tokens").Exists() ||
 		usageNode.Get("input_tokens_details.cached_tokens").Exists() ||
+		usageNode.Get("cache_creation_input_tokens").Exists() ||
+		usageNode.Get("cache_read_input_tokens").Exists() ||
 		usageNode.Get("completion_tokens_details.reasoning_tokens").Exists() ||
 		usageNode.Get("output_tokens_details.reasoning_tokens").Exists()
 }
@@ -334,9 +363,14 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	if !cached.Exists() {
 		cached = usageNode.Get("input_tokens_details.cached_tokens")
 	}
+	if !cached.Exists() {
+		cached = usageNode.Get("cache_read_input_tokens")
+	}
 	if cached.Exists() {
 		detail.CachedTokens = cached.Int()
+		detail.CacheReadTokens = cached.Int()
 	}
+	detail.CacheCreationTokens = usageNode.Get("cache_creation_input_tokens").Int()
 	reasoning := usageNode.Get("completion_tokens_details.reasoning_tokens")
 	if !reasoning.Exists() {
 		reasoning = usageNode.Get("output_tokens_details.reasoning_tokens")
@@ -364,7 +398,7 @@ func ParseClaudeUsage(data []byte) usage.Detail {
 	if !usageNode.Exists() {
 		return usage.Detail{}
 	}
-	return parseClaudeUsageNode(usageNode)
+	return parseClaudeUsageNode(usageNode, true)
 }
 
 func ParseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
@@ -374,25 +408,49 @@ func ParseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
 	}
 	usageNode := gjson.GetBytes(payload, "usage")
 	if !usageNode.Exists() {
+		usageNode = gjson.GetBytes(payload, "message.usage")
+	}
+	if !usageNode.Exists() {
 		return usage.Detail{}, false
 	}
-	return parseClaudeUsageNode(usageNode), true
+	return parseClaudeUsageNode(usageNode, false), true
 }
 
-func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
+func MergeClaudeStreamUsageLines(data []byte) (usage.Detail, bool) {
+	var merged usage.Detail
+	seen := false
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		detail, ok := ParseClaudeStreamUsage(line)
+		if !ok {
+			continue
+		}
+		merged = MergeUsageDetail(merged, detail)
+		seen = true
+	}
+	return merged, seen
+}
+
+func parseClaudeUsageNode(usageNode gjson.Result, fallbackTotal bool) usage.Detail {
 	cacheReadTokens := usageNode.Get("cache_read_input_tokens").Int()
+	if cacheReadTokens == 0 {
+		cacheReadTokens = usageNode.Get("cached_tokens").Int()
+	}
 	cacheCreationTokens := usageNode.Get("cache_creation_input_tokens").Int()
+	if cacheCreationTokens == 0 {
+		cacheCreationTokens = usageNode.Get("cache_creation.ephemeral_5m_input_tokens").Int() +
+			usageNode.Get("cache_creation.ephemeral_1h_input_tokens").Int()
+	}
 	detail := usage.Detail{
 		InputTokens:         usageNode.Get("input_tokens").Int(),
 		OutputTokens:        usageNode.Get("output_tokens").Int(),
 		CachedTokens:        cacheReadTokens,
 		CacheReadTokens:     cacheReadTokens,
 		CacheCreationTokens: cacheCreationTokens,
+		TotalTokens:         usageNode.Get("total_tokens").Int(),
 	}
-	if detail.CachedTokens == 0 {
-		detail.CachedTokens = detail.CacheCreationTokens
+	if fallbackTotal && detail.TotalTokens == 0 {
+		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.CacheCreationTokens + detail.CacheReadTokens
 	}
-	detail.TotalTokens = detail.InputTokens + detail.OutputTokens
 	return detail
 }
 

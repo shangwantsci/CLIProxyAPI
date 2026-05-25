@@ -1264,8 +1264,8 @@ func TestClaudeExecutor_ExecuteOpenAINonStreamConvertsValidClaudeStream(t *testi
 	if got := gjson.GetBytes(resp.Payload, "choices.0.message.content").String(); got != "ok" {
 		t.Fatalf("response content = %q, want ok", got)
 	}
-	if got := gjson.GetBytes(resp.Payload, "usage.total_tokens").Int(); got != 3 {
-		t.Fatalf("usage.total_tokens = %d, want 3", got)
+	if got := gjson.GetBytes(resp.Payload, "usage.total_tokens").Int(); got != 4 {
+		t.Fatalf("usage.total_tokens = %d, want 4", got)
 	}
 }
 
@@ -2434,6 +2434,38 @@ func TestClaudeExecutor_ExperimentalCCHSigningDisabledByDefaultKeepsLegacyHeader
 	}
 }
 
+func TestClaudeExecutor_OAuthLegacyHaikuWithoutSystemDoesNotTripMimicryGuard(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-haiku","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "sk-ant-oat-test",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-haiku",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(seenBody) == 0 {
+		t.Fatal("expected request body to be captured")
+	}
+	if gjson.GetBytes(seenBody, "system").Exists() {
+		t.Fatalf("legacy haiku path should not inject system blocks, body=%s", string(seenBody))
+	}
+}
+
 func TestClaudeExecutor_ExperimentalCCHSigningOptInSignsFinalBody(t *testing.T) {
 	var seenBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2631,6 +2663,24 @@ func TestRemapOAuthToolNames_Lowercase_ReverseApplied(t *testing.T) {
 	reversed := reverseRemapOAuthToolNames(resp, reverseMap)
 	if got := gjson.GetBytes(reversed, "content.0.name").String(); got != "bash" {
 		t.Fatalf("content.0.name = %q, want %q", got, "bash")
+	}
+}
+
+func TestRemapOAuthToolNames_WebsearchAlias_ReverseApplied(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"websearch","description":"Search the web","input_schema":{"type":"object","properties":{"query":{"type":"string"}}}}],"tool_choice":{"type":"tool","name":"websearch"},"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01","name":"websearch","input":{"query":"news"}}]}]}`)
+
+	out, reverseMap := remapOAuthToolNames(body)
+	if reverseMap.ToolNames["WebSearch"] != "websearch" {
+		t.Fatalf("reverseMap = %v, want entry WebSearch->websearch", reverseMap)
+	}
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "WebSearch" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "WebSearch")
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "WebSearch" {
+		t.Fatalf("tool_choice.name = %q, want %q", got, "WebSearch")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "WebSearch" {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, "WebSearch")
 	}
 }
 

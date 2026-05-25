@@ -61,9 +61,14 @@ func (u *claudeUsageTokens) Merge(usage gjson.Result) {
 	}
 	if cacheCreationInputTokens := usage.Get("cache_creation_input_tokens"); cacheCreationInputTokens.Exists() {
 		u.CacheCreationInputTokens = cacheCreationInputTokens.Int()
+	} else if cacheCreation := usage.Get("cache_creation"); cacheCreation.Exists() {
+		u.CacheCreationInputTokens = cacheCreation.Get("ephemeral_5m_input_tokens").Int() +
+			cacheCreation.Get("ephemeral_1h_input_tokens").Int()
 	}
 	if cacheReadInputTokens := usage.Get("cache_read_input_tokens"); cacheReadInputTokens.Exists() {
 		u.CacheReadInputTokens = cacheReadInputTokens.Int()
+	} else if cachedTokens := usage.Get("cached_tokens"); cachedTokens.Exists() {
+		u.CacheReadInputTokens = cachedTokens.Int()
 	}
 }
 

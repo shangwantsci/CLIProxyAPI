@@ -105,25 +105,67 @@ func ClaudeBillableInputTokens(ctx context.Context, fallbackModel, fallbackSourc
 }
 
 func RewriteClaudeUsageForBillable(ctx context.Context, payload []byte) []byte {
-	if !gjson.ValidBytes(payload) || !gjson.GetBytes(payload, "usage").Exists() {
+	if !gjson.ValidBytes(payload) {
 		return payload
 	}
 	count, ok := ClaudeBillableInputTokens(ctx, gjson.GetBytes(payload, "model").String(), "claude", nil)
 	if !ok {
 		return payload
 	}
-	out, err := sjson.SetBytes(payload, "usage.input_tokens", count)
-	if err != nil {
+	out := payload
+	rewrote := false
+	for _, path := range []string{"usage", "message.usage"} {
+		if !gjson.GetBytes(out, path).Exists() {
+			continue
+		}
+		var ok bool
+		out, ok = rewriteClaudeUsageAtPathForBillable(out, path, count)
+		rewrote = rewrote || ok
+	}
+	if !rewrote {
 		return payload
 	}
-	out, _ = sjson.SetBytes(out, "usage.cache_creation_input_tokens", 0)
-	out, _ = sjson.SetBytes(out, "usage.cache_read_input_tokens", 0)
 	return out
+}
+
+func rewriteClaudeUsageAtPathForBillable(payload []byte, path string, count int64) ([]byte, bool) {
+	usageNode := gjson.GetBytes(payload, path)
+	if !usageNode.Exists() {
+		return payload, false
+	}
+	out := payload
+	changed := false
+	if usageNode.Get("input_tokens").Exists() {
+		var err error
+		out, err = sjson.SetBytes(out, path+".input_tokens", count)
+		if err != nil {
+			return payload, false
+		}
+		changed = true
+	}
+	if usageNode.Get("cache_creation_input_tokens").Exists() {
+		out, _ = sjson.SetBytes(out, path+".cache_creation_input_tokens", 0)
+		changed = true
+	}
+	if usageNode.Get("cache_read_input_tokens").Exists() {
+		out, _ = sjson.SetBytes(out, path+".cache_read_input_tokens", 0)
+		changed = true
+	}
+	if usageNode.Get("cached_tokens").Exists() {
+		out, _ = sjson.SetBytes(out, path+".cached_tokens", 0)
+		changed = true
+	}
+	if gjson.GetBytes(out, path+".cache_creation").Exists() {
+		out, _ = sjson.SetBytes(out, path+".cache_creation.ephemeral_5m_input_tokens", 0)
+		out, _ = sjson.SetBytes(out, path+".cache_creation.ephemeral_1h_input_tokens", 0)
+		changed = true
+	}
+	return out, changed
 }
 
 func RewriteClaudeStreamUsageForBillable(ctx context.Context, line []byte) []byte {
 	payload := jsonPayload(line)
-	if len(payload) == 0 || !gjson.ValidBytes(payload) || !gjson.GetBytes(payload, "usage").Exists() {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return line
 	}
 	updated := RewriteClaudeUsageForBillable(ctx, payload)

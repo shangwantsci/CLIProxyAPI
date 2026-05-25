@@ -138,6 +138,68 @@ func TestEvaluateClaudeMimicryGuard_DegradeAllowsUnknownTools(t *testing.T) {
 	}
 }
 
+func TestEvaluateClaudeMimicryGuard_CCHMismatchOnlyBlocksWhenSigningRequired(t *testing.T) {
+	payload := buildSignedClaudeMimicryTestPayload(t)
+	payload, _ = sjson.SetBytes(payload, "metadata.after_signing", true)
+
+	req := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent": []string{"claude-cli/2.1.148 (external, cli)"},
+	})
+	applyClaudeHeaders(req, &cliproxyauth.Auth{}, "key-123", false, nil, &config.Config{})
+	audit := AuditClaudeMimicryRequest("claude-sonnet-4-6", "/v1/messages", payload, req.Header, &config.Config{})
+	if audit.CCH.Status != ClaudeMimicryStatusFailed {
+		t.Fatalf("CCH = %#v, want failed", audit.CCH)
+	}
+
+	cfg := &config.Config{
+		ClaudeMimicryGuard: config.ClaudeMimicryGuardConfig{Mode: "degrade"},
+	}
+	legacyDecision := EvaluateClaudeMimicryGuardWithPolicy(audit, cfg, ClaudeMimicryGuardPolicy{
+		RequireSignedCCH: false,
+	})
+	if legacyDecision.Blocked {
+		t.Fatalf("legacy decision blocked = true, want false; reasons=%v", legacyDecision.Reasons)
+	}
+	if legacyDecision.Action != ClaudeMimicryGuardActionDegrade {
+		t.Fatalf("legacy decision action = %q, want degrade; reasons=%v", legacyDecision.Action, legacyDecision.Reasons)
+	}
+
+	oauthDecision := EvaluateClaudeMimicryGuardWithPolicy(audit, cfg, ClaudeMimicryGuardPolicy{
+		RequireSignedCCH: true,
+	})
+	if !oauthDecision.Blocked {
+		t.Fatalf("oauth decision blocked = false, want true; reasons=%v", oauthDecision.Reasons)
+	}
+}
+
+func TestEvaluateClaudeMimicryGuard_SystemMismatchOnlyBlocksWhenRequired(t *testing.T) {
+	audit := ClaudeMimicryAuditSnapshot{
+		Status:   ClaudeMimicryStatusFailed,
+		System:   ClaudeMimicrySystemAudit{Status: ClaudeMimicryStatusFailed},
+		Failures: []string{"system: system blocks do not match Claude Code baseline"},
+	}
+	cfg := &config.Config{
+		ClaudeMimicryGuard: config.ClaudeMimicryGuardConfig{Mode: "degrade"},
+	}
+
+	legacyHaikuDecision := EvaluateClaudeMimicryGuardWithPolicy(audit, cfg, ClaudeMimicryGuardPolicy{
+		RequireSystemBlocks: false,
+	})
+	if legacyHaikuDecision.Blocked {
+		t.Fatalf("legacy haiku decision blocked = true, want false; reasons=%v", legacyHaikuDecision.Reasons)
+	}
+	if legacyHaikuDecision.Action != ClaudeMimicryGuardActionDegrade {
+		t.Fatalf("legacy haiku decision action = %q, want degrade", legacyHaikuDecision.Action)
+	}
+
+	defaultDecision := EvaluateClaudeMimicryGuardWithPolicy(audit, cfg, ClaudeMimicryGuardPolicy{
+		RequireSystemBlocks: true,
+	})
+	if !defaultDecision.Blocked {
+		t.Fatalf("default decision blocked = false, want true; reasons=%v", defaultDecision.Reasons)
+	}
+}
+
 func TestEvaluateClaudeMimicryGuard_DegradeDoesNotBlockKnownClaudeCodeToolDescription(t *testing.T) {
 	payload := buildSignedClaudeMimicryTestPayload(t)
 	payload, _ = sjson.SetRawBytes(payload, "tools", []byte(`[{"name":"Agent","description":"Launch an official Claude Code subagent that may relay work back to the main session.","input_schema":{"type":"object","properties":{"prompt":{"type":"string"}}}}]`))
@@ -155,6 +217,29 @@ func TestEvaluateClaudeMimicryGuard_DegradeDoesNotBlockKnownClaudeCodeToolDescri
 
 	if decision.Blocked {
 		t.Fatalf("decision.Blocked = true, want false for known Claude Code Agent tool; reasons=%v", decision.Reasons)
+	}
+}
+
+func TestEvaluateClaudeMimicryGuard_DegradeDoesNotBlockTypedWebSearchTool(t *testing.T) {
+	payload := buildSignedClaudeMimicryTestPayload(t)
+	payload, _ = sjson.SetRawBytes(payload, "tools", []byte(`[{"type":"web_search_20250305","name":"web_search"},{"type":"web_search_20250305","name":"websearch"}]`))
+	payload = signAnthropicMessagesBody(payload)
+
+	req := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent": []string{"claude-cli/2.1.148 (external, cli)"},
+	})
+	applyClaudeHeaders(req, &cliproxyauth.Auth{}, "sk-ant-oat-test", false, nil, &config.Config{})
+	audit := AuditClaudeMimicryRequest("claude-sonnet-4-6", "/v1/messages", payload, req.Header, &config.Config{})
+
+	decision := EvaluateClaudeMimicryGuard(audit, &config.Config{
+		ClaudeMimicryGuard: config.ClaudeMimicryGuardConfig{Mode: "degrade"},
+	})
+
+	if decision.Blocked {
+		t.Fatalf("decision.Blocked = true, want false for typed web search tools; reasons=%v", decision.Reasons)
+	}
+	if len(audit.Tools.LeakyNames) != 0 {
+		t.Fatalf("audit.Tools.LeakyNames = %#v, want none for typed web search tools", audit.Tools.LeakyNames)
 	}
 }
 
