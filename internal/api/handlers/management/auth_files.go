@@ -711,6 +711,8 @@ func claudeAuthStatusReason(auth *coreauth.Auth, now time.Time) string {
 			return "account_disabled"
 		case "unauthorized":
 			return "auth_expired"
+		case "auth_expired":
+			return "auth_expired"
 		}
 	}
 	if auth.Disabled || auth.Status == coreauth.StatusDisabled {

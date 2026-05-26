@@ -51,6 +51,8 @@ type Handler struct {
 	sessionImportMu     sync.Mutex
 	sessionImportJobs   map[string]*claudeSessionImportJob
 	sessionImportActive string
+	claudeProbeMu       sync.Mutex
+	claudeProbeJobs     map[string]*claudeProbeJob
 
 	sessionImportAuthenticate        func(context.Context, claudeSessionImportAuthRequest) (claudeSessionImportAuthResult, error)
 	sessionImportAllowPrivateSources bool
@@ -69,6 +71,7 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		tokenStore:          sdkAuth.GetTokenStore(),
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
+		claudeProbeJobs:     make(map[string]*claudeProbeJob),
 	}
 	h.startAttemptCleanup()
 	return h
