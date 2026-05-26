@@ -54,6 +54,9 @@ func TestClaudeProbeJobDetectsDisabledAndHealthyAccounts(t *testing.T) {
 			FileName: "claude-ok.json",
 			Provider: "claude",
 			Status:   coreauth.StatusActive,
+			Attributes: map[string]string{
+				"path": "claude-ok.json",
+			},
 			Metadata: map[string]any{
 				"type":         "claude",
 				"email":        "ok@example.test",
@@ -65,6 +68,9 @@ func TestClaudeProbeJobDetectsDisabledAndHealthyAccounts(t *testing.T) {
 			FileName: "claude-banned.json",
 			Provider: "claude",
 			Status:   coreauth.StatusActive,
+			Attributes: map[string]string{
+				"path": "claude-banned.json",
+			},
 			Metadata: map[string]any{
 				"type":         "claude",
 				"email":        "banned@example.test",
@@ -125,6 +131,72 @@ func TestClaudeProbeJobDetectsDisabledAndHealthyAccounts(t *testing.T) {
 	}
 }
 
+func TestClaudeProbeTargetsSkipHiddenRemovedAuths(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	manager := coreauth.NewManager(&memoryAuthStore{}, nil, nil)
+	for _, auth := range []*coreauth.Auth{
+		{
+			ID:       "claude-visible",
+			FileName: "claude-visible.json",
+			Provider: "claude",
+			Status:   coreauth.StatusActive,
+			Attributes: map[string]string{
+				"path": "claude-visible.json",
+			},
+			Metadata: map[string]any{
+				"type":         "claude",
+				"access_token": "visible-token",
+			},
+		},
+		{
+			ID:            "claude-removed-disabled",
+			FileName:      "claude-removed-disabled.json",
+			Provider:      "claude",
+			Status:        coreauth.StatusDisabled,
+			StatusMessage: "removed via management api",
+			Disabled:      true,
+			Attributes: map[string]string{
+				"path": "claude-removed-disabled.json",
+			},
+			Metadata: map[string]any{
+				"type":         "claude",
+				"access_token": "removed-token",
+			},
+		},
+		{
+			ID:       "claude-hidden-quota",
+			FileName: "claude-hidden-quota.json",
+			Provider: "claude",
+			Status:   coreauth.StatusError,
+			Quota: coreauth.QuotaState{
+				Exceeded:      true,
+				Reason:        "Claude quota cooldown",
+				NextRecoverAt: time.Now().Add(time.Hour),
+			},
+			Metadata: map[string]any{
+				"type":         "claude",
+				"access_token": "quota-token",
+			},
+		},
+	} {
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("register %s: %v", auth.ID, err)
+		}
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	targets := h.claudeProbeTargets(claudeProbeJobRequest{})
+
+	if len(targets) != 1 {
+		t.Fatalf("targets len = %d, want 1", len(targets))
+	}
+	if targets[0].ID != "claude-visible" {
+		t.Fatalf("target ID = %q, want claude-visible", targets[0].ID)
+	}
+}
+
 func TestClaudeProbeJobMarksMissingClaudeTokenAsAuthExpired(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)
@@ -135,6 +207,9 @@ func TestClaudeProbeJobMarksMissingClaudeTokenAsAuthExpired(t *testing.T) {
 		FileName: "claude-missing-token.json",
 		Provider: "claude",
 		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path": "claude-missing-token.json",
+		},
 		Metadata: map[string]any{"type": "claude"},
 	}); err != nil {
 		t.Fatalf("register auth: %v", err)
@@ -200,6 +275,9 @@ func TestClaudeProbeJobDoesNotTreatHTMLProfileAsHealthy(t *testing.T) {
 		FileName: "claude-html.json",
 		Provider: "claude",
 		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path": "claude-html.json",
+		},
 		Metadata: map[string]any{
 			"type":         "claude",
 			"access_token": "access-token",

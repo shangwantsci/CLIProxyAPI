@@ -173,6 +173,9 @@ func (h *Handler) claudeProbeTargets(req claudeProbeJobRequest) []*coreauth.Auth
 		if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "claude") {
 			return
 		}
+		if h.buildAuthFileEntry(auth) == nil {
+			return
+		}
 		if !includeDisabled && (auth.Disabled || auth.Status == coreauth.StatusDisabled) {
 			return
 		}
