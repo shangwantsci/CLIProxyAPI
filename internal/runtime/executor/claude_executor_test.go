@@ -2684,6 +2684,39 @@ func TestRemapOAuthToolNames_WebsearchAlias_ReverseApplied(t *testing.T) {
 	}
 }
 
+func TestRemapOAuthToolNames_PreservesTypedWebSearchBuiltinReferences(t *testing.T) {
+	body := []byte(`{
+		"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":3}],
+		"tool_choice":{"type":"tool","name":"web_search"},
+		"messages":[{"role":"assistant","content":[
+			{"type":"tool_use","id":"toolu_01","name":"web_search","input":{"query":"news"}},
+			{"type":"tool_reference","tool_name":"web_search"},
+			{"type":"tool_result","tool_use_id":"toolu_01","content":[{"type":"tool_reference","tool_name":"web_search"}]}
+		]}]
+	}`)
+
+	out, reverseMap := remapOAuthToolNames(body)
+
+	if _, ok := reverseMap.ToolNames["WebSearch"]; ok {
+		t.Fatalf("typed builtin web_search should not be recorded as WebSearch rename: %v", reverseMap.ToolNames)
+	}
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "web_search" {
+		t.Fatalf("tools.0.name = %q, want web_search", got)
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "web_search" {
+		t.Fatalf("tool_choice.name = %q, want web_search; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "web_search" {
+		t.Fatalf("tool_use name = %q, want web_search; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.1.tool_name").String(); got != "web_search" {
+		t.Fatalf("tool_reference name = %q, want web_search; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.2.content.0.tool_name").String(); got != "web_search" {
+		t.Fatalf("nested tool_reference name = %q, want web_search; out=%s", got, string(out))
+	}
+}
+
 func TestRemapOAuthToolNames_OpenClawToolSchemaSanitizedAndReversed(t *testing.T) {
 	body := []byte(`{
 		"tools":[{

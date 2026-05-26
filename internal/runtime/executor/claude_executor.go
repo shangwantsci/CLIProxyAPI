@@ -1804,6 +1804,7 @@ func remapOAuthToolNames(body []byte) ([]byte, oauthToolReverseMap) {
 		PropertyNames: make(map[string]string),
 	}
 	thirdPartyToolShape := false
+	typedBuiltinToolNames := map[string]bool{}
 	recordRename := func(original, renamed string) {
 		reverseMap.recordTool(original, renamed)
 	}
@@ -1822,6 +1823,9 @@ func remapOAuthToolNames(body []byte) ([]byte, oauthToolReverseMap) {
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			// Keep Anthropic built-in tools (web_search, code_execution, etc.) unchanged.
 			if tool.Get("type").Exists() && tool.Get("type").String() != "" {
+				if name := strings.TrimSpace(tool.Get("name").String()); name != "" {
+					typedBuiltinToolNames[name] = true
+				}
 				if toolCount > 0 {
 					toolsJSON.WriteByte(',')
 				}
@@ -1866,7 +1870,11 @@ func remapOAuthToolNames(body []byte) ([]byte, oauthToolReverseMap) {
 	toolChoiceType := gjson.GetBytes(body, "tool_choice.type").String()
 	if toolChoiceType == "tool" {
 		tcName := gjson.GetBytes(body, "tool_choice.name").String()
-		if oauthToolsToRemove[tcName] {
+		if typedBuiltinToolNames[tcName] {
+			// Typed Anthropic built-ins such as web_search_20250305 are selected
+			// by their declared name; rewriting them to Claude Code-style tool
+			// aliases makes Anthropic reject the request as "tool not found".
+		} else if oauthToolsToRemove[tcName] {
 			// The chosen tool was removed from the tools array, so drop tool_choice to
 			// keep the payload internally consistent and fall back to normal auto tool use.
 			body, _ = sjson.DeleteBytes(body, "tool_choice")
@@ -1892,6 +1900,9 @@ func remapOAuthToolNames(body []byte) ([]byte, oauthToolReverseMap) {
 				switch partType {
 				case "tool_use":
 					name := part.Get("name").String()
+					if typedBuiltinToolNames[name] {
+						return true
+					}
 					if newName, ok := oauthToolRenameMap[name]; ok && newName != name {
 						path := fmt.Sprintf("messages.%d.content.%d.name", msgIndex.Int(), contentIndex.Int())
 						body, _ = sjson.SetBytes(body, path, newName)
@@ -1905,6 +1916,9 @@ func remapOAuthToolNames(body []byte) ([]byte, oauthToolReverseMap) {
 					}
 				case "tool_reference":
 					toolName := part.Get("tool_name").String()
+					if typedBuiltinToolNames[toolName] {
+						return true
+					}
 					if newName, ok := oauthToolRenameMap[toolName]; ok && newName != toolName {
 						path := fmt.Sprintf("messages.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int())
 						body, _ = sjson.SetBytes(body, path, newName)
@@ -1920,6 +1934,9 @@ func remapOAuthToolNames(body []byte) ([]byte, oauthToolReverseMap) {
 						nestedContent.ForEach(func(nestedIndex, nestedPart gjson.Result) bool {
 							if nestedPart.Get("type").String() == "tool_reference" {
 								nestedToolName := nestedPart.Get("tool_name").String()
+								if typedBuiltinToolNames[nestedToolName] {
+									return true
+								}
 								if newName, ok := oauthToolRenameMap[nestedToolName]; ok && newName != nestedToolName {
 									nestedPath := fmt.Sprintf("messages.%d.content.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int(), nestedIndex.Int())
 									body, _ = sjson.SetBytes(body, nestedPath, newName)

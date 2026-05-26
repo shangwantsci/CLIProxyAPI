@@ -104,6 +104,23 @@ func TestParseOpenAIUsageCopiesCachedTokensToCacheRead(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIUsageReadsCachedCreationTokenDetails(t *testing.T) {
+	data := []byte(`{"usage":{"prompt_tokens":13,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":23855,"cached_creation_tokens":422}}}`)
+	detail := ParseOpenAIUsage(data)
+	if detail.InputTokens != 13 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 13)
+	}
+	if detail.OutputTokens != 2 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 2)
+	}
+	if detail.CachedTokens != 23855 || detail.CacheReadTokens != 23855 {
+		t.Fatalf("cached/cache read tokens = %d/%d, want 23855/23855", detail.CachedTokens, detail.CacheReadTokens)
+	}
+	if detail.CacheCreationTokens != 422 {
+		t.Fatalf("cache creation tokens = %d, want %d", detail.CacheCreationTokens, 422)
+	}
+}
+
 func TestParseClaudeUsageReadsCacheCreationBreakdown(t *testing.T) {
 	data := []byte(`{"usage":{"input_tokens":10,"output_tokens":2,"cache_creation":{"ephemeral_5m_input_tokens":3,"ephemeral_1h_input_tokens":4},"cache_read_input_tokens":5}}`)
 	detail := ParseClaudeUsage(data)

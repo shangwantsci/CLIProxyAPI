@@ -37,6 +37,8 @@ type claudeUsageTokens struct {
 	InputTokens              int64
 	OutputTokens             int64
 	CacheCreationInputTokens int64
+	CacheCreation5mTokens    int64
+	CacheCreation1hTokens    int64
 	CacheReadInputTokens     int64
 	HasUsage                 bool
 }
@@ -62,8 +64,9 @@ func (u *claudeUsageTokens) Merge(usage gjson.Result) {
 	if cacheCreationInputTokens := usage.Get("cache_creation_input_tokens"); cacheCreationInputTokens.Exists() {
 		u.CacheCreationInputTokens = cacheCreationInputTokens.Int()
 	} else if cacheCreation := usage.Get("cache_creation"); cacheCreation.Exists() {
-		u.CacheCreationInputTokens = cacheCreation.Get("ephemeral_5m_input_tokens").Int() +
-			cacheCreation.Get("ephemeral_1h_input_tokens").Int()
+		u.CacheCreation5mTokens = cacheCreation.Get("ephemeral_5m_input_tokens").Int()
+		u.CacheCreation1hTokens = cacheCreation.Get("ephemeral_1h_input_tokens").Int()
+		u.CacheCreationInputTokens = u.CacheCreation5mTokens + u.CacheCreation1hTokens
 	}
 	if cacheReadInputTokens := usage.Get("cache_read_input_tokens"); cacheReadInputTokens.Exists() {
 		u.CacheReadInputTokens = cacheReadInputTokens.Int()
@@ -80,14 +83,64 @@ func (u claudeUsageTokens) OpenAIUsage() (promptTokens, completionTokens, totalT
 	return promptTokens, completionTokens, totalTokens, cachedTokens
 }
 
-func openAIUsageWithBillableInput(ctx context.Context, modelName string, originalRequestRawJSON []byte, usage claudeUsageTokens) (promptTokens, completionTokens, totalTokens, cachedTokens int64) {
-	promptTokens, completionTokens, totalTokens, cachedTokens = usage.OpenAIUsage()
-	if billableInput, ok := helps.ClaudeBillableInputTokens(ctx, modelName, "openai", originalRequestRawJSON); ok {
-		promptTokens = billableInput
-		cachedTokens = 0
-		totalTokens = promptTokens + completionTokens
+type openAIUsageFields struct {
+	PromptTokens          int64
+	CompletionTokens      int64
+	TotalTokens           int64
+	CachedTokens          int64
+	CacheCreationTokens   int64
+	CacheCreation5mTokens int64
+	CacheCreation1hTokens int64
+	ClaudeSemantic        bool
+}
+
+func (u claudeUsageTokens) hasCacheBreakdown() bool {
+	return u.CacheCreationInputTokens > 0 || u.CacheReadInputTokens > 0 || u.CacheCreation5mTokens > 0 || u.CacheCreation1hTokens > 0
+}
+
+func openAIUsageWithBillableInput(ctx context.Context, modelName string, originalRequestRawJSON []byte, usage claudeUsageTokens) openAIUsageFields {
+	promptTokens, completionTokens, totalTokens, cachedTokens := usage.OpenAIUsage()
+	fields := openAIUsageFields{
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		TotalTokens:      totalTokens,
+		CachedTokens:     cachedTokens,
 	}
-	return promptTokens, completionTokens, totalTokens, cachedTokens
+	billableInput, ok := helps.ClaudeBillableInputTokens(ctx, modelName, "openai", originalRequestRawJSON)
+	if !ok {
+		return fields
+	}
+	if usage.hasCacheBreakdown() {
+		fields.PromptTokens = usage.InputTokens
+		fields.CompletionTokens = usage.OutputTokens
+		fields.TotalTokens = usage.InputTokens + usage.OutputTokens
+		fields.CachedTokens = usage.CacheReadInputTokens
+		fields.CacheCreationTokens = usage.CacheCreationInputTokens
+		fields.CacheCreation5mTokens = usage.CacheCreation5mTokens
+		fields.CacheCreation1hTokens = usage.CacheCreation1hTokens
+		fields.ClaudeSemantic = true
+		return fields
+	}
+	fields.PromptTokens = billableInput
+	fields.CachedTokens = 0
+	fields.TotalTokens = fields.PromptTokens + fields.CompletionTokens
+	return fields
+}
+
+func setOpenAIUsageFields(payload []byte, path string, fields openAIUsageFields) []byte {
+	out := payload
+	out, _ = sjson.SetBytes(out, path+".prompt_tokens", fields.PromptTokens)
+	out, _ = sjson.SetBytes(out, path+".completion_tokens", fields.CompletionTokens)
+	out, _ = sjson.SetBytes(out, path+".total_tokens", fields.TotalTokens)
+	out, _ = sjson.SetBytes(out, path+".prompt_tokens_details.cached_tokens", fields.CachedTokens)
+	if fields.ClaudeSemantic {
+		out, _ = sjson.SetBytes(out, path+".prompt_tokens_details.cached_creation_tokens", fields.CacheCreationTokens)
+		out, _ = sjson.SetBytes(out, path+".claude_cache_creation_5_m_tokens", fields.CacheCreation5mTokens)
+		out, _ = sjson.SetBytes(out, path+".claude_cache_creation_1_h_tokens", fields.CacheCreation1hTokens)
+		out, _ = sjson.SetBytes(out, path+".usage_semantic", "anthropic")
+		out, _ = sjson.SetBytes(out, path+".usage_source", "claude")
+	}
+	return out
 }
 
 // ConvertClaudeResponseToOpenAI converts Claude Code streaming response format to OpenAI Chat Completions format.
@@ -266,16 +319,13 @@ func ConvertClaudeResponseToOpenAI(ctx context.Context, modelName string, origin
 		// Handle usage information for token counts
 		if usage := root.Get("usage"); usage.Exists() {
 			(*param).(*ConvertAnthropicResponseToOpenAIParams).Usage.Merge(usage)
-			promptTokens, completionTokens, totalTokens, cachedTokens := openAIUsageWithBillableInput(
+			usageFields := openAIUsageWithBillableInput(
 				ctx,
 				modelName,
 				originalRequestRawJSON,
 				(*param).(*ConvertAnthropicResponseToOpenAIParams).Usage,
 			)
-			template, _ = sjson.SetBytes(template, "usage.prompt_tokens", promptTokens)
-			template, _ = sjson.SetBytes(template, "usage.completion_tokens", completionTokens)
-			template, _ = sjson.SetBytes(template, "usage.total_tokens", totalTokens)
-			template, _ = sjson.SetBytes(template, "usage.prompt_tokens_details.cached_tokens", cachedTokens)
+			template = setOpenAIUsageFields(template, "usage", usageFields)
 		}
 		if pending, ok := flushOpenAIStreamStopFilter((*param).(*ConvertAnthropicResponseToOpenAIParams)); ok {
 			contentChunk := template
@@ -444,11 +494,8 @@ func ConvertClaudeResponseToOpenAINonStream(ctx context.Context, modelName strin
 		if modelName == "" {
 			modelName = model
 		}
-		promptTokens, completionTokens, totalTokens, cachedTokens := openAIUsageWithBillableInput(ctx, modelName, originalRequestRawJSON, usageTokens)
-		out, _ = sjson.SetBytes(out, "usage.prompt_tokens", promptTokens)
-		out, _ = sjson.SetBytes(out, "usage.completion_tokens", completionTokens)
-		out, _ = sjson.SetBytes(out, "usage.total_tokens", totalTokens)
-		out, _ = sjson.SetBytes(out, "usage.prompt_tokens_details.cached_tokens", cachedTokens)
+		usageFields := openAIUsageWithBillableInput(ctx, modelName, originalRequestRawJSON, usageTokens)
+		out = setOpenAIUsageFields(out, "usage", usageFields)
 	}
 
 	// Set basic response fields including message ID, creation time, and model

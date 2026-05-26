@@ -40,6 +40,8 @@ type claudeToResponsesState struct {
 	InputTokens              int64
 	OutputTokens             int64
 	CacheCreationInputTokens int64
+	CacheCreation5mTokens    int64
+	CacheCreation1hTokens    int64
 	CacheReadInputTokens     int64
 	UsageSeen                bool
 }
@@ -81,14 +83,35 @@ func mergeClaudeResponsesUsage(st *claudeToResponsesState, usage gjson.Result) {
 	if v := usage.Get("cache_creation_input_tokens"); v.Exists() {
 		st.CacheCreationInputTokens = v.Int()
 	} else if v := usage.Get("cache_creation"); v.Exists() {
-		st.CacheCreationInputTokens = v.Get("ephemeral_5m_input_tokens").Int() +
-			v.Get("ephemeral_1h_input_tokens").Int()
+		st.CacheCreation5mTokens = v.Get("ephemeral_5m_input_tokens").Int()
+		st.CacheCreation1hTokens = v.Get("ephemeral_1h_input_tokens").Int()
+		st.CacheCreationInputTokens = st.CacheCreation5mTokens + st.CacheCreation1hTokens
 	}
 	if v := usage.Get("cache_read_input_tokens"); v.Exists() {
 		st.CacheReadInputTokens = v.Int()
 	} else if v := usage.Get("cached_tokens"); v.Exists() {
 		st.CacheReadInputTokens = v.Int()
 	}
+}
+
+func claudeResponsesHasCacheBreakdown(cacheCreationTokens, cacheReadTokens int64) bool {
+	return cacheCreationTokens > 0 || cacheReadTokens > 0
+}
+
+func setOpenAIResponsesUsageFields(payload []byte, path string, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, cacheCreation5mTokens, cacheCreation1hTokens int64, claudeSemantic bool) []byte {
+	out := payload
+	out, _ = sjson.SetBytes(out, path+".input_tokens", inputTokens)
+	out, _ = sjson.SetBytes(out, path+".input_tokens_details.cached_tokens", cacheReadTokens)
+	out, _ = sjson.SetBytes(out, path+".output_tokens", outputTokens)
+	out, _ = sjson.SetBytes(out, path+".total_tokens", inputTokens+outputTokens)
+	if claudeSemantic {
+		out, _ = sjson.SetBytes(out, path+".input_tokens_details.cached_creation_tokens", cacheCreationTokens)
+		out, _ = sjson.SetBytes(out, path+".claude_cache_creation_5_m_tokens", cacheCreation5mTokens)
+		out, _ = sjson.SetBytes(out, path+".claude_cache_creation_1_h_tokens", cacheCreation1hTokens)
+		out, _ = sjson.SetBytes(out, path+".usage_semantic", "anthropic")
+		out, _ = sjson.SetBytes(out, path+".usage_source", "claude")
+	}
+	return out
 }
 
 // ConvertClaudeResponseToOpenAIResponses converts Claude SSE to OpenAI Responses SSE events.
@@ -132,6 +155,8 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			st.InputTokens = 0
 			st.OutputTokens = 0
 			st.CacheCreationInputTokens = 0
+			st.CacheCreation5mTokens = 0
+			st.CacheCreation1hTokens = 0
 			st.CacheReadInputTokens = 0
 			st.UsageSeen = false
 			if usage := msg.Get("usage"); usage.Exists() {
@@ -451,18 +476,24 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			rawInputTokens := st.InputTokens + st.CacheCreationInputTokens + st.CacheReadInputTokens
 			billableInputTokens, rewrittenInput := openAIResponsesClientInputTokens(ctx, modelName, pickRequestJSON(originalRequestRawJSON, requestRawJSON), rawInputTokens)
 			cachedTokens := st.CacheReadInputTokens
+			cacheCreationTokens := st.CacheCreationInputTokens
+			cacheCreation5mTokens := st.CacheCreation5mTokens
+			cacheCreation1hTokens := st.CacheCreation1hTokens
+			claudeSemantic := false
 			if rewrittenInput {
-				cachedTokens = 0
+				if claudeResponsesHasCacheBreakdown(st.CacheCreationInputTokens, st.CacheReadInputTokens) {
+					billableInputTokens = st.InputTokens
+					claudeSemantic = true
+				} else {
+					cachedTokens = 0
+					cacheCreationTokens = 0
+					cacheCreation5mTokens = 0
+					cacheCreation1hTokens = 0
+				}
 			}
-			completed, _ = sjson.SetBytes(completed, "response.usage.input_tokens", billableInputTokens)
-			completed, _ = sjson.SetBytes(completed, "response.usage.input_tokens_details.cached_tokens", cachedTokens)
-			completed, _ = sjson.SetBytes(completed, "response.usage.output_tokens", st.OutputTokens)
+			completed = setOpenAIResponsesUsageFields(completed, "response.usage", billableInputTokens, st.OutputTokens, cachedTokens, cacheCreationTokens, cacheCreation5mTokens, cacheCreation1hTokens, claudeSemantic)
 			if reasoningTokens > 0 {
 				completed, _ = sjson.SetBytes(completed, "response.usage.output_tokens_details.reasoning_tokens", reasoningTokens)
-			}
-			total := billableInputTokens + st.OutputTokens
-			if total > 0 || st.UsageSeen {
-				completed, _ = sjson.SetBytes(completed, "response.usage.total_tokens", total)
 			}
 		}
 		out = append(out, emitEvent("response.completed", completed))
@@ -510,6 +541,8 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(ctx context.Context, modelN
 		inputTokens     int64
 		outputTokens    int64
 		cacheCreate     int64
+		cacheCreate5m   int64
+		cacheCreate1h   int64
 		cacheRead       int64
 	)
 	mergeUsage := func(usage gjson.Result) {
@@ -525,8 +558,9 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(ctx context.Context, modelN
 		if v := usage.Get("cache_creation_input_tokens"); v.Exists() {
 			cacheCreate = v.Int()
 		} else if v := usage.Get("cache_creation"); v.Exists() {
-			cacheCreate = v.Get("ephemeral_5m_input_tokens").Int() +
-				v.Get("ephemeral_1h_input_tokens").Int()
+			cacheCreate5m = v.Get("ephemeral_5m_input_tokens").Int()
+			cacheCreate1h = v.Get("ephemeral_1h_input_tokens").Int()
+			cacheCreate = cacheCreate5m + cacheCreate1h
 		}
 		if v := usage.Get("cache_read_input_tokens"); v.Exists() {
 			cacheRead = v.Int()
@@ -737,16 +771,22 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(ctx context.Context, modelN
 	// Usage
 	rawInputTokens := inputTokens + cacheCreate + cacheRead
 	var rewrittenInput bool
-	inputTokens, rewrittenInput = openAIResponsesClientInputTokens(ctx, modelName, reqBytes, rawInputTokens)
+	billableInputTokens, rewrittenInput := openAIResponsesClientInputTokens(ctx, modelName, reqBytes, rawInputTokens)
 	cachedTokens := cacheRead
+	cacheCreationTokens := cacheCreate
+	claudeSemantic := false
 	if rewrittenInput {
-		cachedTokens = 0
+		if claudeResponsesHasCacheBreakdown(cacheCreate, cacheRead) {
+			billableInputTokens = inputTokens
+			claudeSemantic = true
+		} else {
+			cachedTokens = 0
+			cacheCreationTokens = 0
+			cacheCreate5m = 0
+			cacheCreate1h = 0
+		}
 	}
-	total := inputTokens + outputTokens
-	out, _ = sjson.SetBytes(out, "usage.input_tokens", inputTokens)
-	out, _ = sjson.SetBytes(out, "usage.input_tokens_details.cached_tokens", cachedTokens)
-	out, _ = sjson.SetBytes(out, "usage.output_tokens", outputTokens)
-	out, _ = sjson.SetBytes(out, "usage.total_tokens", total)
+	out = setOpenAIResponsesUsageFields(out, "usage", billableInputTokens, outputTokens, cachedTokens, cacheCreationTokens, cacheCreate5m, cacheCreate1h, claudeSemantic)
 	if reasoningBuf.Len() > 0 {
 		// Rough estimate similar to chat completions
 		reasoningTokens := int64(len(reasoningBuf.String()) / 4)

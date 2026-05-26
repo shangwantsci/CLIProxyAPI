@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/tidwall/gjson"
 )
 
@@ -142,15 +143,44 @@ func TestConvertClaudeResponseToOpenAINonStream_UsageMergesMessageStartUsage(t *
 	}
 }
 
-func TestConvertClaudeResponseToOpenAINonStream_RewritesUsageToBillableInput(t *testing.T) {
+func TestConvertClaudeResponseToOpenAINonStream_PreservesCacheBreakdownWhenBillableInputEnabled(t *testing.T) {
 	originalReq := []byte(`{"model":"claude-opus-4-7","messages":[{"role":"user","content":"hi"}],"max_tokens":40}`)
+	ctx := helps.WithClaudeBillableUsage(context.Background(), true, "claude-opus-4-7", "openai", originalReq)
 	rawJSON := []byte("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_123\",\"model\":\"claude-opus-4-7\"}}\n" +
 		"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n" +
 		"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n" +
 		"data: {\"type\":\"content_block_stop\",\"index\":0}\n" +
-		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":1913,\"output_tokens\":4,\"cache_read_input_tokens\":22000,\"cache_creation_input_tokens\":31}}\n")
+		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":13,\"output_tokens\":4,\"cache_read_input_tokens\":22000,\"cache_creation_input_tokens\":31}}\n")
 
-	out := ConvertClaudeResponseToOpenAINonStream(context.Background(), "claude-opus-4-7", originalReq, nil, rawJSON, nil)
+	out := ConvertClaudeResponseToOpenAINonStream(ctx, "claude-opus-4-7", originalReq, nil, rawJSON, nil)
+
+	if got := gjson.GetBytes(out, "usage.prompt_tokens").Int(); got != 13 {
+		t.Fatalf("prompt_tokens = %d, want upstream uncached input; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "usage.prompt_tokens_details.cached_tokens").Int(); got != 22000 {
+		t.Fatalf("cached_tokens = %d, want 22000", got)
+	}
+	if got := gjson.GetBytes(out, "usage.prompt_tokens_details.cached_creation_tokens").Int(); got != 31 {
+		t.Fatalf("cached_creation_tokens = %d, want 31", got)
+	}
+	if got := gjson.GetBytes(out, "usage.usage_semantic").String(); got != "anthropic" {
+		t.Fatalf("usage_semantic = %q, want anthropic", got)
+	}
+	if got := gjson.GetBytes(out, "usage.completion_tokens").Int(); got != 4 {
+		t.Fatalf("completion_tokens = %d, want 4", got)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAINonStream_RewritesUsageToBillableInputWithoutCacheBreakdown(t *testing.T) {
+	originalReq := []byte(`{"model":"claude-opus-4-7","messages":[{"role":"user","content":"hi"}],"max_tokens":40}`)
+	ctx := helps.WithClaudeBillableUsage(context.Background(), true, "claude-opus-4-7", "openai", originalReq)
+	rawJSON := []byte("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_123\",\"model\":\"claude-opus-4-7\"}}\n" +
+		"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n" +
+		"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n" +
+		"data: {\"type\":\"content_block_stop\",\"index\":0}\n" +
+		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":1913,\"output_tokens\":4}}\n")
+
+	out := ConvertClaudeResponseToOpenAINonStream(ctx, "claude-opus-4-7", originalReq, nil, rawJSON, nil)
 
 	if got := gjson.GetBytes(out, "usage.prompt_tokens").Int(); got <= 0 || got >= 20 {
 		t.Fatalf("prompt_tokens = %d, want small billable input; out=%s", got, string(out))

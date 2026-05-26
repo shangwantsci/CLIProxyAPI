@@ -133,6 +133,9 @@ func rewriteClaudeUsageAtPathForBillable(payload []byte, path string, count int6
 	if !usageNode.Exists() {
 		return payload, false
 	}
+	if claudeUsageHasCacheBreakdown(usageNode) {
+		return payload, false
+	}
 	out := payload
 	changed := false
 	if usageNode.Get("input_tokens").Exists() {
@@ -143,24 +146,15 @@ func rewriteClaudeUsageAtPathForBillable(payload []byte, path string, count int6
 		}
 		changed = true
 	}
-	if usageNode.Get("cache_creation_input_tokens").Exists() {
-		out, _ = sjson.SetBytes(out, path+".cache_creation_input_tokens", 0)
-		changed = true
-	}
-	if usageNode.Get("cache_read_input_tokens").Exists() {
-		out, _ = sjson.SetBytes(out, path+".cache_read_input_tokens", 0)
-		changed = true
-	}
-	if usageNode.Get("cached_tokens").Exists() {
-		out, _ = sjson.SetBytes(out, path+".cached_tokens", 0)
-		changed = true
-	}
-	if gjson.GetBytes(out, path+".cache_creation").Exists() {
-		out, _ = sjson.SetBytes(out, path+".cache_creation.ephemeral_5m_input_tokens", 0)
-		out, _ = sjson.SetBytes(out, path+".cache_creation.ephemeral_1h_input_tokens", 0)
-		changed = true
-	}
 	return out, changed
+}
+
+func claudeUsageHasCacheBreakdown(usageNode gjson.Result) bool {
+	return usageNode.Get("cache_creation_input_tokens").Int() > 0 ||
+		usageNode.Get("cache_read_input_tokens").Int() > 0 ||
+		usageNode.Get("cached_tokens").Int() > 0 ||
+		usageNode.Get("cache_creation.ephemeral_5m_input_tokens").Int() > 0 ||
+		usageNode.Get("cache_creation.ephemeral_1h_input_tokens").Int() > 0
 }
 
 func RewriteClaudeStreamUsageForBillable(ctx context.Context, line []byte) []byte {
