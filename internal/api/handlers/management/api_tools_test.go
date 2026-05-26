@@ -278,6 +278,15 @@ func TestAPICallRecordsClaudeOAuthAccountBanned(t *testing.T) {
 	if updated.LastError.Code != "account_banned" || updated.LastError.HTTPStatus != http.StatusForbidden {
 		t.Fatalf("LastError = %#v, want account_banned 403", updated.LastError)
 	}
+	entry := gin.H{}
+	addClaudeAuthHealthFields(entry, updated, time.Now())
+	if got, _ := entry["status_reason"].(string); got != "account_banned" {
+		encoded, _ := json.Marshal(entry)
+		t.Fatalf("status_reason = %q, want account_banned (entry=%s)", got, encoded)
+	}
+	if got, _ := entry["route_state"].(string); got != "permanent_disabled" {
+		t.Fatalf("route_state = %q, want permanent_disabled", got)
+	}
 }
 
 func TestAPICallRecordsClaudeOAuthOrganizationDisabled(t *testing.T) {
@@ -327,6 +336,70 @@ func TestAPICallRecordsClaudeOAuthOrganizationDisabled(t *testing.T) {
 	}
 	if updated.LastError == nil || updated.LastError.Code != "organization_disabled" || updated.LastError.HTTPStatus != http.StatusBadRequest {
 		t.Fatalf("LastError = %#v, want organization_disabled 400", updated.LastError)
+	}
+	entry := gin.H{}
+	addClaudeAuthHealthFields(entry, updated, time.Now())
+	if got, _ := entry["status_reason"].(string); got != "organization_disabled" {
+		encoded, _ := json.Marshal(entry)
+		t.Fatalf("status_reason = %q, want organization_disabled (entry=%s)", got, encoded)
+	}
+	if got, _ := entry["route_state"].(string); got != "permanent_disabled" {
+		t.Fatalf("route_state = %q, want permanent_disabled", got)
+	}
+}
+
+func TestAPICallRecordsClaudeOAuthSubscriptionForbiddenAsRepairRequired(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":{"type":"permission_error","message":"Subscription billing issue."}}`))
+	}))
+	defer upstream.Close()
+
+	manager := coreauth.NewManager(&memoryAuthStore{}, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "claude-subscription",
+		FileName: "claude-subscription.json",
+		Provider: "claude",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{
+			"type":         "claude",
+			"access_token": "access-token",
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	authIndex := auth.EnsureIndex()
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	body := fmt.Sprintf(`{"auth_index":%q,"method":"GET","url":%q,"header":{"Authorization":"Bearer $TOKEN$"}}`, authIndex, upstream.URL+"/api/oauth/profile")
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/api-call", strings.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	h.APICall(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	updated := h.authByIndex(authIndex)
+	if updated == nil {
+		t.Fatal("subscription auth not found")
+	}
+	if updated.Disabled || updated.Status == coreauth.StatusDisabled {
+		t.Fatalf("subscription auth unexpectedly disabled: disabled=%v status=%s", updated.Disabled, updated.Status)
+	}
+	entry := gin.H{}
+	addClaudeAuthHealthFields(entry, updated, time.Now())
+	if got, _ := entry["status_reason"].(string); got != "subscription_issue" {
+		encoded, _ := json.Marshal(entry)
+		t.Fatalf("status_reason = %q, want subscription_issue (entry=%s)", got, encoded)
+	}
+	if got, _ := entry["route_state"].(string); got != "repair_required" {
+		t.Fatalf("route_state = %q, want repair_required", got)
 	}
 }
 

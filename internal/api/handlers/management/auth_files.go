@@ -582,6 +582,13 @@ func addClaudeAuthHealthFields(entry gin.H, auth *coreauth.Auth, now time.Time) 
 	statusReason := claudeAuthStatusReason(auth, now)
 	entry["status_reason"] = statusReason
 	entry["status_reason_label"] = claudeAuthStatusReasonLabel(statusReason)
+	routeState := claudeAuthRouteState(auth, now, statusReason)
+	recoverability := claudeAuthRecoverability(statusReason)
+	entry["route_state"] = routeState
+	entry["route_state_label"] = claudeAuthRouteStateLabel(routeState)
+	entry["recoverability"] = recoverability
+	entry["recoverability_label"] = claudeAuthRecoverabilityLabel(recoverability)
+	entry["cleanup_recommended"] = recoverability == "permanent"
 	runtimeStats := auth.RuntimeUsageStats(now)
 	entry["rpm_limit"] = runtimeStats.RPMLimit
 	entry["current_rpm"] = runtimeStats.CurrentRPM
@@ -671,7 +678,18 @@ func claudeAuthHealthStatus(auth *coreauth.Auth, now time.Time) string {
 		return "unknown"
 	}
 	if auth.Disabled || auth.Status == coreauth.StatusDisabled {
-		return "disabled"
+		switch claudeAuthStatusReason(auth, now) {
+		case "account_banned", "organization_disabled", "account_disabled":
+			return "permanent_disabled"
+		case "rate_limited", "quota_cooldown", "rpm_cooldown", "session_full":
+			return "cooling"
+		case "auth_expired":
+			return "expired"
+		case "subscription_issue", "upstream_error", "unavailable":
+			return "error"
+		default:
+			return "disabled"
+		}
 	}
 	if expiresAt, ok := auth.ExpirationTime(); ok {
 		if !expiresAt.After(now) {
@@ -702,21 +720,27 @@ func claudeAuthStatusReason(auth *coreauth.Auth, now time.Time) string {
 		return "unknown"
 	}
 	if auth.LastError != nil {
+		if code, _, ok := normalizeClaudePermanentAccountError(auth.LastError.Code, auth.LastError.Message); ok {
+			return code
+		}
 		switch strings.ToLower(strings.TrimSpace(auth.LastError.Code)) {
-		case "account_banned":
-			return "account_banned"
-		case "organization_disabled":
-			return "organization_disabled"
-		case "account_disabled":
-			return "account_disabled"
-		case "unauthorized":
+		case "unauthorized", "auth_expired":
 			return "auth_expired"
-		case "auth_expired":
+		case "rate_limited":
+			return "rate_limited"
+		}
+		if isClaudeUnauthorizedAuthError(auth.LastError) {
 			return "auth_expired"
+		}
+		if auth.LastError.HTTPStatus == http.StatusTooManyRequests {
+			return "rate_limited"
+		}
+		if isClaudeSubscriptionError(auth.LastError) {
+			return "subscription_issue"
 		}
 	}
 	if auth.Disabled || auth.Status == coreauth.StatusDisabled {
-		return "disabled"
+		return "manual_disabled"
 	}
 	if expiresAt, ok := auth.ExpirationTime(); ok && !expiresAt.After(now) {
 		return "auth_expired"
@@ -758,6 +782,8 @@ func claudeAuthStatusReasonLabel(reason string) string {
 		return "新会话已满"
 	case "auth_expired":
 		return "认证失效"
+	case "rate_limited":
+		return "速率限制"
 	case "account_banned", "organization_disabled", "account_disabled":
 		return "封禁/组织禁用"
 	case "subscription_issue":
@@ -766,8 +792,74 @@ func claudeAuthStatusReasonLabel(reason string) string {
 		return "上游异常"
 	case "unavailable":
 		return "不可用"
-	case "disabled":
-		return "已停用"
+	case "manual_disabled", "disabled":
+		return "人工停用"
+	default:
+		return "未知"
+	}
+}
+
+func claudeAuthRouteState(auth *coreauth.Auth, now time.Time, reason string) string {
+	_ = auth
+	_ = now
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "healthy":
+		return "available"
+	case "quota_cooldown", "rpm_cooldown", "session_full", "rate_limited":
+		return "cooling"
+	case "account_banned", "organization_disabled", "account_disabled":
+		return "permanent_disabled"
+	case "manual_disabled", "disabled":
+		return "manual_disabled"
+	case "auth_expired", "subscription_issue", "upstream_error", "unavailable":
+		return "repair_required"
+	default:
+		return "unknown"
+	}
+}
+
+func claudeAuthRouteStateLabel(state string) string {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "available":
+		return "可调用"
+	case "cooling":
+		return "临时冷却"
+	case "permanent_disabled", "isolated":
+		return "永久不可用"
+	case "manual_disabled":
+		return "人工停用"
+	case "repair_required":
+		return "需处理"
+	default:
+		return "未知"
+	}
+}
+
+func claudeAuthRecoverability(reason string) string {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "healthy":
+		return "none"
+	case "quota_cooldown", "rpm_cooldown", "session_full", "rate_limited":
+		return "auto"
+	case "account_banned", "organization_disabled", "account_disabled":
+		return "permanent"
+	case "manual_disabled", "disabled", "auth_expired", "subscription_issue", "upstream_error", "unavailable":
+		return "manual"
+	default:
+		return "unknown"
+	}
+}
+
+func claudeAuthRecoverabilityLabel(recoverability string) string {
+	switch strings.ToLower(strings.TrimSpace(recoverability)) {
+	case "none":
+		return "无需恢复"
+	case "auto":
+		return "自动恢复"
+	case "manual":
+		return "人工处理"
+	case "permanent":
+		return "不可恢复"
 	default:
 		return "未知"
 	}
@@ -1543,6 +1635,7 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	} else {
 		targetAuth.Status = coreauth.StatusActive
 		targetAuth.StatusMessage = ""
+		coreauth.ClearClientRequestErrorState(targetAuth, time.Now())
 	}
 	targetAuth.UpdatedAt = time.Now()
 

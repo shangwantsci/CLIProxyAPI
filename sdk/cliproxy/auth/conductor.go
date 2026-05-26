@@ -2285,7 +2285,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
 		now := time.Now()
 		if !result.Success && isClientRequestResultError(result.Error) {
+			if ClearClientRequestErrorState(auth, now) {
+				_ = m.persist(ctx, auth)
+				authSnapshot = auth.Clone()
+			}
 			m.mu.Unlock()
+			if m.scheduler != nil && authSnapshot != nil {
+				m.scheduler.upsertAuth(authSnapshot)
+			}
 			m.hook.OnResult(ctx, result)
 			return
 		}
@@ -2969,6 +2976,51 @@ func isClientRequestResultError(err *Error) bool {
 	default:
 		return false
 	}
+}
+
+// IsClientRequestError reports whether an auth error was caused by the
+// caller's request shape rather than the upstream account health.
+func IsClientRequestError(err *Error) bool {
+	return isClientRequestResultError(err)
+}
+
+// ClearClientRequestErrorState removes stale request-shape errors from an auth.
+// It intentionally leaves permanent account, authentication and quota states intact.
+func ClearClientRequestErrorState(auth *Auth, now time.Time) bool {
+	if auth == nil {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	changed := false
+	if isClientRequestResultError(auth.LastError) || isClientRequestInvalidMessage(auth.StatusMessage) {
+		auth.LastError = nil
+		auth.StatusMessage = ""
+		if auth.Status == StatusError {
+			auth.Status = StatusActive
+		}
+		changed = true
+	}
+	for _, state := range auth.ModelStates {
+		if state == nil {
+			continue
+		}
+		if isClientRequestResultError(state.LastError) || isClientRequestInvalidMessage(state.StatusMessage) {
+			resetModelState(state, now)
+			changed = true
+		}
+	}
+	if !changed {
+		return false
+	}
+	if auth.Status == StatusError && auth.LastError == nil && !hasModelError(auth, now) {
+		auth.Status = StatusActive
+		auth.StatusMessage = ""
+	}
+	updateAggregatedAvailability(auth, now)
+	auth.UpdatedAt = now
+	return true
 }
 
 // isRequestInvalidError returns true if the error represents a client request

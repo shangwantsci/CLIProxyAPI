@@ -966,6 +966,62 @@ func TestManager_MarkResult_ClientRequestBadRequestDoesNotPolluteAuthHealth(t *t
 	}
 }
 
+func TestManager_MarkResult_ClientRequestBadRequestClearsStaleClientHealth(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+
+	model := "claude-sonnet-4-6"
+	staleErr := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    `{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 210814 tokens > 200000 maximum"},"request_id":"req_123"}`,
+	}
+	auth := &Auth{
+		ID:            "auth-stale-client-request-error",
+		Provider:      "claude",
+		Status:        StatusError,
+		StatusMessage: staleErr.Message,
+		LastError:     cloneError(staleErr),
+		ModelStates: map[string]*ModelState{
+			model: {
+				Unavailable:   true,
+				Status:        StatusError,
+				LastError:     cloneError(staleErr),
+				StatusMessage: staleErr.Message,
+			},
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    model,
+		Success:  false,
+		Error: &Error{
+			HTTPStatus: http.StatusBadRequest,
+			Message:    staleErr.Message,
+		},
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if updated.Unavailable || updated.Status != StatusActive {
+		t.Fatalf("auth health = unavailable=%v status=%s, want false/active", updated.Unavailable, updated.Status)
+	}
+	if updated.LastError != nil || updated.StatusMessage != "" {
+		t.Fatalf("auth stale request error = %#v/%q, want cleared", updated.LastError, updated.StatusMessage)
+	}
+	if state := updated.ModelStates[model]; !modelStateIsClean(state) {
+		t.Fatalf("model stale request error should be clean, got %#v", state)
+	}
+	if stats := updated.Quality24hStats(time.Now()); stats.Requests != 0 {
+		t.Fatalf("quality stats = %#v, want no auth-quality sample for client request error", stats)
+	}
+}
+
 func TestManager_RequestScopedNotFoundStopsRetryWithoutSuspendingAuth(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	executor := &authFallbackExecutor{

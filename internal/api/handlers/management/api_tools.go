@@ -238,10 +238,11 @@ func (h *Handler) recordClaudeOAuthProbeResult(ctx context.Context, auth *coreau
 	}
 
 	code, message := claudeOAuthProbeError(statusCode, body)
-	if statusCode == http.StatusBadRequest && !isClaudePermanentAccountError(code, message) {
+	permanentAccountError := isClaudePermanentAccountError(code, message)
+	if statusCode == http.StatusBadRequest && !permanentAccountError {
 		return
 	}
-	if statusCode != http.StatusBadRequest && statusCode != http.StatusUnauthorized && statusCode != http.StatusForbidden && statusCode != http.StatusTooManyRequests {
+	if statusCode != http.StatusBadRequest && statusCode != http.StatusUnauthorized && statusCode != http.StatusPaymentRequired && statusCode != http.StatusForbidden && statusCode != http.StatusTooManyRequests {
 		return
 	}
 	updated := auth.Clone()
@@ -260,16 +261,26 @@ func (h *Handler) recordClaudeOAuthProbeResult(ctx context.Context, auth *coreau
 		updated.Status = coreauth.StatusDisabled
 		updated.Unavailable = true
 		updated.NextRetryAfter = time.Time{}
-	case http.StatusForbidden:
-		updated.Disabled = true
-		updated.Status = coreauth.StatusDisabled
-		updated.Unavailable = true
-		updated.NextRetryAfter = time.Time{}
 	case http.StatusBadRequest:
 		updated.Disabled = true
 		updated.Status = coreauth.StatusDisabled
 		updated.Unavailable = true
 		updated.NextRetryAfter = time.Time{}
+	case http.StatusForbidden:
+		if permanentAccountError {
+			updated.Disabled = true
+			updated.Status = coreauth.StatusDisabled
+			updated.Unavailable = true
+			updated.NextRetryAfter = time.Time{}
+		} else {
+			updated.Status = coreauth.StatusError
+			updated.Unavailable = true
+			updated.NextRetryAfter = now.Add(30 * time.Minute)
+		}
+	case http.StatusPaymentRequired:
+		updated.Status = coreauth.StatusError
+		updated.Unavailable = true
+		updated.NextRetryAfter = now.Add(30 * time.Minute)
 	case http.StatusTooManyRequests:
 		next := claudeOAuthRetryAfter(headers, now)
 		updated.Status = coreauth.StatusError

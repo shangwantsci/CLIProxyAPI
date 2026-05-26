@@ -112,11 +112,25 @@ func TestClaudeProbeJobDetectsDisabledAndHealthyAccounts(t *testing.T) {
 	}
 
 	job := waitForClaudeProbeJob(t, h, started.ID)
-	if job.Completed != 2 || job.OK != 1 || job.Disabled != 1 || job.Failed != 1 {
-		t.Fatalf("job summary = completed=%d ok=%d disabled=%d failed=%d", job.Completed, job.OK, job.Disabled, job.Failed)
+	if job.Completed != 2 || job.OK != 1 || job.Disabled != 1 || job.PermanentDisabled != 1 || job.ManualDisabled != 0 || job.Failed != 1 {
+		t.Fatalf("job summary = completed=%d ok=%d disabled=%d permanent=%d manual=%d failed=%d",
+			job.Completed, job.OK, job.Disabled, job.PermanentDisabled, job.ManualDisabled, job.Failed)
 	}
 	if len(job.Results) != 2 {
 		t.Fatalf("results len = %d, want 2", len(job.Results))
+	}
+	var bannedResult *claudeProbeResult
+	for i := range job.Results {
+		if job.Results[i].Name == "claude-banned.json" {
+			bannedResult = &job.Results[i]
+			break
+		}
+	}
+	if bannedResult == nil {
+		t.Fatalf("banned probe result missing: %#v", job.Results)
+	}
+	if bannedResult.Status != "permanent_disabled" || bannedResult.RouteState != "permanent_disabled" || bannedResult.Recoverability != "permanent" || !bannedResult.CleanupRecommended {
+		t.Fatalf("banned result = %#v, want permanent disabled cleanup recommendation", *bannedResult)
 	}
 
 	updatedBanned, ok := manager.GetByID("claude-banned")

@@ -37,56 +37,63 @@ type claudeProbeJobRequest struct {
 }
 
 type claudeProbeJob struct {
-	ID          string
-	Status      string
-	CreatedAt   time.Time
-	StartedAt   time.Time
-	FinishedAt  time.Time
-	Total       int
-	Completed   int
-	OK          int
-	Failed      int
-	Disabled    int
-	AuthExpired int
-	Quota       int
-	RateLimited int
-	Error       string
-	Results     []claudeProbeResult
-	cancel      context.CancelFunc
+	ID                string
+	Status            string
+	CreatedAt         time.Time
+	StartedAt         time.Time
+	FinishedAt        time.Time
+	Total             int
+	Completed         int
+	OK                int
+	Failed            int
+	Disabled          int
+	PermanentDisabled int
+	ManualDisabled    int
+	AuthExpired       int
+	Quota             int
+	RateLimited       int
+	Error             string
+	Results           []claudeProbeResult
+	cancel            context.CancelFunc
 }
 
 type claudeProbeJobSnapshot struct {
-	ID          string              `json:"id"`
-	Status      string              `json:"status"`
-	CreatedAt   time.Time           `json:"created_at"`
-	StartedAt   time.Time           `json:"started_at,omitempty"`
-	FinishedAt  time.Time           `json:"finished_at,omitempty"`
-	Total       int                 `json:"total"`
-	Completed   int                 `json:"completed"`
-	OK          int                 `json:"ok"`
-	Failed      int                 `json:"failed"`
-	Disabled    int                 `json:"disabled"`
-	AuthExpired int                 `json:"auth_expired"`
-	Quota       int                 `json:"quota_cooldown"`
-	RateLimited int                 `json:"rate_limited"`
-	Error       string              `json:"error,omitempty"`
-	Results     []claudeProbeResult `json:"results"`
+	ID                string              `json:"id"`
+	Status            string              `json:"status"`
+	CreatedAt         time.Time           `json:"created_at"`
+	StartedAt         time.Time           `json:"started_at,omitempty"`
+	FinishedAt        time.Time           `json:"finished_at,omitempty"`
+	Total             int                 `json:"total"`
+	Completed         int                 `json:"completed"`
+	OK                int                 `json:"ok"`
+	Failed            int                 `json:"failed"`
+	Disabled          int                 `json:"disabled"`
+	PermanentDisabled int                 `json:"permanent_disabled"`
+	ManualDisabled    int                 `json:"manual_disabled"`
+	AuthExpired       int                 `json:"auth_expired"`
+	Quota             int                 `json:"quota_cooldown"`
+	RateLimited       int                 `json:"rate_limited"`
+	Error             string              `json:"error,omitempty"`
+	Results           []claudeProbeResult `json:"results"`
 }
 
 type claudeProbeResult struct {
-	Name          string    `json:"name"`
-	ID            string    `json:"id,omitempty"`
-	AuthIndex     string    `json:"auth_index,omitempty"`
-	Email         string    `json:"email,omitempty"`
-	Status        string    `json:"status"`
-	Reason        string    `json:"reason,omitempty"`
-	Message       string    `json:"message,omitempty"`
-	ProfileStatus int       `json:"profile_status,omitempty"`
-	UsageStatus   int       `json:"usage_status,omitempty"`
-	Disabled      bool      `json:"disabled"`
-	Unavailable   bool      `json:"unavailable"`
-	StartedAt     time.Time `json:"started_at"`
-	FinishedAt    time.Time `json:"finished_at"`
+	Name               string    `json:"name"`
+	ID                 string    `json:"id,omitempty"`
+	AuthIndex          string    `json:"auth_index,omitempty"`
+	Email              string    `json:"email,omitempty"`
+	Status             string    `json:"status"`
+	Reason             string    `json:"reason,omitempty"`
+	Message            string    `json:"message,omitempty"`
+	RouteState         string    `json:"route_state,omitempty"`
+	Recoverability     string    `json:"recoverability,omitempty"`
+	CleanupRecommended bool      `json:"cleanup_recommended,omitempty"`
+	ProfileStatus      int       `json:"profile_status,omitempty"`
+	UsageStatus        int       `json:"usage_status,omitempty"`
+	Disabled           bool      `json:"disabled"`
+	Unavailable        bool      `json:"unavailable"`
+	StartedAt          time.Time `json:"started_at"`
+	FinishedAt         time.Time `json:"finished_at"`
 }
 
 func (h *Handler) PostClaudeProbeJob(c *gin.Context) {
@@ -524,6 +531,9 @@ func (h *Handler) finalizeClaudeProbeResult(original *coreauth.Auth, result clau
 
 	reason := claudeAuthStatusReason(auth, now)
 	result.Reason = reason
+	result.RouteState = claudeAuthRouteState(auth, now, reason)
+	result.Recoverability = claudeAuthRecoverability(reason)
+	result.CleanupRecommended = result.Recoverability == "permanent"
 	result.Disabled = auth.Disabled || auth.Status == coreauth.StatusDisabled
 	result.Unavailable = auth.Unavailable
 	if auth.LastError != nil && strings.TrimSpace(result.Message) == "" {
@@ -540,13 +550,17 @@ func (h *Handler) finalizeClaudeProbeResult(original *coreauth.Auth, result clau
 		result.Status = "quota_cooldown"
 	case "auth_expired":
 		result.Status = "auth_expired"
-	case "account_banned", "organization_disabled", "account_disabled", "disabled":
-		result.Status = "disabled"
-	case "rpm_cooldown":
+	case "account_banned", "organization_disabled", "account_disabled":
+		result.Status = "permanent_disabled"
+	case "manual_disabled", "disabled":
+		result.Status = "manual_disabled"
+	case "rate_limited", "rpm_cooldown":
 		result.Status = "rate_limited"
+	case "subscription_issue", "upstream_error", "unavailable":
+		result.Status = "repair_required"
 	default:
 		if result.Disabled {
-			result.Status = "disabled"
+			result.Status = "manual_disabled"
 		} else if auth.LastError != nil && auth.LastError.HTTPStatus == http.StatusTooManyRequests {
 			result.Status = "rate_limited"
 		} else {
@@ -577,7 +591,12 @@ func (h *Handler) appendClaudeProbeResult(jobID string, result claudeProbeResult
 		job.AuthExpired++
 		job.Disabled++
 		job.Failed++
-	case "disabled":
+	case "permanent_disabled":
+		job.PermanentDisabled++
+		job.Disabled++
+		job.Failed++
+	case "manual_disabled":
+		job.ManualDisabled++
 		job.Disabled++
 		job.Failed++
 	case "rate_limited":
@@ -640,20 +659,22 @@ func claudeProbeJobSnapshotFromLocked(job *claudeProbeJob) *claudeProbeJobSnapsh
 		return strings.ToLower(results[i].Name) < strings.ToLower(results[j].Name)
 	})
 	return &claudeProbeJobSnapshot{
-		ID:          job.ID,
-		Status:      job.Status,
-		CreatedAt:   job.CreatedAt,
-		StartedAt:   job.StartedAt,
-		FinishedAt:  job.FinishedAt,
-		Total:       job.Total,
-		Completed:   job.Completed,
-		OK:          job.OK,
-		Failed:      job.Failed,
-		Disabled:    job.Disabled,
-		AuthExpired: job.AuthExpired,
-		Quota:       job.Quota,
-		RateLimited: job.RateLimited,
-		Error:       job.Error,
-		Results:     results,
+		ID:                job.ID,
+		Status:            job.Status,
+		CreatedAt:         job.CreatedAt,
+		StartedAt:         job.StartedAt,
+		FinishedAt:        job.FinishedAt,
+		Total:             job.Total,
+		Completed:         job.Completed,
+		OK:                job.OK,
+		Failed:            job.Failed,
+		Disabled:          job.Disabled,
+		PermanentDisabled: job.PermanentDisabled,
+		ManualDisabled:    job.ManualDisabled,
+		AuthExpired:       job.AuthExpired,
+		Quota:             job.Quota,
+		RateLimited:       job.RateLimited,
+		Error:             job.Error,
+		Results:           results,
 	}
 }

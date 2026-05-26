@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -130,5 +132,210 @@ func TestListClaudeAuthHealth_ExposesClaudeAccountRuntimeState(t *testing.T) {
 	}
 	if got, _ := quality["requests"].(float64); got != 0 {
 		t.Fatalf("quality_24h.requests = %#v, want 0", quality["requests"])
+	}
+}
+
+func TestListClaudeAuthHealth_SeparatesPermanentAndManualDisabledStates(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	authDir := t.TempDir()
+	bannedPath := filepath.Join(authDir, "claude-banned.json")
+	manualPath := filepath.Join(authDir, "claude-manual.json")
+	if err := os.WriteFile(bannedPath, []byte(`{"type":"claude"}`), 0o600); err != nil {
+		t.Fatalf("write banned auth file: %v", err)
+	}
+	if err := os.WriteFile(manualPath, []byte(`{"type":"claude"}`), 0o600); err != nil {
+		t.Fatalf("write manual auth file: %v", err)
+	}
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "claude-banned",
+		FileName: "claude-banned.json",
+		Provider: "claude",
+		Disabled: true,
+		Status:   coreauth.StatusDisabled,
+		LastError: &coreauth.Error{
+			Code:       "organization_disabled",
+			Message:    "This organization has been disabled.",
+			HTTPStatus: http.StatusBadRequest,
+		},
+		Attributes: map[string]string{"path": bannedPath},
+		Metadata:   map[string]any{"type": "claude"},
+	}); err != nil {
+		t.Fatalf("register banned auth: %v", err)
+	}
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:            "claude-manual",
+		FileName:      "claude-manual.json",
+		Provider:      "claude",
+		Disabled:      true,
+		Status:        coreauth.StatusDisabled,
+		StatusMessage: "disabled via management API",
+		Attributes:    map[string]string{"path": manualPath},
+		Metadata:      map[string]any{"type": "claude"},
+	}); err != nil {
+		t.Fatalf("register manual auth: %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files/claude-health", nil)
+	h.ListClaudeAuthHealth(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Accounts []map[string]any `json:"accounts"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	accounts := map[string]map[string]any{}
+	for _, account := range payload.Accounts {
+		name, _ := account["name"].(string)
+		accounts[name] = account
+	}
+
+	banned := accounts["claude-banned.json"]
+	if banned == nil {
+		t.Fatalf("banned account missing from response: %#v", accounts)
+	}
+	if got, _ := banned["status_reason"].(string); got != "organization_disabled" {
+		t.Fatalf("banned status_reason = %q, want organization_disabled", got)
+	}
+	if got, _ := banned["route_state"].(string); got != "permanent_disabled" {
+		t.Fatalf("banned route_state = %q, want permanent_disabled", got)
+	}
+	if got, _ := banned["recoverability"].(string); got != "permanent" {
+		t.Fatalf("banned recoverability = %q, want permanent", got)
+	}
+	if got, _ := banned["cleanup_recommended"].(bool); !got {
+		t.Fatalf("banned cleanup_recommended = %v, want true", banned["cleanup_recommended"])
+	}
+
+	manual := accounts["claude-manual.json"]
+	if manual == nil {
+		t.Fatalf("manual account missing from response: %#v", accounts)
+	}
+	if got, _ := manual["status_reason"].(string); got != "manual_disabled" {
+		t.Fatalf("manual status_reason = %q, want manual_disabled", got)
+	}
+	if got, _ := manual["route_state"].(string); got != "manual_disabled" {
+		t.Fatalf("manual route_state = %q, want manual_disabled", got)
+	}
+	if got, _ := manual["recoverability"].(string); got != "manual" {
+		t.Fatalf("manual recoverability = %q, want manual", got)
+	}
+	if got, _ := manual["cleanup_recommended"].(bool); got {
+		t.Fatalf("manual cleanup_recommended = %v, want false", got)
+	}
+}
+
+func TestListClaudeAuthHealth_DerivesRecoverableReasonBeforeDisabledFlag(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	authDir := t.TempDir()
+	subscriptionPath := filepath.Join(authDir, "claude-subscription.json")
+	rateLimitedPath := filepath.Join(authDir, "claude-rate-limited.json")
+	if err := os.WriteFile(subscriptionPath, []byte(`{"type":"claude"}`), 0o600); err != nil {
+		t.Fatalf("write subscription auth file: %v", err)
+	}
+	if err := os.WriteFile(rateLimitedPath, []byte(`{"type":"claude"}`), 0o600); err != nil {
+		t.Fatalf("write rate-limited auth file: %v", err)
+	}
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "claude-subscription",
+		FileName: "claude-subscription.json",
+		Provider: "claude",
+		Disabled: true,
+		Status:   coreauth.StatusDisabled,
+		LastError: &coreauth.Error{
+			Code:       "forbidden",
+			Message:    "Subscription or billing issue.",
+			HTTPStatus: http.StatusForbidden,
+		},
+		Attributes: map[string]string{"path": subscriptionPath},
+		Metadata:   map[string]any{"type": "claude"},
+	}); err != nil {
+		t.Fatalf("register subscription auth: %v", err)
+	}
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "claude-rate-limited",
+		FileName: "claude-rate-limited.json",
+		Provider: "claude",
+		Disabled: true,
+		Status:   coreauth.StatusDisabled,
+		LastError: &coreauth.Error{
+			Code:       "rate_limited",
+			Message:    "Rate limited. Please try again later.",
+			Retryable:  true,
+			HTTPStatus: http.StatusTooManyRequests,
+		},
+		Attributes: map[string]string{"path": rateLimitedPath},
+		Metadata:   map[string]any{"type": "claude"},
+	}); err != nil {
+		t.Fatalf("register rate-limited auth: %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files/claude-health", nil)
+	h.ListClaudeAuthHealth(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Accounts []map[string]any `json:"accounts"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	accounts := map[string]map[string]any{}
+	for _, account := range payload.Accounts {
+		name, _ := account["name"].(string)
+		accounts[name] = account
+	}
+
+	subscription := accounts["claude-subscription.json"]
+	if subscription == nil {
+		t.Fatalf("subscription account missing from response: %#v", accounts)
+	}
+	if got, _ := subscription["status_reason"].(string); got != "subscription_issue" {
+		t.Fatalf("subscription status_reason = %q, want subscription_issue", got)
+	}
+	if got, _ := subscription["route_state"].(string); got != "repair_required" {
+		t.Fatalf("subscription route_state = %q, want repair_required", got)
+	}
+	if got, _ := subscription["recoverability"].(string); got != "manual" {
+		t.Fatalf("subscription recoverability = %q, want manual", got)
+	}
+	if got, _ := subscription["cleanup_recommended"].(bool); got {
+		t.Fatalf("subscription cleanup_recommended = %v, want false", got)
+	}
+
+	rateLimited := accounts["claude-rate-limited.json"]
+	if rateLimited == nil {
+		t.Fatalf("rate-limited account missing from response: %#v", accounts)
+	}
+	if got, _ := rateLimited["status_reason"].(string); got != "rate_limited" {
+		t.Fatalf("rate-limited status_reason = %q, want rate_limited", got)
+	}
+	if got, _ := rateLimited["route_state"].(string); got != "cooling" {
+		t.Fatalf("rate-limited route_state = %q, want cooling", got)
+	}
+	if got, _ := rateLimited["recoverability"].(string); got != "auto" {
+		t.Fatalf("rate-limited recoverability = %q, want auto", got)
+	}
+	if got, _ := rateLimited["cleanup_recommended"].(bool); got {
+		t.Fatalf("rate-limited cleanup_recommended = %v, want false", got)
 	}
 }
