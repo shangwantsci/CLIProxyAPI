@@ -436,6 +436,52 @@ func TestManager_RetriesNextAuthWhenClaudeOrganizationDisabled(t *testing.T) {
 	}
 }
 
+func TestManager_DisablesClaudeWhenOAuthNotAllowedForOrganization(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"claude-oauth-not-allowed": &Error{
+				HTTPStatus: http.StatusForbidden,
+				Message:    `{"type":"error","error":{"type":"permission_error","message":"OAuth authentication is currently not allowed for this organization."},"request_id":"req_123"}`,
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "claude-sonnet-4-5"
+	auth := &Auth{ID: "claude-oauth-not-allowed", Provider: "claude"}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	_, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatal("Execute returned nil error, want upstream organization disabled error")
+	}
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("updated auth not found")
+	}
+	if !updated.Disabled || updated.Status != StatusDisabled {
+		t.Fatalf("disabled/status = %v/%s, want true/disabled", updated.Disabled, updated.Status)
+	}
+	if updated.LastError == nil {
+		t.Fatal("LastError is nil")
+	}
+	if updated.LastError.Code != "organization_disabled" || updated.LastError.HTTPStatus != http.StatusForbidden {
+		t.Fatalf("LastError = %#v, want organization_disabled 403", updated.LastError)
+	}
+}
+
 func TestManager_ModelSupportBadRequest_FallsBackAndSuspendsAuth(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	executor := &authFallbackExecutor{

@@ -581,7 +581,9 @@ func normalizeClaudePermanentAccountError(code, message string) (string, string,
 	}
 	if strings.Contains(raw, "organization_disabled") ||
 		strings.Contains(raw, "organization has been disabled") ||
-		strings.Contains(raw, "this organization has been disabled") {
+		strings.Contains(raw, "this organization has been disabled") ||
+		strings.Contains(raw, "oauth authentication is currently not allowed for this organization") ||
+		strings.Contains(raw, "authentication is currently not allowed for this organization") {
 		if trimmedMessage == "" {
 			trimmedMessage = "This organization has been disabled."
 		}

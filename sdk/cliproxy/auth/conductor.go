@@ -2733,7 +2733,9 @@ func permanentAuthDisabledDetails(statusCode int, rawMessage string) (string, st
 	}
 	if strings.Contains(combined, "organization_disabled") ||
 		strings.Contains(combined, "organization has been disabled") ||
-		strings.Contains(combined, "this organization has been disabled") {
+		strings.Contains(combined, "this organization has been disabled") ||
+		strings.Contains(combined, "oauth authentication is currently not allowed for this organization") ||
+		strings.Contains(combined, "authentication is currently not allowed for this organization") {
 		if message == "" || strings.HasPrefix(message, "{") {
 			message = "This organization has been disabled."
 		}

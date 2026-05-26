@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -120,5 +121,47 @@ func TestPatchAuthFileStatus_EnablePreservesPermanentAuthError(t *testing.T) {
 	if got, _ := entry["status_reason"].(string); got != "organization_disabled" {
 		encoded, _ := json.Marshal(entry)
 		t.Fatalf("status_reason = %q, want organization_disabled (entry=%s)", got, encoded)
+	}
+}
+
+func TestClaudeAuthHealthClassifiesOAuthNotAllowedForOrganization(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:            "claude-oauth-not-allowed.json",
+		FileName:      "claude-oauth-not-allowed.json",
+		Provider:      "claude",
+		Disabled:      true,
+		Status:        coreauth.StatusDisabled,
+		StatusMessage: "OAuth authentication is currently not allowed for this organization.",
+		LastError: &coreauth.Error{
+			Code:       "forbidden",
+			HTTPStatus: http.StatusForbidden,
+			Message:    "OAuth authentication is currently not allowed for this organization.",
+		},
+		Attributes: map[string]string{"path": "claude-oauth-not-allowed.json"},
+		Metadata:   map[string]any{"type": "claude"},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	updated, ok := manager.GetByID("claude-oauth-not-allowed.json")
+	if !ok || updated == nil {
+		t.Fatalf("auth not found")
+	}
+	entry := gin.H{}
+	addClaudeAuthHealthFields(entry, updated, time.Now())
+	if got, _ := entry["status_reason"].(string); got != "organization_disabled" {
+		encoded, _ := json.Marshal(entry)
+		t.Fatalf("status_reason = %q, want organization_disabled (entry=%s)", got, encoded)
+	}
+	if got, _ := entry["route_state"].(string); got != "permanent_disabled" {
+		t.Fatalf("route_state = %q, want permanent_disabled", got)
+	}
+	if got, _ := entry["recoverability"].(string); got != "permanent" {
+		t.Fatalf("recoverability = %q, want permanent", got)
 	}
 }

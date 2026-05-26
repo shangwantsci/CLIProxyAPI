@@ -145,6 +145,93 @@ func TestClaudeProbeJobDetectsDisabledAndHealthyAccounts(t *testing.T) {
 	}
 }
 
+func TestClaudeProbeJobDetectsUsageOAuthNotAllowedForOrganization(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/oauth/profile":
+			_, _ = w.Write([]byte(`{"account":{"email":"blocked@example.test","has_claude_pro":true},"organization":{"subscription_status":"active"}}`))
+		case "/api/oauth/usage":
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"type":"error","error":{"type":"permission_error","message":"OAuth authentication is currently not allowed for this organization."},"request_id":"req_123"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+
+	originalProfileURL := claudeOAuthProfileURL
+	originalUsageURL := claudeOAuthUsageURL
+	claudeOAuthProfileURL = upstream.URL + "/api/oauth/profile"
+	claudeOAuthUsageURL = upstream.URL + "/api/oauth/usage"
+	t.Cleanup(func() {
+		claudeOAuthProfileURL = originalProfileURL
+		claudeOAuthUsageURL = originalUsageURL
+	})
+
+	manager := coreauth.NewManager(&memoryAuthStore{}, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "claude-oauth-not-allowed",
+		FileName: "claude-oauth-not-allowed.json",
+		Provider: "claude",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path": "claude-oauth-not-allowed.json",
+		},
+		Metadata: map[string]any{
+			"type":         "claude",
+			"email":        "blocked@example.test",
+			"access_token": "blocked-token",
+		},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/auth-files/claude-probe-jobs", strings.NewReader(`{"names":["claude-oauth-not-allowed.json"]}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	h.PostClaudeProbeJob(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("start status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var started struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &started); err != nil {
+		t.Fatalf("decode start response: %v", err)
+	}
+
+	job := waitForClaudeProbeJob(t, h, started.ID)
+	if job.Completed != 1 || job.PermanentDisabled != 1 || job.Disabled != 1 || job.Failed != 1 {
+		t.Fatalf("job summary = completed=%d permanent=%d disabled=%d failed=%d", job.Completed, job.PermanentDisabled, job.Disabled, job.Failed)
+	}
+	if len(job.Results) != 1 {
+		t.Fatalf("results len = %d, want 1", len(job.Results))
+	}
+	result := job.Results[0]
+	if result.Status != "permanent_disabled" || result.Reason != "organization_disabled" || result.RouteState != "permanent_disabled" || result.Recoverability != "permanent" {
+		t.Fatalf("result = %#v, want organization permanent disabled", result)
+	}
+
+	updated, ok := manager.GetByID("claude-oauth-not-allowed")
+	if !ok {
+		t.Fatal("updated auth not found")
+	}
+	if !updated.Disabled || updated.Status != coreauth.StatusDisabled {
+		t.Fatalf("disabled/status = %v/%s, want true/disabled", updated.Disabled, updated.Status)
+	}
+	if updated.LastError == nil || updated.LastError.Code != "organization_disabled" || updated.LastError.HTTPStatus != http.StatusForbidden {
+		t.Fatalf("LastError = %#v, want organization_disabled 403", updated.LastError)
+	}
+}
+
 func TestClaudeProbeTargetsSkipHiddenRemovedAuths(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)
