@@ -677,10 +677,13 @@ func claudeAuthHealthStatus(auth *coreauth.Auth, now time.Time) string {
 	if auth == nil {
 		return "unknown"
 	}
+	reason := claudeAuthStatusReason(auth, now)
+	switch reason {
+	case "account_banned", "organization_disabled", "account_disabled":
+		return "permanent_disabled"
+	}
 	if auth.Disabled || auth.Status == coreauth.StatusDisabled {
-		switch claudeAuthStatusReason(auth, now) {
-		case "account_banned", "organization_disabled", "account_disabled":
-			return "permanent_disabled"
+		switch reason {
 		case "rate_limited", "quota_cooldown", "rpm_cooldown", "session_full":
 			return "cooling"
 		case "auth_expired":

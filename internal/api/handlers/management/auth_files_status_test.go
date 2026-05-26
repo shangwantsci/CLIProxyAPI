@@ -165,3 +165,36 @@ func TestClaudeAuthHealthClassifiesOAuthNotAllowedForOrganization(t *testing.T) 
 		t.Fatalf("recoverability = %q, want permanent", got)
 	}
 }
+
+func TestClaudeAuthHealthClassifiesHistoricalOAuthNotAllowedUnavailableState(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	auth := &coreauth.Auth{
+		ID:            "claude-historical-oauth-not-allowed.json",
+		FileName:      "claude-historical-oauth-not-allowed.json",
+		Provider:      "claude",
+		Status:        coreauth.StatusError,
+		Unavailable:   true,
+		StatusMessage: "OAuth authentication is currently not allowed for this organization.",
+		LastError: &coreauth.Error{
+			Code:       "forbidden",
+			HTTPStatus: http.StatusForbidden,
+			Message:    "OAuth authentication is currently not allowed for this organization.",
+		},
+		Metadata: map[string]any{"type": "claude"},
+	}
+
+	entry := gin.H{}
+	addClaudeAuthHealthFields(entry, auth, time.Now())
+	if got, _ := entry["health_status"].(string); got != "permanent_disabled" {
+		encoded, _ := json.Marshal(entry)
+		t.Fatalf("health_status = %q, want permanent_disabled (entry=%s)", got, encoded)
+	}
+	if got, _ := entry["status_reason"].(string); got != "organization_disabled" {
+		t.Fatalf("status_reason = %q, want organization_disabled", got)
+	}
+	if got, _ := entry["route_state"].(string); got != "permanent_disabled" {
+		t.Fatalf("route_state = %q, want permanent_disabled", got)
+	}
+}
