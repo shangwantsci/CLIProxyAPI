@@ -2284,6 +2284,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
 		now := time.Now()
+		if !result.Success && isClientRequestResultError(result.Error) {
+			m.mu.Unlock()
+			m.hook.OnResult(ctx, result)
+			return
+		}
+
 		auth.recordRecentRequest(now, result.Success)
 		auth.recordQuality24h(now, result.Success, statusCodeFromResult(result.Error) == http.StatusTooManyRequests)
 		if result.Success {
@@ -2921,12 +2927,56 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 	return isRequestScopedNotFoundMessage(err.Message)
 }
 
+func isClientRequestInvalidMessage(message string) bool {
+	msg := strings.TrimSpace(message)
+	if msg == "" {
+		return false
+	}
+	lower := strings.ToLower(msg)
+	upper := strings.ToUpper(msg)
+	if strings.Contains(lower, "invalid_request_error") ||
+		strings.Contains(upper, "INVALID_ARGUMENT") ||
+		strings.Contains(upper, "FAILED_PRECONDITION") {
+		return true
+	}
+	return strings.Contains(lower, "level") &&
+		strings.Contains(lower, "not supported") &&
+		strings.Contains(lower, "valid levels:")
+}
+
+func isClientRequestResultError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	if _, _, ok := permanentAuthDisabledDetailsFromResult(err); ok {
+		return false
+	}
+	if isModelSupportResultError(err) {
+		return false
+	}
+	status := statusCodeFromResult(err)
+	switch status {
+	case http.StatusBadRequest:
+		return isClientRequestInvalidMessage(err.Message)
+	case http.StatusNotFound:
+		return isRequestScopedNotFoundMessage(err.Message)
+	case http.StatusUnprocessableEntity:
+		return true
+	case http.StatusInternalServerError:
+		msg := err.Message
+		return strings.Contains(msg, "\"status\":\"UNKNOWN\"") ||
+			strings.Contains(msg, "\"status\": \"UNKNOWN\"")
+	default:
+		return false
+	}
+}
+
 // isRequestInvalidError returns true if the error represents a client request
 // error that should not be retried. Specifically, it treats 400 responses with
-// "invalid_request_error", request-scoped 404 item misses caused by `store=false`,
-// and all 422 responses as request-shape failures, where switching auths or
-// pooled upstream models will not help. Model-support errors are excluded so
-// routing can fall through to another auth or upstream.
+// request-shape failures, request-scoped 404 item misses caused by `store=false`,
+// and all 422 responses as request failures, where switching auths or pooled
+// upstream models will not help. Model-support errors are excluded so routing
+// can fall through to another auth or upstream.
 func isRequestInvalidError(err error) bool {
 	if err == nil {
 		return false
@@ -2940,10 +2990,7 @@ func isRequestInvalidError(err error) bool {
 	status := statusCodeFromError(err)
 	switch status {
 	case http.StatusBadRequest:
-		msg := err.Error()
-		return strings.Contains(msg, "invalid_request_error") ||
-			strings.Contains(msg, "INVALID_ARGUMENT") ||
-			strings.Contains(msg, "FAILED_PRECONDITION")
+		return isClientRequestInvalidMessage(err.Error())
 	case http.StatusNotFound:
 		return isRequestScopedNotFoundMessage(err.Error())
 	case http.StatusUnprocessableEntity:

@@ -917,6 +917,55 @@ func TestManager_MarkResult_RequestScopedNotFoundDoesNotCooldownAuth(t *testing.
 	}
 }
 
+func TestManager_MarkResult_ClientRequestBadRequestDoesNotPolluteAuthHealth(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{
+		ID:       "auth-client-request-error",
+		Provider: "claude",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "claude-sonnet-4-6"
+	requestErr := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    "400 / level *xhigh* not supported, valid levels: low, medium, high, max",
+	}
+	if !isRequestInvalidError(requestErr) {
+		t.Fatal("expected unsupported request level to be classified as a client request error")
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    requestErr,
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if updated.Disabled || updated.Unavailable || updated.Status == StatusError {
+		t.Fatalf("client request error polluted auth health: disabled=%v unavailable=%v status=%s", updated.Disabled, updated.Unavailable, updated.Status)
+	}
+	if updated.Success != 0 || updated.Failed != 0 {
+		t.Fatalf("auth totals = success=%d failed=%d, want 0/0 for client request error", updated.Success, updated.Failed)
+	}
+	if updated.LastError != nil || updated.StatusMessage != "" {
+		t.Fatalf("auth last error/status message = %#v/%q, want empty", updated.LastError, updated.StatusMessage)
+	}
+	if stats := updated.Quality24hStats(time.Now()); stats.Requests != 0 || stats.Failed != 0 {
+		t.Fatalf("quality stats = %#v, want no auth-quality sample for client request error", stats)
+	}
+	if state := updated.ModelStates[model]; state != nil {
+		t.Fatalf("client request error should not create model health state, got %#v", state)
+	}
+}
+
 func TestManager_RequestScopedNotFoundStopsRetryWithoutSuspendingAuth(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	executor := &authFallbackExecutor{
