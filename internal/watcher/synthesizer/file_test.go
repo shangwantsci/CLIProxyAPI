@@ -2,6 +2,7 @@ package synthesizer
 
 import (
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -128,6 +129,76 @@ func TestFileSynthesizer_Synthesize_ValidAuthFile(t *testing.T) {
 	}
 	if auths[0].Status != coreauth.StatusActive {
 		t.Errorf("expected status active, got %s", auths[0].Status)
+	}
+}
+
+func TestFileSynthesizer_Synthesize_PreservesClaudeRuntimeState(t *testing.T) {
+	tempDir := t.TempDir()
+	recoverAt := time.Date(2026, 5, 26, 10, 30, 0, 0, time.UTC)
+
+	authData := map[string]any{
+		"type":               "claude",
+		"email":              "limited@example.com",
+		"status":             "error",
+		"status_message":     "Claude quota cooldown: five_hour remaining 20% <= 20%",
+		"unavailable":        true,
+		"next_retry_after":   recoverAt.Format(time.RFC3339Nano),
+		"next_refresh_after": recoverAt.Add(-time.Hour).Format(time.RFC3339Nano),
+		"quota": map[string]any{
+			"exceeded":        true,
+			"reason":          "Claude quota cooldown: five_hour remaining 20% <= 20%",
+			"next_recover_at": recoverAt.Format(time.RFC3339Nano),
+			"backoff_level":   3,
+		},
+		"last_error": map[string]any{
+			"code":        "quota_exhausted",
+			"message":     "Claude quota cooldown: five_hour remaining 20% <= 20%",
+			"http_status": http.StatusOK,
+			"retryable":   true,
+		},
+	}
+	data, _ := json.Marshal(authData)
+	if err := os.WriteFile(filepath.Join(tempDir, "claude-limited.json"), data, 0644); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	synth := NewFileSynthesizer()
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Date(2026, 5, 26, 9, 0, 0, 0, time.UTC),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+
+	got := auths[0]
+	if got.Status != coreauth.StatusError || !got.Unavailable {
+		t.Fatalf("status/unavailable = %s/%v, want error/true", got.Status, got.Unavailable)
+	}
+	if got.StatusMessage != "Claude quota cooldown: five_hour remaining 20% <= 20%" {
+		t.Fatalf("StatusMessage = %q", got.StatusMessage)
+	}
+	if !got.NextRetryAfter.Equal(recoverAt) {
+		t.Fatalf("NextRetryAfter = %v, want %v", got.NextRetryAfter, recoverAt)
+	}
+	if !got.NextRefreshAfter.Equal(recoverAt.Add(-time.Hour)) {
+		t.Fatalf("NextRefreshAfter = %v, want %v", got.NextRefreshAfter, recoverAt.Add(-time.Hour))
+	}
+	if !got.Quota.Exceeded || got.Quota.Reason != "Claude quota cooldown: five_hour remaining 20% <= 20%" || !got.Quota.NextRecoverAt.Equal(recoverAt) || got.Quota.BackoffLevel != 3 {
+		t.Fatalf("Quota = %#v, want persisted cooldown until %v", got.Quota, recoverAt)
+	}
+	if got.LastError == nil {
+		t.Fatal("LastError is nil")
+	}
+	if got.LastError.Code != "quota_exhausted" || got.LastError.Message != "Claude quota cooldown: five_hour remaining 20% <= 20%" || got.LastError.HTTPStatus != http.StatusOK || !got.LastError.Retryable {
+		t.Fatalf("LastError = %#v, want persisted quota error", got.LastError)
 	}
 }
 

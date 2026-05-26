@@ -137,6 +137,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
+	applyClaudeRuntimeMetadata(a, metadata)
 	// Read priority from auth file.
 	if rawPriority, ok := metadata["priority"]; ok {
 		switch v := rawPriority.(type) {
@@ -182,6 +183,157 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		}
 	}
 	return []*coreauth.Auth{a}
+}
+
+func applyClaudeRuntimeMetadata(auth *coreauth.Auth, metadata map[string]any) {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "claude") {
+		return
+	}
+	auth.Status = fileStatusFromMetadata(metadata, auth.Disabled)
+	if statusMessage, ok := metadata["status_message"].(string); ok {
+		auth.StatusMessage = strings.TrimSpace(statusMessage)
+	}
+	if unavailable, ok := metadata["unavailable"].(bool); ok {
+		auth.Unavailable = unavailable
+	}
+	if nextRetryAfter, ok := fileMetadataTimeValue(metadata["next_retry_after"]); ok {
+		auth.NextRetryAfter = nextRetryAfter
+	}
+	if nextRefreshAfter, ok := fileMetadataTimeValue(metadata["next_refresh_after"]); ok {
+		auth.NextRefreshAfter = nextRefreshAfter
+	}
+	auth.Quota = fileQuotaStateFromMetadata(metadata["quota"])
+	auth.LastError = fileAuthErrorFromMetadata(metadata["last_error"])
+	if auth.Disabled {
+		auth.Status = coreauth.StatusDisabled
+	}
+}
+
+func fileStatusFromMetadata(metadata map[string]any, disabled bool) coreauth.Status {
+	if disabled {
+		return coreauth.StatusDisabled
+	}
+	raw, _ := metadata["status"].(string)
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case string(coreauth.StatusUnknown):
+		return coreauth.StatusUnknown
+	case string(coreauth.StatusPending):
+		return coreauth.StatusPending
+	case string(coreauth.StatusRefreshing):
+		return coreauth.StatusRefreshing
+	case string(coreauth.StatusError):
+		return coreauth.StatusError
+	case string(coreauth.StatusDisabled):
+		return coreauth.StatusDisabled
+	default:
+		return coreauth.StatusActive
+	}
+}
+
+func fileAuthErrorFromMetadata(raw any) *coreauth.Error {
+	values, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	err := &coreauth.Error{}
+	if code, ok := values["code"].(string); ok {
+		err.Code = strings.TrimSpace(code)
+	}
+	if message, ok := values["message"].(string); ok {
+		err.Message = strings.TrimSpace(message)
+	}
+	if retryable, ok := values["retryable"].(bool); ok {
+		err.Retryable = retryable
+	}
+	if status, ok := fileMetadataIntValue(values["http_status"]); ok {
+		err.HTTPStatus = status
+	}
+	if err.Code == "" && err.Message == "" && err.HTTPStatus == 0 {
+		return nil
+	}
+	return err
+}
+
+func fileQuotaStateFromMetadata(raw any) coreauth.QuotaState {
+	values, ok := raw.(map[string]any)
+	if !ok {
+		return coreauth.QuotaState{}
+	}
+	quota := coreauth.QuotaState{}
+	if exceeded, ok := values["exceeded"].(bool); ok {
+		quota.Exceeded = exceeded
+	}
+	if reason, ok := values["reason"].(string); ok {
+		quota.Reason = strings.TrimSpace(reason)
+	}
+	if recoverAt, ok := fileMetadataTimeValue(values["next_recover_at"]); ok {
+		quota.NextRecoverAt = recoverAt
+	}
+	if level, ok := fileMetadataIntValue(values["backoff_level"]); ok {
+		quota.BackoffLevel = level
+	}
+	return quota
+}
+
+func fileMetadataTimeValue(raw any) (time.Time, bool) {
+	switch value := raw.(type) {
+	case string:
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			return time.Time{}, false
+		}
+		for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05", "2006-01-02 15:04"} {
+			if parsed, err := time.Parse(layout, trimmed); err == nil {
+				return parsed, true
+			}
+		}
+		if unix, err := strconv.ParseInt(trimmed, 10, 64); err == nil && unix > 0 {
+			return fileNormalizeMetadataUnixTime(unix), true
+		}
+	case float64:
+		if value > 0 {
+			return fileNormalizeMetadataUnixTime(int64(value)), true
+		}
+	case int64:
+		if value > 0 {
+			return fileNormalizeMetadataUnixTime(value), true
+		}
+	case int:
+		if value > 0 {
+			return fileNormalizeMetadataUnixTime(int64(value)), true
+		}
+	case json.Number:
+		if unix, err := value.Int64(); err == nil && unix > 0 {
+			return fileNormalizeMetadataUnixTime(unix), true
+		}
+	}
+	return time.Time{}, false
+}
+
+func fileNormalizeMetadataUnixTime(raw int64) time.Time {
+	if raw > 1_000_000_000_000 {
+		return time.UnixMilli(raw)
+	}
+	return time.Unix(raw, 0)
+}
+
+func fileMetadataIntValue(raw any) (int, bool) {
+	switch value := raw.(type) {
+	case int:
+		return value, true
+	case int64:
+		return int(value), true
+	case float64:
+		return int(value), true
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		return parsed, err == nil
+	case json.Number:
+		parsed, err := value.Int64()
+		return int(parsed), err == nil
+	default:
+		return 0, false
+	}
 }
 
 func applyClaudeCloakMetadata(auth *coreauth.Auth, metadata map[string]any) {
