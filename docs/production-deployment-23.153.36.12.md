@@ -46,12 +46,11 @@ Docker 固定信息：
 
 ## 当前部署版本
 
-- 后端提交：`59b9f5d2`
+- 后端提交：`4a188fe5`
 - 前端提交：`00956ca`
-- 迁移来源：旧服务器 `38.76.196.12:/opt/cpa-claude-proxy`
-- 已迁移数据：
-  - Claude 账号文件：2 个
-  - 代理池：1 个代理，1 个启用
+- 最近一次按本文档部署时间：`2026-05-27T16:57:07+00:00`
+- 最近一次账号备份：`/opt/cpa-claude-proxy-backups/auths-20260527-165703.tgz`
+- 初始迁移来源：旧服务器 `38.76.196.12:/opt/cpa-claude-proxy`
 
 服务器上可用下面命令查看实际部署提交：
 
@@ -59,18 +58,30 @@ Docker 固定信息：
 cat /opt/cpa-claude-proxy/DEPLOYED_COMMITS
 ```
 
+如果本文档记录与服务器上的 `DEPLOYED_COMMITS` 不一致，以服务器文件为准，并在下一次文档维护时同步更新本文档。
+
 ## 标准更新流程
 
 后续更新不要在服务器上临时改代码。标准流程是本地构建、上传产物、记录提交、Compose 重启。
 
-1. 本地确认后端和前端分支均已提交。
+### 0. 判断本次更新范围
+
+- 只改后端：只构建和上传 `CLIProxyAPI-linux-amd64`，保留服务器现有 `static/management.html`。
+- 只改前端：只构建和上传 `dist/index.html`，保留服务器现有后端二进制。
+- 前后端都改：两个产物都构建上传。
+
+不要在服务器上 `git pull`、临时改代码或现场编译。服务器只运行本地构建后上传的产物。
+
+### 1. 本地确认提交
 
 ```powershell
 git -C F:\claude反代\CLIProxyAPI rev-parse --short HEAD
 git -C F:\claude反代\Cli-Proxy-API-Management-Center rev-parse --short HEAD
 ```
 
-2. 本地构建 Linux 后端二进制。
+确认需要部署的改动已经提交并推送。部署记录中的 `backend` 和 `frontend` 必须写入实际部署的提交号。
+
+### 2. 本地构建 Linux 后端二进制
 
 ```powershell
 Set-Location F:\claude反代\CLIProxyAPI
@@ -80,14 +91,45 @@ $env:CGO_ENABLED='0'
 F:\GO语言\bin\go.exe build -o ..\.codex_tmp\prod-deploy\CLIProxyAPI-linux-amd64 .\cmd\server
 ```
 
-3. 本地构建前端。
+构建后记录文件哈希，便于和服务器上的运行产物核对：
+
+```powershell
+Get-FileHash -Algorithm SHA256 F:\claude反代\.codex_tmp\prod-deploy\CLIProxyAPI-linux-amd64
+```
+
+### 3. 本地构建前端
 
 ```powershell
 Set-Location F:\claude反代\Cli-Proxy-API-Management-Center
 npm run build
 ```
 
-4. 上传到服务器临时目录。
+前端生产产物是：
+
+```text
+F:\claude反代\Cli-Proxy-API-Management-Center\dist\index.html
+```
+
+上传到服务器后应安装为：
+
+```text
+/opt/cpa-claude-proxy/static/management.html
+```
+
+### 4. 准备本机上传临时目录
+
+Windows 本机路径包含中文时，部分 Python/PowerShell 上传脚本可能把路径转码为乱码。建议先复制到纯 ASCII 路径：
+
+```powershell
+$stage = 'C:\tmp\cpa-prod-deploy'
+New-Item -ItemType Directory -Path $stage -Force | Out-Null
+Copy-Item -LiteralPath 'F:\claude反代\.codex_tmp\prod-deploy\CLIProxyAPI-linux-amd64' -Destination (Join-Path $stage 'CLIProxyAPI-linux-amd64') -Force
+Copy-Item -LiteralPath 'F:\claude反代\Cli-Proxy-API-Management-Center\dist\index.html' -Destination (Join-Path $stage 'management.html') -Force
+```
+
+如果本次只更新后端或只更新前端，只复制对应产物。
+
+### 5. 上传到服务器临时目录
 
 ```bash
 mkdir -p /tmp/cpa-claude-stage
@@ -98,14 +140,16 @@ mkdir -p /tmp/cpa-claude-stage
 - 后端：`/tmp/cpa-claude-stage/CLIProxyAPI`
 - 前端：`/tmp/cpa-claude-stage/management.html`
 
-5. 在服务器上备份账号数据。
+### 6. 在服务器上备份账号数据
 
 ```bash
 mkdir -p /opt/cpa-claude-proxy-backups
 tar -czf /opt/cpa-claude-proxy-backups/auths-$(date +%Y%m%d-%H%M%S).tgz -C /opt/cpa-claude-proxy auths
 ```
 
-6. 覆盖运行产物并重启。
+### 7. 覆盖运行产物并重启
+
+前后端都更新时：
 
 ```bash
 install -m 0755 /tmp/cpa-claude-stage/CLIProxyAPI /opt/cpa-claude-proxy/runtime/CLIProxyAPI
@@ -117,7 +161,24 @@ docker compose restart cpa-claude-proxy
 
 注意：只执行 `docker compose up -d` 可能不会重启已经运行的容器；覆盖二进制后必须显式重启或使用 `docker compose up -d --force-recreate`，否则新产物可能不会生效。
 
-7. 写入提交记录。
+只更新后端时，不要覆盖 `management.html`：
+
+```bash
+install -m 0755 /tmp/cpa-claude-stage/CLIProxyAPI /opt/cpa-claude-proxy/runtime/CLIProxyAPI
+cd /opt/cpa-claude-proxy
+docker compose up -d
+docker compose restart cpa-claude-proxy
+```
+
+只更新前端时，不需要重启也能被静态文件读取；但为了让部署行为一致，仍建议重启一次：
+
+```bash
+install -m 0644 /tmp/cpa-claude-stage/management.html /opt/cpa-claude-proxy/static/management.html
+cd /opt/cpa-claude-proxy
+docker compose restart cpa-claude-proxy
+```
+
+### 8. 写入提交记录
 
 ```bash
 cat > /opt/cpa-claude-proxy/DEPLOYED_COMMITS <<EOF
@@ -127,15 +188,23 @@ deployed_at=$(date -Is)
 EOF
 ```
 
-8. 清理临时目录。
+### 9. 清理临时目录
 
 ```bash
 rm -rf /tmp/cpa-claude-stage
 ```
 
+本机上传临时目录也应清理：
+
+```powershell
+Remove-Item -LiteralPath 'C:\tmp\cpa-prod-deploy' -Recurse -Force
+```
+
 ## 标准验证流程
 
 每次部署或排障后执行：
+
+服务器本机验证：
 
 ```bash
 docker ps --filter name=cpa-claude-proxy --format 'table {{.Names}}\t{{.Image}}\t{{.Ports}}\t{{.Status}}'
@@ -143,6 +212,13 @@ ss -lntp | grep ':8318'
 curl -sS -o /dev/null -w 'healthz %{http_code}\n' --max-time 10 http://127.0.0.1:8318/healthz
 curl -sS -o /dev/null -w 'management %{http_code}\n' --max-time 10 http://127.0.0.1:8318/management.html
 find /opt/cpa-claude-proxy/auths -maxdepth 1 -type f -printf '%f\n' | sort
+```
+
+本机公网验证：
+
+```powershell
+curl.exe -sS -o NUL -w "healthz %{http_code}\n" --max-time 10 http://23.153.36.12:8318/healthz
+curl.exe -sS -o NUL -w "management %{http_code}\n" --max-time 10 http://23.153.36.12:8318/management.html
 ```
 
 预期：
@@ -222,3 +298,5 @@ docker compose up -d
 - 更新时只操作 `/opt/cpa-claude-proxy` 和 `/opt/cpa-claude-proxy-backups`。
 - 不要改 `/opt/new-api-production`、`/opt/sub2api-production`、Coolify 目录或相关容器。
 - 账号、代理、管理密钥和客户端 API Key 由旧服务器配置/数据迁移而来，后续应通过管理面板维护。
+- 前端源码仓库是 `F:\claude反代\Cli-Proxy-API-Management-Center`，不是后端仓库内的 `static` 目录。
+- 后端源码仓库是 `F:\claude反代\CLIProxyAPI`，生产服务器不要保存 GitHub 凭据。

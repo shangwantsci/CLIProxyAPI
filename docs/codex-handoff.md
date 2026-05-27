@@ -26,9 +26,9 @@
 - 生产入口：`http://23.153.36.12:8318/management.html`
 - 健康检查：`http://23.153.36.12:8318/healthz`
 - SSH：`root@23.153.36.12:41629`
-- 后端部署提交：`1bdb365c`
+- 后端部署提交：`4a188fe5`
 - 前端部署提交：`00956ca`
-- 最近一次账号备份：`/opt/cpa-claude-proxy-backups/auths-20260527-160019.tgz`
+- 最近一次账号备份：`/opt/cpa-claude-proxy-backups/auths-20260527-165703.tgz`
 
 不要把 SSH 密码、管理密码、API Key、Claude token 或代理密码写进任何文档或提交。
 
@@ -57,6 +57,10 @@ cat /opt/cpa-claude-proxy/DEPLOYED_COMMITS
 - `1bdb365c Improve Claude Code mimicry and billable usage`
   - 对齐本机 Claude Code `2.1.152` 指纹、system prompt、headers 和 CCH 形态。
   - 注意：该提交中的 token usage projection 曾把 Claude cache breakdown 清零，导致 cctest 显示无缓存和计费倍率异常。后续修复的硬规则是：只在上游没有 cache breakdown 时才估算 billable input；一旦上游返回 cache create/read/cached 字段，Claude 原生响应、OpenAI 兼容响应和 usage queue 都必须保留 Anthropic cache 语义。
+- `4a188fe5 fix: preserve Claude cache usage accounting`
+  - 修复 `1bdb365c` 引入的 token usage regression。
+  - Claude 原生、OpenAI Chat Completions、OpenAI Responses 和 usage queue 在上游返回 cache breakdown 时都保留 Anthropic cache 语义。
+  - 已部署到 `23.153.36.12:8318`，部署记录见服务器 `/opt/cpa-claude-proxy/DEPLOYED_COMMITS`。
 
 ## 常用命令
 
