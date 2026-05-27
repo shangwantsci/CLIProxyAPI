@@ -94,6 +94,10 @@ type openAIUsageFields struct {
 	ClaudeSemantic        bool
 }
 
+func (u claudeUsageTokens) hasCacheBreakdown() bool {
+	return u.CacheCreationInputTokens > 0 || u.CacheReadInputTokens > 0 || u.CacheCreation5mTokens > 0 || u.CacheCreation1hTokens > 0
+}
+
 func openAIUsageWithBillableInput(ctx context.Context, modelName string, originalRequestRawJSON []byte, usage claudeUsageTokens) openAIUsageFields {
 	promptTokens, completionTokens, totalTokens, cachedTokens := usage.OpenAIUsage()
 	fields := openAIUsageFields{
@@ -104,6 +108,17 @@ func openAIUsageWithBillableInput(ctx context.Context, modelName string, origina
 	}
 	billableInput, ok := helps.ClaudeBillableInputTokens(ctx, modelName, "openai", originalRequestRawJSON)
 	if !ok {
+		return fields
+	}
+	if usage.hasCacheBreakdown() {
+		fields.PromptTokens = usage.InputTokens
+		fields.CompletionTokens = usage.OutputTokens
+		fields.TotalTokens = usage.InputTokens + usage.OutputTokens
+		fields.CachedTokens = usage.CacheReadInputTokens
+		fields.CacheCreationTokens = usage.CacheCreationInputTokens
+		fields.CacheCreation5mTokens = usage.CacheCreation5mTokens
+		fields.CacheCreation1hTokens = usage.CacheCreation1hTokens
+		fields.ClaudeSemantic = true
 		return fields
 	}
 	fields.PromptTokens = billableInput

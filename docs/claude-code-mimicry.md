@@ -215,11 +215,20 @@ context-1m-2025-08-07
 - Claude 原生流式响应中的 `thinking_delta`、`signature_delta` 不做结构改写；usage 重写只处理 `usage` 或 `message.usage` 节点。
 - token 统计读取 `message_start.message.usage` 和后续 `message_delta.usage`，再合并 input/output/cache 字段。
 - fallback total 会按 `input + output + reasoning + cache_creation + cache_read` 归一化。
-- `claude-billable-usage` 默认开启时，返回给下游用户和 usage queue 的 usage 使用 customer-facing billable projection：
-  - `input_tokens` / OpenAI `prompt_tokens` / Responses `input_tokens` 改为按原始下游请求估算的输入 token。
-  - `cache_creation_input_tokens`、`cache_read_input_tokens`、`cached_tokens` 以及 OpenAI 兼容层的 `cached_tokens`/`cached_creation_tokens` 不再暴露为用户计费字段，避免把本项目注入的 Claude Code system prompt、billing header、ephemeral cache 成本算给用户。
-  - usage queue 发布前同样应用该 projection；原始上游 usage 仍保留在 API response chunk / 请求日志链路中，供排障和账号健康分析使用。
+- `claude-billable-usage` 默认开启，但它不能破坏 Anthropic cache 语义：
+  - 如果上游 usage 中存在 `cache_creation_input_tokens`、`cache_read_input_tokens`、`cached_tokens` 或 `cache_creation.ephemeral_*`，说明 Anthropic 已经返回 cache breakdown。此时必须保留上游的 uncached `input_tokens` 和 cache create/read 字段，不能为了“扣除代理注入 token”把它们清零或改成完整上下文输入。
+  - Claude 原生响应、OpenAI Chat Completions 兼容响应、OpenAI Responses 兼容响应、usage queue 都遵守同一规则。
+  - OpenAI 兼容层在保留 Claude cache breakdown 时使用 Anthropic 语义：`prompt_tokens` / Responses `input_tokens` 代表上游 uncached input；`cached_tokens`、`cached_creation_tokens`、`claude_cache_creation_5_m_tokens`、`claude_cache_creation_1_h_tokens` 单独暴露；并写入 `usage_semantic: "anthropic"`、`usage_source: "claude"`。
+  - 只有在上游没有任何 cache breakdown 时，才允许把 `input_tokens` / `prompt_tokens` / Responses `input_tokens` 改为按原始下游请求估算的输入 token，用于避免把 Claude Code wrapper/system/billing blocks 算给用户。
 - 2026-05-27 已对齐 sub2api 最新更新中的 `message_start` usage 读取思路；这里的“对齐 sub2api”只指 token usage/计费语义，不指 Claude Code 伪装策略。sub2api 的长上下文美元价格倍率修复不直接适用于本项目，因为本项目当前记录 token 明细，不在该路径内做本地美元计价。
+
+事故复盘与硬性约束：
+
+- 2026-05-27 的 `1bdb365c` 曾错误地把 cache breakdown 清零，导致 cctest 显示 `缓存创建=0`、`缓存读取=0`、命中率 `0%`、实际消耗倍率异常升高。这是错误实现，后续不得重复。
+- 修改 token usage、Claude Code system prompt、cache_control、CCH signing 或 OpenAI/Responses 翻译层时，必须跑以下回归测试，确认 cache breakdown 没有被抹掉：
+  - `go test ./internal/runtime/executor/helps -run "TestRewriteClaudeUsageForBillablePreservesClaudeCacheBreakdown|TestRewriteClaudeStreamUsageForBillablePreservesClaudeCacheBreakdown|TestRewriteClaudeStreamUsageForBillablePreservesCacheWithoutInventingInput|TestRewriteClaudeStreamUsageForBillableMessageStartUsage|TestClaudeBillableUsageDetailPreservesClaudeCacheBreakdown"`
+  - `go test ./internal/translator/claude/openai/chat-completions -run "TestConvertClaudeResponseToOpenAINonStream_PreservesClaudeCacheBreakdownWhenBillableInputEnabled"`
+  - `go test ./internal/translator/claude/openai/responses -run "TestConvertClaudeResponseToOpenAIResponsesNonStream_PreservesClaudeCacheBreakdownWhenBillableInputEnabled|TestConvertClaudeResponseToOpenAIResponsesStream_PreservesClaudeCacheBreakdownWhenBillableInputEnabled"`
 
 ### 6. cloak 模式
 

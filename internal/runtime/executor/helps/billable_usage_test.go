@@ -22,7 +22,7 @@ func TestEstimateClaudeBillableInputTokensShortMessage(t *testing.T) {
 	}
 }
 
-func TestRewriteClaudeUsageForBillableDropsProxyCacheBreakdown(t *testing.T) {
+func TestRewriteClaudeUsageForBillablePreservesClaudeCacheBreakdown(t *testing.T) {
 	ctx := WithClaudeBillableUsage(context.Background(), true, "claude-opus-4-7", "claude", []byte(`{
 		"model":"claude-opus-4-7",
 		"max_tokens":50,
@@ -32,14 +32,14 @@ func TestRewriteClaudeUsageForBillableDropsProxyCacheBreakdown(t *testing.T) {
 
 	out := RewriteClaudeUsageForBillable(ctx, raw)
 
-	if got := gjson.GetBytes(out, "usage.input_tokens").Int(); got <= 0 || got >= 20 {
-		t.Fatalf("billable input_tokens = %d, want small positive count; out=%s", got, string(out))
+	if got := gjson.GetBytes(out, "usage.input_tokens").Int(); got != 13 {
+		t.Fatalf("input_tokens = %d, want upstream uncached input 13; out=%s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "usage.cache_creation_input_tokens").Int(); got != 0 {
-		t.Fatalf("cache_creation_input_tokens = %d, want 0", got)
+	if got := gjson.GetBytes(out, "usage.cache_creation_input_tokens").Int(); got != 2194 {
+		t.Fatalf("cache_creation_input_tokens = %d, want 2194", got)
 	}
-	if got := gjson.GetBytes(out, "usage.cache_read_input_tokens").Int(); got != 0 {
-		t.Fatalf("cache_read_input_tokens = %d, want 0", got)
+	if got := gjson.GetBytes(out, "usage.cache_read_input_tokens").Int(); got != 100 {
+		t.Fatalf("cache_read_input_tokens = %d, want 100", got)
 	}
 	if got := gjson.GetBytes(out, "usage.output_tokens").Int(); got != 16 {
 		t.Fatalf("output_tokens = %d, want 16", got)
@@ -64,7 +64,7 @@ func TestRewriteClaudeUsageForBillableDropsWrapperInputWhenNoCacheBreakdown(t *t
 	}
 }
 
-func TestRewriteClaudeStreamUsageForBillable(t *testing.T) {
+func TestRewriteClaudeStreamUsageForBillablePreservesClaudeCacheBreakdown(t *testing.T) {
 	ctx := WithClaudeBillableUsage(context.Background(), true, "claude-opus-4-7", "claude", []byte(`{
 		"messages":[{"role":"user","content":"hi"}]
 	}`))
@@ -73,14 +73,14 @@ func TestRewriteClaudeStreamUsageForBillable(t *testing.T) {
 	out := RewriteClaudeStreamUsageForBillable(ctx, line)
 
 	payload := jsonPayload(out)
-	if got := gjson.GetBytes(payload, "usage.input_tokens").Int(); got <= 0 || got >= 20 {
-		t.Fatalf("stream input_tokens = %d, want small billable input; out=%s", got, string(out))
+	if got := gjson.GetBytes(payload, "usage.input_tokens").Int(); got != 13 {
+		t.Fatalf("stream input_tokens = %d, want upstream uncached input 13; out=%s", got, string(out))
 	}
-	if got := gjson.GetBytes(payload, "usage.cache_creation_input_tokens").Int(); got != 0 {
-		t.Fatalf("stream cache_creation_input_tokens = %d, want 0", got)
+	if got := gjson.GetBytes(payload, "usage.cache_creation_input_tokens").Int(); got != 31 {
+		t.Fatalf("stream cache_creation_input_tokens = %d, want 31", got)
 	}
-	if got := gjson.GetBytes(payload, "usage.cache_read_input_tokens").Int(); got != 0 {
-		t.Fatalf("stream cache_read_input_tokens = %d, want 0", got)
+	if got := gjson.GetBytes(payload, "usage.cache_read_input_tokens").Int(); got != 22 {
+		t.Fatalf("stream cache_read_input_tokens = %d, want 22", got)
 	}
 }
 
@@ -101,7 +101,7 @@ func TestRewriteClaudeStreamUsageForBillableDoesNotInventInputTokens(t *testing.
 	}
 }
 
-func TestRewriteClaudeStreamUsageForBillableDropsCacheWithoutInventingInput(t *testing.T) {
+func TestRewriteClaudeStreamUsageForBillablePreservesCacheWithoutInventingInput(t *testing.T) {
 	ctx := WithClaudeBillableUsage(context.Background(), true, "claude-opus-4-7", "claude", []byte(`{
 		"messages":[{"role":"user","content":"hi"}]
 	}`))
@@ -113,23 +113,23 @@ func TestRewriteClaudeStreamUsageForBillableDropsCacheWithoutInventingInput(t *t
 	if gjson.GetBytes(payload, "usage.input_tokens").Exists() {
 		t.Fatalf("message_delta cache usage unexpectedly gained input_tokens; out=%s", string(out))
 	}
-	if got := gjson.GetBytes(payload, "usage.cache_creation_input_tokens").Int(); got != 0 {
-		t.Fatalf("stream cache_creation_input_tokens = %d, want 0", got)
+	if got := gjson.GetBytes(payload, "usage.cache_creation_input_tokens").Int(); got != 31 {
+		t.Fatalf("stream cache_creation_input_tokens = %d, want 31", got)
 	}
-	if got := gjson.GetBytes(payload, "usage.cache_read_input_tokens").Int(); got != 0 {
-		t.Fatalf("stream cache_read_input_tokens = %d, want 0", got)
+	if got := gjson.GetBytes(payload, "usage.cache_read_input_tokens").Int(); got != 22 {
+		t.Fatalf("stream cache_read_input_tokens = %d, want 22", got)
 	}
-	if got := gjson.GetBytes(payload, "usage.cached_tokens").Int(); got != 0 {
-		t.Fatalf("stream cached_tokens = %d, want 0", got)
+	if got := gjson.GetBytes(payload, "usage.cached_tokens").Int(); got != 22 {
+		t.Fatalf("stream cached_tokens = %d, want 22", got)
 	}
-	if got := gjson.GetBytes(payload, "usage.total_tokens").Int(); got != 4 {
-		t.Fatalf("stream total_tokens = %d, want output-only total 4", got)
+	if got := gjson.GetBytes(payload, "usage.total_tokens").Int(); got != 57 {
+		t.Fatalf("stream total_tokens = %d, want original total 57", got)
 	}
-	if got := gjson.GetBytes(payload, "usage.cache_creation.ephemeral_5m_input_tokens").Int(); got != 0 {
-		t.Fatalf("stream cache_creation ephemeral_5m = %d, want 0", got)
+	if got := gjson.GetBytes(payload, "usage.cache_creation.ephemeral_5m_input_tokens").Int(); got != 9 {
+		t.Fatalf("stream cache_creation ephemeral_5m = %d, want 9", got)
 	}
-	if got := gjson.GetBytes(payload, "usage.cache_creation.ephemeral_1h_input_tokens").Int(); got != 0 {
-		t.Fatalf("stream cache_creation ephemeral_1h = %d, want 0", got)
+	if got := gjson.GetBytes(payload, "usage.cache_creation.ephemeral_1h_input_tokens").Int(); got != 10 {
+		t.Fatalf("stream cache_creation ephemeral_1h = %d, want 10", got)
 	}
 }
 
@@ -142,27 +142,27 @@ func TestRewriteClaudeStreamUsageForBillableMessageStartUsage(t *testing.T) {
 	out := RewriteClaudeStreamUsageForBillable(ctx, line)
 
 	payload := jsonPayload(out)
-	if got := gjson.GetBytes(payload, "message.usage.input_tokens").Int(); got <= 0 || got >= 20 {
-		t.Fatalf("message_start input_tokens = %d, want small billable input; out=%s", got, string(out))
+	if got := gjson.GetBytes(payload, "message.usage.input_tokens").Int(); got != 13 {
+		t.Fatalf("message_start input_tokens = %d, want upstream uncached input 13; out=%s", got, string(out))
 	}
-	if got := gjson.GetBytes(payload, "message.usage.cache_creation_input_tokens").Int(); got != 0 {
-		t.Fatalf("message_start cache_creation_input_tokens = %d, want 0", got)
+	if got := gjson.GetBytes(payload, "message.usage.cache_creation_input_tokens").Int(); got != 31 {
+		t.Fatalf("message_start cache_creation_input_tokens = %d, want 31", got)
 	}
-	if got := gjson.GetBytes(payload, "message.usage.cache_creation.ephemeral_5m_input_tokens").Int(); got != 0 {
-		t.Fatalf("message_start cache_creation ephemeral_5m = %d, want 0", got)
+	if got := gjson.GetBytes(payload, "message.usage.cache_creation.ephemeral_5m_input_tokens").Int(); got != 9 {
+		t.Fatalf("message_start cache_creation ephemeral_5m = %d, want 9", got)
 	}
-	if got := gjson.GetBytes(payload, "message.usage.cache_creation.ephemeral_1h_input_tokens").Int(); got != 0 {
-		t.Fatalf("message_start cache_creation ephemeral_1h = %d, want 0", got)
+	if got := gjson.GetBytes(payload, "message.usage.cache_creation.ephemeral_1h_input_tokens").Int(); got != 10 {
+		t.Fatalf("message_start cache_creation ephemeral_1h = %d, want 10", got)
 	}
-	if got := gjson.GetBytes(payload, "message.usage.cache_read_input_tokens").Int(); got != 0 {
-		t.Fatalf("message_start cache_read_input_tokens = %d, want 0", got)
+	if got := gjson.GetBytes(payload, "message.usage.cache_read_input_tokens").Int(); got != 22 {
+		t.Fatalf("message_start cache_read_input_tokens = %d, want 22", got)
 	}
 	if got := gjson.GetBytes(payload, "message.usage.output_tokens").Int(); got != 0 {
 		t.Fatalf("message_start output_tokens = %d, want 0", got)
 	}
 }
 
-func TestClaudeBillableUsageDetailDropsProxyCacheAndRecomputesTotal(t *testing.T) {
+func TestClaudeBillableUsageDetailPreservesClaudeCacheBreakdown(t *testing.T) {
 	ctx := WithClaudeBillableUsage(context.Background(), true, "claude-opus-4-7", "claude", []byte(`{
 		"messages":[{"role":"user","content":"hi"}]
 	}`))
@@ -178,15 +178,14 @@ func TestClaudeBillableUsageDetailDropsProxyCacheAndRecomputesTotal(t *testing.T
 
 	out := ClaudeBillableUsageDetail(ctx, "claude-opus-4-7", "claude", nil, detail)
 
-	if out.InputTokens <= 0 || out.InputTokens >= 20 {
-		t.Fatalf("InputTokens = %d, want small billable count", out.InputTokens)
+	if out.InputTokens != 13 {
+		t.Fatalf("InputTokens = %d, want upstream uncached input 13", out.InputTokens)
 	}
-	if out.CachedTokens != 0 || out.CacheReadTokens != 0 || out.CacheCreationTokens != 0 {
-		t.Fatalf("cache fields not zeroed: %+v", out)
+	if out.CachedTokens != 100 || out.CacheReadTokens != 100 || out.CacheCreationTokens != 2194 {
+		t.Fatalf("cache fields not preserved: %+v", out)
 	}
-	wantTotal := out.InputTokens + out.OutputTokens + out.ReasoningTokens
-	if out.TotalTokens != wantTotal {
-		t.Fatalf("TotalTokens = %d, want %d; detail=%+v", out.TotalTokens, wantTotal, out)
+	if out.TotalTokens != 2426 {
+		t.Fatalf("TotalTokens = %d, want original total 2426; detail=%+v", out.TotalTokens, out)
 	}
 }
 

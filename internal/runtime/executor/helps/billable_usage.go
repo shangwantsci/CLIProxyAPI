@@ -106,6 +106,9 @@ func ClaudeBillableInputTokens(ctx context.Context, fallbackModel, fallbackSourc
 }
 
 func ClaudeBillableUsageDetail(ctx context.Context, fallbackModel, fallbackSourceFormat string, fallbackOriginal []byte, detail usage.Detail) usage.Detail {
+	if usageDetailHasClaudeCacheBreakdown(detail) {
+		return normalizeUsageDetailTotal(detail)
+	}
 	count, ok := ClaudeBillableInputTokens(ctx, fallbackModel, fallbackSourceFormat, fallbackOriginal)
 	if !ok {
 		return normalizeUsageDetailTotal(detail)
@@ -145,6 +148,9 @@ func RewriteClaudeUsageForBillable(ctx context.Context, payload []byte) []byte {
 func rewriteClaudeUsageAtPathForBillable(payload []byte, path string, count int64) ([]byte, bool) {
 	usageNode := gjson.GetBytes(payload, path)
 	if !usageNode.Exists() {
+		return payload, false
+	}
+	if claudeUsageHasCacheBreakdown(usageNode) {
 		return payload, false
 	}
 	out := payload
@@ -190,6 +196,20 @@ func rewriteClaudeUsageAtPathForBillable(payload []byte, path string, count int6
 		changed = true
 	}
 	return out, changed
+}
+
+func claudeUsageHasCacheBreakdown(usageNode gjson.Result) bool {
+	return usageNode.Get("cache_creation_input_tokens").Int() > 0 ||
+		usageNode.Get("cache_read_input_tokens").Int() > 0 ||
+		usageNode.Get("cached_tokens").Int() > 0 ||
+		usageNode.Get("cache_creation.ephemeral_5m_input_tokens").Int() > 0 ||
+		usageNode.Get("cache_creation.ephemeral_1h_input_tokens").Int() > 0
+}
+
+func usageDetailHasClaudeCacheBreakdown(detail usage.Detail) bool {
+	return detail.CachedTokens > 0 ||
+		detail.CacheReadTokens > 0 ||
+		detail.CacheCreationTokens > 0
 }
 
 func RewriteClaudeStreamUsageForBillable(ctx context.Context, line []byte) []byte {

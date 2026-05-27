@@ -27,6 +27,10 @@ auths/*
 
 # Documentation
 docs/*
+!docs/production-deployment-23.153.36.12.md
+!docs/project-file-map.md
+!docs/codex-handoff.md
+!docs/claude-code-mimicry.md
 AGENTS.md
 CLAUDE.md
 GEMINI.md

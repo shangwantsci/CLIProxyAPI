@@ -5,6 +5,32 @@ Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with 
 ## Repository
 - GitHub: https://github.com/router-for-me/CLIProxyAPI
 
+## Project Memory Docs
+
+This fork has project-operation docs that must be treated as working memory for future Codex sessions. These fork-specific operation docs are intentionally written in Chinese for the project owner; keep their language unless the owner asks otherwise. Read the relevant document before changing code, deploying, or answering project-structure questions:
+
+- `docs/codex-handoff.md` — first-stop handoff document for a new Codex window. It records the fork goal, local repositories, current production state, recent important commits, known pitfalls, and takeover checklist.
+- `docs/project-file-map.md` — file map for the backend/frontend split. Read this before locating files or deciding whether a task belongs in backend or frontend. This is the guardrail against editing the wrong repository or the wrong frontend page.
+- `docs/production-deployment-23.153.36.12.md` — standard production deployment and rollback flow for `23.153.36.12:8318`. Read this before any server update. Never write SSH passwords, management passwords, API keys, Claude tokens, or proxy passwords into docs or commits.
+- `docs/claude-code-mimicry.md` — current Claude Code compatibility and fingerprint strategy. Read this before touching Claude headers, device profile, system prompt, cloak behavior, beta tokens, CCH signing, or mimicry audit/guard logic.
+- `F:\claude反代\Cli-Proxy-API-Management-Center\docs\claude-account-pool-maintenance.md` — frontend account-pool maintenance map. Read this before changing the production management UI, especially account pool, probe jobs, quota display, detail drawers, settings modals, or bulk actions.
+
+Keep these docs current when behavior changes. If deployed commits, server paths, frontend routes, Claude Code fingerprint defaults, or account-health semantics change, update the relevant doc in the same work. If a doc conflicts with live code or server state, verify the source of truth, fix the doc, and call out the correction.
+
+## Token Usage Guardrail
+
+Claude token accounting is a production-sensitive area. Before changing Claude Code mimicry, system prompt injection, `cache_control`, CCH signing, usage parsing, billable usage projection, or OpenAI/Responses Claude translators, read `docs/claude-code-mimicry.md` section `5.2 thinking/signature 与 token usage`.
+
+Never zero, remove, or hide Anthropic cache breakdown fields in user-visible usage or the usage queue when upstream returned them. These fields include `cache_creation_input_tokens`, `cache_read_input_tokens`, `cached_tokens`, `cache_creation.ephemeral_5m_input_tokens`, `cache_creation.ephemeral_1h_input_tokens`, OpenAI-compatible `prompt_tokens_details.cached_tokens`, and `cached_creation_tokens`. Billable projection may rewrite input tokens only when upstream did not return any cache breakdown.
+
+Required regression tests for Claude token usage/cache changes:
+
+```bash
+go test ./internal/runtime/executor/helps -run "TestRewriteClaudeUsageForBillablePreservesClaudeCacheBreakdown|TestRewriteClaudeStreamUsageForBillablePreservesClaudeCacheBreakdown|TestRewriteClaudeStreamUsageForBillablePreservesCacheWithoutInventingInput|TestRewriteClaudeStreamUsageForBillableMessageStartUsage|TestClaudeBillableUsageDetailPreservesClaudeCacheBreakdown"
+go test ./internal/translator/claude/openai/chat-completions -run "TestConvertClaudeResponseToOpenAINonStream_PreservesClaudeCacheBreakdownWhenBillableInputEnabled"
+go test ./internal/translator/claude/openai/responses -run "TestConvertClaudeResponseToOpenAIResponsesNonStream_PreservesClaudeCacheBreakdownWhenBillableInputEnabled|TestConvertClaudeResponseToOpenAIResponsesStream_PreservesClaudeCacheBreakdownWhenBillableInputEnabled"
+```
+
 ## Commands
 ```bash
 gofmt -w . # Format (required after Go changes)
