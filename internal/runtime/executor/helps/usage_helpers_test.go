@@ -303,6 +303,26 @@ func TestUsageReporterBuildRecordIncludesRequestedModelAlias(t *testing.T) {
 	}
 }
 
+func TestUsageReporterBuildRecordIncludesCacheTokensInFallbackTotal(t *testing.T) {
+	reporter := &UsageReporter{
+		provider:    "claude",
+		model:       "claude-opus-4-7",
+		requestedAt: time.Now(),
+	}
+
+	record := reporter.buildRecord(usage.Detail{
+		InputTokens:         2,
+		OutputTokens:        3,
+		CacheCreationTokens: 5,
+		CacheReadTokens:     7,
+		CachedTokens:        7,
+	}, false)
+
+	if record.Detail.TotalTokens != 17 {
+		t.Fatalf("total tokens = %d, want input+output+cache_creation+cache_read 17", record.Detail.TotalTokens)
+	}
+}
+
 func TestUsageReporterBuildAdditionalModelRecordSkipsZeroTokens(t *testing.T) {
 	reporter := &UsageReporter{
 		provider:    "codex",

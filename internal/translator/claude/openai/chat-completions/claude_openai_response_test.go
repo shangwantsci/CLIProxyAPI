@@ -143,7 +143,7 @@ func TestConvertClaudeResponseToOpenAINonStream_UsageMergesMessageStartUsage(t *
 	}
 }
 
-func TestConvertClaudeResponseToOpenAINonStream_PreservesCacheBreakdownWhenBillableInputEnabled(t *testing.T) {
+func TestConvertClaudeResponseToOpenAINonStream_DropsProxyCacheBreakdownWhenBillableInputEnabled(t *testing.T) {
 	originalReq := []byte(`{"model":"claude-opus-4-7","messages":[{"role":"user","content":"hi"}],"max_tokens":40}`)
 	ctx := helps.WithClaudeBillableUsage(context.Background(), true, "claude-opus-4-7", "openai", originalReq)
 	rawJSON := []byte("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_123\",\"model\":\"claude-opus-4-7\"}}\n" +
@@ -154,17 +154,17 @@ func TestConvertClaudeResponseToOpenAINonStream_PreservesCacheBreakdownWhenBilla
 
 	out := ConvertClaudeResponseToOpenAINonStream(ctx, "claude-opus-4-7", originalReq, nil, rawJSON, nil)
 
-	if got := gjson.GetBytes(out, "usage.prompt_tokens").Int(); got != 13 {
-		t.Fatalf("prompt_tokens = %d, want upstream uncached input; out=%s", got, string(out))
+	if got := gjson.GetBytes(out, "usage.prompt_tokens").Int(); got <= 0 || got >= 20 {
+		t.Fatalf("prompt_tokens = %d, want small billable input; out=%s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "usage.prompt_tokens_details.cached_tokens").Int(); got != 22000 {
-		t.Fatalf("cached_tokens = %d, want 22000", got)
+	if got := gjson.GetBytes(out, "usage.prompt_tokens_details.cached_tokens").Int(); got != 0 {
+		t.Fatalf("cached_tokens = %d, want 0", got)
 	}
-	if got := gjson.GetBytes(out, "usage.prompt_tokens_details.cached_creation_tokens").Int(); got != 31 {
-		t.Fatalf("cached_creation_tokens = %d, want 31", got)
+	if gjson.GetBytes(out, "usage.prompt_tokens_details.cached_creation_tokens").Exists() {
+		t.Fatalf("cached_creation_tokens should not be exposed after billable rewrite; out=%s", string(out))
 	}
-	if got := gjson.GetBytes(out, "usage.usage_semantic").String(); got != "anthropic" {
-		t.Fatalf("usage_semantic = %q, want anthropic", got)
+	if gjson.GetBytes(out, "usage.usage_semantic").Exists() {
+		t.Fatalf("usage_semantic should not be exposed after billable rewrite; out=%s", string(out))
 	}
 	if got := gjson.GetBytes(out, "usage.completion_tokens").Int(); got != 4 {
 		t.Fatalf("completion_tokens = %d, want 4", got)

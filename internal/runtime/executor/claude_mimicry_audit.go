@@ -185,14 +185,8 @@ var (
 		text  string
 	}{
 		{"billing_header", ""},
-		{"identity", "You are Claude Code, Anthropic's official CLI for Claude."},
-		{"core_prompt", strings.Join([]string{
-			helps.ClaudeCodeIntro,
-			helps.ClaudeCodeSystem,
-			helps.ClaudeCodeDoingTasks,
-			helps.ClaudeCodeToneAndStyle,
-			helps.ClaudeCodeOutputEfficiency,
-		}, "\n\n")},
+		{"identity", helps.ClaudeCodeAgentIdentity},
+		{"core_prompt", helps.ClaudeCodeHarnessPrompt},
 	}
 )
 
@@ -209,7 +203,6 @@ var claudeAllowedUpstreamHeaderNames = map[string]struct{}{
 	"x-api-key":                                 {},
 	"x-app":                                     {},
 	"x-claude-code-session-id":                  {},
-	"x-client-request-id":                       {},
 	"x-stainless-arch":                          {},
 	"x-stainless-lang":                          {},
 	"x-stainless-os":                            {},
@@ -233,12 +226,12 @@ func BuildClaudeMimicryBaseline(model string, cfg *config.Config) ClaudeMimicryB
 		ExpectedBetaCount:     len(claudeCodeDefaultBetaTokens),
 		ExpectedBetas:         append([]string(nil), claudeCodeDefaultBetaTokens...),
 		ExpectedSystemHashes:  expectedClaudeSystemHashes(),
-		ExpectedTopFields:     []string{"thinking", "output_config", "context_management"},
+		ExpectedTopFields:     []string{"thinking", "output_config"},
 		ExpectedEfforts:       []string{"high", "xhigh", "max"},
 		ExpectedToolCountHint: "Claude Code core tools or MCP namespaced tools",
 	}
 	if strings.Contains(model, "haiku-4-5") {
-		baseline.ExpectedTopFields = []string{"thinking", "context_management"}
+		baseline.ExpectedTopFields = []string{"thinking"}
 		baseline.ExpectedEfforts = nil
 		baseline.ExpectedToolCountHint = "Claude Code extended tool surface"
 	}
@@ -664,7 +657,11 @@ func auditClaudeMimicryHeaders(headers http.Header) ClaudeMimicryHeaderAudit {
 		"X-Stainless-Lang",
 		"X-Stainless-Runtime",
 		"X-Claude-Code-Session-Id",
-		"x-client-request-id",
+		"Anthropic-Dangerous-Direct-Browser-Access",
+		"Accept",
+		"Accept-Encoding",
+		"Content-Type",
+		"Anthropic-Version",
 	} {
 		if strings.TrimSpace(headers.Get(name)) == "" {
 			audit.Missing = append(audit.Missing, name)

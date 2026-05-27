@@ -94,10 +94,6 @@ func mergeClaudeResponsesUsage(st *claudeToResponsesState, usage gjson.Result) {
 	}
 }
 
-func claudeResponsesHasCacheBreakdown(cacheCreationTokens, cacheReadTokens int64) bool {
-	return cacheCreationTokens > 0 || cacheReadTokens > 0
-}
-
 func setOpenAIResponsesUsageFields(payload []byte, path string, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, cacheCreation5mTokens, cacheCreation1hTokens int64, claudeSemantic bool) []byte {
 	out := payload
 	out, _ = sjson.SetBytes(out, path+".input_tokens", inputTokens)
@@ -481,15 +477,10 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			cacheCreation1hTokens := st.CacheCreation1hTokens
 			claudeSemantic := false
 			if rewrittenInput {
-				if claudeResponsesHasCacheBreakdown(st.CacheCreationInputTokens, st.CacheReadInputTokens) {
-					billableInputTokens = st.InputTokens
-					claudeSemantic = true
-				} else {
-					cachedTokens = 0
-					cacheCreationTokens = 0
-					cacheCreation5mTokens = 0
-					cacheCreation1hTokens = 0
-				}
+				cachedTokens = 0
+				cacheCreationTokens = 0
+				cacheCreation5mTokens = 0
+				cacheCreation1hTokens = 0
 			}
 			completed = setOpenAIResponsesUsageFields(completed, "response.usage", billableInputTokens, st.OutputTokens, cachedTokens, cacheCreationTokens, cacheCreation5mTokens, cacheCreation1hTokens, claudeSemantic)
 			if reasoningTokens > 0 {
@@ -776,15 +767,10 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(ctx context.Context, modelN
 	cacheCreationTokens := cacheCreate
 	claudeSemantic := false
 	if rewrittenInput {
-		if claudeResponsesHasCacheBreakdown(cacheCreate, cacheRead) {
-			billableInputTokens = inputTokens
-			claudeSemantic = true
-		} else {
-			cachedTokens = 0
-			cacheCreationTokens = 0
-			cacheCreate5m = 0
-			cacheCreate1h = 0
-		}
+		cachedTokens = 0
+		cacheCreationTokens = 0
+		cacheCreate5m = 0
+		cacheCreate1h = 0
 	}
 	out = setOpenAIResponsesUsageFields(out, "usage", billableInputTokens, outputTokens, cachedTokens, cacheCreationTokens, cacheCreate5m, cacheCreate1h, claudeSemantic)
 	if reasoningBuf.Len() > 0 {

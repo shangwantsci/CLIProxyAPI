@@ -154,12 +154,15 @@ func TestApplyClaudeHeaders_UsesConfiguredBaselineFingerprint(t *testing.T) {
 	if got := req.Header.Get("X-Claude-Code-Session-Id"); got != helps.CachedSessionID("key-baseline") {
 		t.Fatalf("X-Claude-Code-Session-Id = %q, want cached session id", got)
 	}
-	if got := req.Header.Get("x-client-request-id"); got == "" || got == "client-request" {
-		t.Fatalf("x-client-request-id = %q, want fresh request uuid", got)
+	if got := req.Header.Get("x-client-request-id"); got != "" {
+		t.Fatalf("x-client-request-id = %q, want omitted to match Claude Code 2.1.152", got)
+	}
+	if got := req.Header.Get("Anthropic-Dangerous-Direct-Browser-Access"); got != "true" {
+		t.Fatalf("Anthropic-Dangerous-Direct-Browser-Access = %q, want true", got)
 	}
 }
 
-func TestApplyClaudeHeaders_AddsFullClaudeCodeMimicryBetas(t *testing.T) {
+func TestApplyClaudeHeaders_AddsLatestClaudeCodeMimicryBetas(t *testing.T) {
 	req := newClaudeHeaderTestRequest(t, http.Header{
 		"Anthropic-Beta": []string{"custom-beta"},
 	})
@@ -168,10 +171,16 @@ func TestApplyClaudeHeaders_AddsFullClaudeCodeMimicryBetas(t *testing.T) {
 	got := req.Header.Get("Anthropic-Beta")
 	for _, beta := range []string{
 		"claude-code-20250219",
-		"oauth-2025-04-20",
 		"interleaved-thinking-2025-05-14",
-		"prompt-caching-scope-2026-01-05",
 		"effort-2025-11-24",
+	} {
+		if !strings.Contains(got, beta) {
+			t.Fatalf("Anthropic-Beta = %q, missing %s", got, beta)
+		}
+	}
+	for _, beta := range []string{
+		"oauth-2025-04-20",
+		"prompt-caching-scope-2026-01-05",
 		"context-management-2025-06-27",
 		"extended-cache-ttl-2025-04-11",
 		"fine-grained-tool-streaming-2025-05-14",
@@ -179,8 +188,8 @@ func TestApplyClaudeHeaders_AddsFullClaudeCodeMimicryBetas(t *testing.T) {
 		"fast-mode-2026-02-01",
 		"redact-thinking-2026-02-12",
 	} {
-		if !strings.Contains(got, beta) {
-			t.Fatalf("Anthropic-Beta = %q, missing %s", got, beta)
+		if strings.Contains(got, beta) {
+			t.Fatalf("Anthropic-Beta = %q, should not inject optional beta %s by default", got, beta)
 		}
 	}
 	if strings.Contains(got, "custom-beta") {
@@ -192,7 +201,7 @@ func TestApplyClaudeHeaders_DropsContext1MBetaFromClientAndBody(t *testing.T) {
 	req := newClaudeHeaderTestRequest(t, http.Header{
 		"Anthropic-Beta": []string{"custom-beta,context-1m-2025-08-07"},
 	})
-	applyClaudeHeaders(req, &cliproxyauth.Auth{}, "key-betas-filter", false, []string{"context-1m-2025-08-07", "body-beta"}, &config.Config{})
+	applyClaudeHeaders(req, &cliproxyauth.Auth{}, "key-betas-filter", false, []string{"context-1m-2025-08-07", "body-beta", "prompt-caching-scope-2026-01-05"}, &config.Config{})
 
 	got := req.Header.Get("Anthropic-Beta")
 	if strings.Contains(got, "context-1m-2025-08-07") {
@@ -203,7 +212,7 @@ func TestApplyClaudeHeaders_DropsContext1MBetaFromClientAndBody(t *testing.T) {
 			t.Fatalf("Anthropic-Beta = %q, should drop unknown beta %s", got, beta)
 		}
 	}
-	for _, beta := range []string{"claude-code-20250219", "oauth-2025-04-20"} {
+	for _, beta := range []string{"claude-code-20250219", "interleaved-thinking-2025-05-14", "effort-2025-11-24", "prompt-caching-scope-2026-01-05"} {
 		if !strings.Contains(got, beta) {
 			t.Fatalf("Anthropic-Beta = %q, missing %s", got, beta)
 		}
@@ -268,7 +277,7 @@ func TestApplyClaudeHeaders_DefaultDeviceProfileUsesCoherentBaseline(t *testing.
 	})
 	applyClaudeHeaders(req, &cliproxyauth.Auth{}, "key-default-fingerprint", false, nil, &config.Config{})
 
-	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.148 (external, cli)", "0.98.0", "v24.13.0", "MacOS", "arm64")
+	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.152 (external, sdk-cli)", "0.94.0", "v24.3.0", "Windows", "x64")
 }
 
 func TestApplyClaudeHeaders_TracksHighestClaudeCLIFingerprint(t *testing.T) {
@@ -597,9 +606,9 @@ func TestApplyClaudeHeaders_PersistsLearnedDeviceProfileToAuthMetadata(t *testin
 	}
 
 	officialReq := newClaudeHeaderTestRequest(t, http.Header{
-		"User-Agent":                  []string{"claude-cli/2.1.149 (external, cli)"},
-		"X-Stainless-Package-Version": []string{"0.99.0"},
-		"X-Stainless-Runtime-Version": []string{"v24.14.0"},
+		"User-Agent":                  []string{"claude-cli/2.1.153 (external, cli)"},
+		"X-Stainless-Package-Version": []string{"0.95.0"},
+		"X-Stainless-Runtime-Version": []string{"v24.4.0"},
 		"X-Stainless-Os":              []string{"Linux"},
 		"X-Stainless-Arch":            []string{"x64"},
 	})
@@ -609,13 +618,13 @@ func TestApplyClaudeHeaders_PersistsLearnedDeviceProfileToAuthMetadata(t *testin
 	if !ok {
 		t.Fatalf("metadata.claude_device_profile = %T, want map[string]any", auth.Metadata["claude_device_profile"])
 	}
-	if got, _ := profileMeta["user_agent"].(string); got != "claude-cli/2.1.149 (external, cli)" {
+	if got, _ := profileMeta["user_agent"].(string); got != "claude-cli/2.1.153 (external, cli)" {
 		t.Fatalf("metadata.claude_device_profile.user_agent = %q, want learned official UA", got)
 	}
-	if got, _ := profileMeta["os"].(string); got != "MacOS" {
+	if got, _ := profileMeta["os"].(string); got != "Windows" {
 		t.Fatalf("metadata.claude_device_profile.os = %q, want pinned baseline OS", got)
 	}
-	if got, _ := profileMeta["arch"].(string); got != "arm64" {
+	if got, _ := profileMeta["arch"].(string); got != "x64" {
 		t.Fatalf("metadata.claude_device_profile.arch = %q, want pinned baseline arch", got)
 	}
 	if got, _ := auth.Metadata["claude_device_profile_updated_at"].(string); got == "" {
@@ -627,7 +636,7 @@ func TestApplyClaudeHeaders_PersistsLearnedDeviceProfileToAuthMetadata(t *testin
 		"User-Agent": []string{"CherryStudio/1.0"},
 	})
 	applyClaudeHeaders(thirdPartyReq, auth, "key-metadata-profile", false, nil, cfg)
-	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.149 (external, cli)", "0.99.0", "v24.14.0", "MacOS", "arm64")
+	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.153 (external, cli)", "0.95.0", "v24.4.0", "Windows", "x64")
 }
 
 func TestApplyClaudeHeaders_ThirdPartyBaselineThenOfficialUpgradeKeepsPinnedPlatform(t *testing.T) {
@@ -1605,8 +1614,11 @@ func TestClaudeExecutor_CountTokens_AppliesClaudeCodeCloaking(t *testing.T) {
 	if strings.Contains(billingHeader, "cch=00000;") {
 		t.Fatalf("count_tokens billing header should be signed, got %q", billingHeader)
 	}
-	if blocks[1].Get("text").String() != "You are Claude Code, Anthropic's official CLI for Claude." {
+	if blocks[1].Get("text").String() != helps.ClaudeCodeAgentIdentity {
 		t.Fatalf("count_tokens agent block mismatch: %q", blocks[1].Get("text").String())
+	}
+	if got := blocks[1].Get("cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("count_tokens agent cache_control.type = %q, want ephemeral", got)
 	}
 }
 
@@ -1898,10 +1910,10 @@ func TestEnsureModelMaxTokens_SkipsUnregisteredModel(t *testing.T) {
 	}
 }
 
-// TestClaudeExecutor_ExecuteStream_SetsIdentityAcceptEncoding verifies that streaming
-// requests use Accept-Encoding: identity so the upstream cannot respond with a
-// compressed SSE body that would silently break the line scanner.
-func TestClaudeExecutor_ExecuteStream_SetsIdentityAcceptEncoding(t *testing.T) {
+// TestClaudeExecutor_ExecuteStream_MatchesClaudeCodeAcceptHeaders verifies that
+// streaming requests match Claude Code 2.1.152's latest request headers. The
+// executor decodes compressed upstream bodies before scanning SSE lines.
+func TestClaudeExecutor_ExecuteStream_MatchesClaudeCodeAcceptHeaders(t *testing.T) {
 	var gotEncoding, gotAccept string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotEncoding = r.Header.Get("Accept-Encoding")
@@ -1933,11 +1945,11 @@ func TestClaudeExecutor_ExecuteStream_SetsIdentityAcceptEncoding(t *testing.T) {
 		}
 	}
 
-	if gotEncoding != "identity" {
-		t.Errorf("Accept-Encoding = %q, want %q", gotEncoding, "identity")
+	if gotEncoding != "gzip, deflate, br, zstd" {
+		t.Errorf("Accept-Encoding = %q, want %q", gotEncoding, "gzip, deflate, br, zstd")
 	}
-	if gotAccept != "text/event-stream" {
-		t.Errorf("Accept = %q, want %q", gotAccept, "text/event-stream")
+	if gotAccept != "application/json" {
+		t.Errorf("Accept = %q, want %q", gotAccept, "application/json")
 	}
 }
 
@@ -2238,9 +2250,10 @@ func TestClaudeExecutor_ExecuteStream_GzipErrorBodyNoContentEncodingHeader(t *te
 	}
 }
 
-// TestClaudeExecutor_ExecuteStream_AcceptEncodingOverrideCannotBypassIdentity verifies that the
-// streaming executor enforces Accept-Encoding: identity regardless of auth.Attributes override.
-func TestClaudeExecutor_ExecuteStream_AcceptEncodingOverrideCannotBypassIdentity(t *testing.T) {
+// TestClaudeExecutor_ExecuteStream_AcceptEncodingOverrideCannotBypassClaudeCodeDefault
+// verifies that the streaming executor enforces Claude Code's latest compressed
+// Accept-Encoding list regardless of auth.Attributes override.
+func TestClaudeExecutor_ExecuteStream_AcceptEncodingOverrideCannotBypassClaudeCodeDefault(t *testing.T) {
 	var gotEncoding string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotEncoding = r.Header.Get("Accept-Encoding")
@@ -2272,19 +2285,13 @@ func TestClaudeExecutor_ExecuteStream_AcceptEncodingOverrideCannotBypassIdentity
 		}
 	}
 
-	if gotEncoding != "identity" {
-		t.Errorf("Accept-Encoding = %q; stream path must enforce identity regardless of auth.Attributes override", gotEncoding)
+	if gotEncoding != "gzip, deflate, br, zstd" {
+		t.Errorf("Accept-Encoding = %q; stream path must enforce Claude Code compressed accept list regardless of auth.Attributes override", gotEncoding)
 	}
 }
 
 func expectedClaudeCodeStaticPrompt() string {
-	return strings.Join([]string{
-		helps.ClaudeCodeIntro,
-		helps.ClaudeCodeSystem,
-		helps.ClaudeCodeDoingTasks,
-		helps.ClaudeCodeToneAndStyle,
-		helps.ClaudeCodeOutputEfficiency,
-	}, "\n\n")
+	return helps.ClaudeCodeHarnessPrompt
 }
 
 func expectedForwardedSystemReminder(text string) string {
@@ -2295,6 +2302,30 @@ As you answer the user's questions, you can use the following context from the s
 IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.
 </system-reminder>
 `, text)
+}
+
+func TestCheckSystemInstructionsWithMode_BillingFingerprintUsesFirstUserText(t *testing.T) {
+	const systemText = "0123S56Y890123456789Z"
+	const userText = "0123U56V890123456789W"
+	payload := []byte(`{
+		"system": "` + systemText + `",
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": "` + userText + `"}]}
+		]
+	}`)
+
+	out := checkSystemInstructionsWithMode(payload, false)
+	billingHeader := gjson.GetBytes(out, "system.0.text").String()
+	version := helps.DefaultClaudeVersion(nil)
+	want := fmt.Sprintf("cc_version=%s.%s;", version, computeFingerprint(userText, version))
+	wrong := fmt.Sprintf("cc_version=%s.%s;", version, computeFingerprint(systemText, version))
+
+	if !strings.Contains(billingHeader, want) {
+		t.Fatalf("billing header = %q, want first user text fingerprint %q", billingHeader, want)
+	}
+	if want != wrong && strings.Contains(billingHeader, wrong) {
+		t.Fatalf("billing header = %q, should not use system text fingerprint %q", billingHeader, wrong)
+	}
 }
 
 // Test case 1: String system prompt is preserved by forwarding it to the first user message
@@ -2319,14 +2350,17 @@ func TestCheckSystemInstructionsWithMode_StringSystemPreserved(t *testing.T) {
 	if !strings.Contains(blocks[0].Get("text").String(), "cc_version="+helps.DefaultClaudeVersion(nil)+".") {
 		t.Fatalf("blocks[0] should use current default Claude Code version, got %q", blocks[0].Get("text").String())
 	}
-	if blocks[1].Get("text").String() != "You are Claude Code, Anthropic's official CLI for Claude." {
+	if blocks[1].Get("text").String() != helps.ClaudeCodeAgentIdentity {
 		t.Fatalf("blocks[1] should be agent block, got %q", blocks[1].Get("text").String())
+	}
+	if got := blocks[1].Get("cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("blocks[1] cache_control.type = %q, want ephemeral", got)
 	}
 	if blocks[2].Get("text").String() != expectedClaudeCodeStaticPrompt() {
 		t.Fatalf("blocks[2] should be static Claude Code prompt, got %q", blocks[2].Get("text").String())
 	}
-	if blocks[2].Get("cache_control").Exists() {
-		t.Fatalf("blocks[2] should not have cache_control, got %s", blocks[2].Get("cache_control").Raw)
+	if got := blocks[2].Get("cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("blocks[2] cache_control.type = %q, want ephemeral", got)
 	}
 
 	if got := gjson.GetBytes(out, "messages.0.content").String(); got != expectedForwardedSystemReminder("You are a helpful assistant.")+"hi" {

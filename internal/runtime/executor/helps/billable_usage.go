@@ -5,6 +5,7 @@ import (
 	"context"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -104,6 +105,19 @@ func ClaudeBillableInputTokens(ctx context.Context, fallbackModel, fallbackSourc
 	return count, count > 0
 }
 
+func ClaudeBillableUsageDetail(ctx context.Context, fallbackModel, fallbackSourceFormat string, fallbackOriginal []byte, detail usage.Detail) usage.Detail {
+	count, ok := ClaudeBillableInputTokens(ctx, fallbackModel, fallbackSourceFormat, fallbackOriginal)
+	if !ok {
+		return normalizeUsageDetailTotal(detail)
+	}
+	detail.InputTokens = count
+	detail.CachedTokens = 0
+	detail.CacheReadTokens = 0
+	detail.CacheCreationTokens = 0
+	detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
+	return detail
+}
+
 func RewriteClaudeUsageForBillable(ctx context.Context, payload []byte) []byte {
 	if !gjson.ValidBytes(payload) {
 		return payload
@@ -133,9 +147,6 @@ func rewriteClaudeUsageAtPathForBillable(payload []byte, path string, count int6
 	if !usageNode.Exists() {
 		return payload, false
 	}
-	if claudeUsageHasCacheBreakdown(usageNode) {
-		return payload, false
-	}
 	out := payload
 	changed := false
 	if usageNode.Get("input_tokens").Exists() {
@@ -146,15 +157,39 @@ func rewriteClaudeUsageAtPathForBillable(payload []byte, path string, count int6
 		}
 		changed = true
 	}
+	for _, suffix := range []string{
+		"cache_creation_input_tokens",
+		"cache_read_input_tokens",
+		"cached_tokens",
+		"cache_creation.ephemeral_5m_input_tokens",
+		"cache_creation.ephemeral_1h_input_tokens",
+	} {
+		if !usageNode.Get(suffix).Exists() {
+			continue
+		}
+		var err error
+		out, err = sjson.SetBytes(out, path+"."+suffix, 0)
+		if err != nil {
+			return payload, false
+		}
+		changed = true
+	}
+	if usageNode.Get("total_tokens").Exists() {
+		total := usageNode.Get("output_tokens").Int()
+		if usageNode.Get("input_tokens").Exists() {
+			total += count
+		}
+		if reasoning := usageNode.Get("output_tokens_details.reasoning_tokens"); reasoning.Exists() {
+			total += reasoning.Int()
+		}
+		var err error
+		out, err = sjson.SetBytes(out, path+".total_tokens", total)
+		if err != nil {
+			return payload, false
+		}
+		changed = true
+	}
 	return out, changed
-}
-
-func claudeUsageHasCacheBreakdown(usageNode gjson.Result) bool {
-	return usageNode.Get("cache_creation_input_tokens").Int() > 0 ||
-		usageNode.Get("cache_read_input_tokens").Int() > 0 ||
-		usageNode.Get("cached_tokens").Int() > 0 ||
-		usageNode.Get("cache_creation.ephemeral_5m_input_tokens").Int() > 0 ||
-		usageNode.Get("cache_creation.ephemeral_1h_input_tokens").Int() > 0
 }
 
 func RewriteClaudeStreamUsageForBillable(ctx context.Context, line []byte) []byte {

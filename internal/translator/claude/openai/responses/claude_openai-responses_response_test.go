@@ -30,7 +30,7 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStream_RewritesUsageToBillable
 	}
 }
 
-func TestConvertClaudeResponseToOpenAIResponsesNonStream_PreservesCacheBreakdownWhenBillableInputEnabled(t *testing.T) {
+func TestConvertClaudeResponseToOpenAIResponsesNonStream_DropsProxyCacheBreakdownWhenBillableInputEnabled(t *testing.T) {
 	original := []byte(`{"model":"claude-opus-4-7","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
 	ctx := helps.WithClaudeBillableUsage(context.Background(), true, "claude-opus-4-7", "openai-response", original)
 	raw := []byte(strings.Join([]string{
@@ -43,20 +43,21 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStream_PreservesCacheBreakdown
 
 	out := ConvertClaudeResponseToOpenAIResponsesNonStream(ctx, "claude-opus-4-7", original, nil, raw, nil)
 
-	if got := gjson.GetBytes(out, "usage.input_tokens").Int(); got != 13 {
-		t.Fatalf("usage.input_tokens = %d, want upstream uncached input; out=%s", got, string(out))
+	if got := gjson.GetBytes(out, "usage.input_tokens").Int(); got <= 0 || got >= 30 {
+		t.Fatalf("usage.input_tokens = %d, want small billable count; out=%s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "usage.input_tokens_details.cached_tokens").Int(); got != 23855 {
-		t.Fatalf("usage cached_tokens = %d, want 23855; out=%s", got, string(out))
+	if got := gjson.GetBytes(out, "usage.input_tokens_details.cached_tokens").Int(); got != 0 {
+		t.Fatalf("usage cached_tokens = %d, want 0; out=%s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "usage.input_tokens_details.cached_creation_tokens").Int(); got != 422 {
-		t.Fatalf("usage cached_creation_tokens = %d, want 422; out=%s", got, string(out))
+	if gjson.GetBytes(out, "usage.input_tokens_details.cached_creation_tokens").Exists() {
+		t.Fatalf("usage cached_creation_tokens should not be exposed after billable rewrite; out=%s", string(out))
 	}
-	if got := gjson.GetBytes(out, "usage.usage_semantic").String(); got != "anthropic" {
-		t.Fatalf("usage_semantic = %q, want anthropic; out=%s", got, string(out))
+	if gjson.GetBytes(out, "usage.usage_semantic").Exists() {
+		t.Fatalf("usage_semantic should not be exposed after billable rewrite; out=%s", string(out))
 	}
-	if got := gjson.GetBytes(out, "usage.total_tokens").Int(); got != 18 {
-		t.Fatalf("usage.total_tokens = %d, want 18; out=%s", got, string(out))
+	wantTotal := gjson.GetBytes(out, "usage.input_tokens").Int() + 5
+	if got := gjson.GetBytes(out, "usage.total_tokens").Int(); got != wantTotal {
+		t.Fatalf("usage.total_tokens = %d, want %d; out=%s", got, wantTotal, string(out))
 	}
 }
 
@@ -102,7 +103,7 @@ func TestConvertClaudeResponseToOpenAIResponsesStream_RewritesUsageToBillableInp
 	}
 }
 
-func TestConvertClaudeResponseToOpenAIResponsesStream_PreservesCacheBreakdownWhenBillableInputEnabled(t *testing.T) {
+func TestConvertClaudeResponseToOpenAIResponsesStream_DropsProxyCacheBreakdownWhenBillableInputEnabled(t *testing.T) {
 	original := []byte(`{"model":"claude-opus-4-7","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
 	ctx := helps.WithClaudeBillableUsage(context.Background(), true, "claude-opus-4-7", "openai-response", original)
 	var param any
@@ -122,17 +123,17 @@ func TestConvertClaudeResponseToOpenAIResponsesStream_PreservesCacheBreakdownWhe
 	if len(completed) == 0 {
 		t.Fatalf("response.completed event not found: %q", chunks)
 	}
-	if got := gjson.GetBytes(completed, "response.usage.input_tokens").Int(); got != 13 {
-		t.Fatalf("response.usage.input_tokens = %d, want upstream uncached input; payload=%s", got, string(completed))
+	if got := gjson.GetBytes(completed, "response.usage.input_tokens").Int(); got <= 0 || got >= 30 {
+		t.Fatalf("response.usage.input_tokens = %d, want small billable count; payload=%s", got, string(completed))
 	}
-	if got := gjson.GetBytes(completed, "response.usage.input_tokens_details.cached_tokens").Int(); got != 23855 {
-		t.Fatalf("response.usage cached_tokens = %d, want 23855; payload=%s", got, string(completed))
+	if got := gjson.GetBytes(completed, "response.usage.input_tokens_details.cached_tokens").Int(); got != 0 {
+		t.Fatalf("response.usage cached_tokens = %d, want 0; payload=%s", got, string(completed))
 	}
-	if got := gjson.GetBytes(completed, "response.usage.input_tokens_details.cached_creation_tokens").Int(); got != 422 {
-		t.Fatalf("response.usage cached_creation_tokens = %d, want 422; payload=%s", got, string(completed))
+	if gjson.GetBytes(completed, "response.usage.input_tokens_details.cached_creation_tokens").Exists() {
+		t.Fatalf("response.usage cached_creation_tokens should not be exposed after billable rewrite; payload=%s", string(completed))
 	}
-	if got := gjson.GetBytes(completed, "response.usage.usage_semantic").String(); got != "anthropic" {
-		t.Fatalf("response.usage usage_semantic = %q, want anthropic; payload=%s", got, string(completed))
+	if gjson.GetBytes(completed, "response.usage.usage_semantic").Exists() {
+		t.Fatalf("response.usage usage_semantic should not be exposed after billable rewrite; payload=%s", string(completed))
 	}
 }
 

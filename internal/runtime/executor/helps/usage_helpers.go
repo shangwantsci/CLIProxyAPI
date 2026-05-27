@@ -104,7 +104,11 @@ func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 
 func normalizeUsageDetailTotal(detail usage.Detail) usage.Detail {
 	if detail.TotalTokens == 0 {
-		total := detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
+		cacheReadTokens := detail.CacheReadTokens
+		if cacheReadTokens == 0 {
+			cacheReadTokens = detail.CachedTokens
+		}
+		total := detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens + detail.CacheCreationTokens + cacheReadTokens
 		if total > 0 {
 			detail.TotalTokens = total
 		}
@@ -168,6 +172,7 @@ func (r *UsageReporter) publishRecord(ctx context.Context, record usage.Record) 
 }
 
 func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool, failures ...usage.Failure) usage.Record {
+	detail = normalizeUsageDetailTotal(detail)
 	var fail usage.Failure
 	if len(failures) > 0 {
 		fail = failures[0]
@@ -179,6 +184,7 @@ func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool, failures .
 }
 
 func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, failed bool, fail usage.Failure) usage.Record {
+	detail = normalizeUsageDetailTotal(detail)
 	if r == nil {
 		return usage.Record{Model: model, Detail: detail, Failed: failed, Fail: fail}
 	}

@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/andybalholm/brotli"
-	"github.com/google/uuid"
 	"github.com/klauspost/compress/zstd"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -399,10 +398,13 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			return resp, errValidate
 		}
 		if detail, ok := helps.MergeClaudeStreamUsageLines(data); ok {
+			detail = helps.ClaudeBillableUsageDetail(ctx, baseModel, from.String(), originalPayloadSource, detail)
 			reporter.Publish(ctx, detail)
 		}
 	} else {
-		reporter.Publish(ctx, helps.ParseClaudeUsage(data))
+		detail := helps.ParseClaudeUsage(data)
+		detail = helps.ClaudeBillableUsageDetail(ctx, baseModel, from.String(), originalPayloadSource, detail)
+		reporter.Publish(ctx, detail)
 	}
 	data = restoreClaudeOAuthToolNamesFromResponse(data, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
 	if from == to {
@@ -589,6 +591,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		defer func() {
 			recordStreamMimicryEvent("")
 			if streamUsageSeen && !streamFailed {
+				streamUsage = helps.ClaudeBillableUsageDetail(ctx, baseModel, from.String(), originalPayloadSource, streamUsage)
 				reporter.Publish(ctx, streamUsage)
 			}
 			if errClose := decodedBody.Close(); errClose != nil {
@@ -1134,21 +1137,30 @@ var claudeDroppedBetaTokens = map[string]struct{}{
 
 var claudeCodeDefaultBetaTokens = []string{
 	"claude-code-20250219",
-	"oauth-2025-04-20",
 	"interleaved-thinking-2025-05-14",
-	"prompt-caching-scope-2026-01-05",
 	"effort-2025-11-24",
-	"context-management-2025-06-27",
-	"extended-cache-ttl-2025-04-11",
-	"fine-grained-tool-streaming-2025-05-14",
-	"structured-outputs-2025-12-15",
-	"fast-mode-2026-02-01",
-	"redact-thinking-2026-02-12",
 }
 
 var claudeAllowedBetaTokens = func() map[string]struct{} {
-	allowed := make(map[string]struct{}, len(claudeCodeDefaultBetaTokens))
+	optional := []string{
+		"oauth-2025-04-20",
+		"prompt-caching-scope-2026-01-05",
+		"context-management-2025-06-27",
+		"extended-cache-ttl-2025-04-11",
+		"fine-grained-tool-streaming-2025-05-14",
+		"structured-outputs-2025-12-15",
+		"fast-mode-2026-02-01",
+		"redact-thinking-2026-02-12",
+		"thinking-token-count-2026-05-13",
+		"task-budgets-2026-03-13",
+		"cache-diagnosis-2026-04-07",
+		"mid-conversation-system-2026-04-07",
+	}
+	allowed := make(map[string]struct{}, len(claudeCodeDefaultBetaTokens)+len(optional))
 	for _, beta := range claudeCodeDefaultBetaTokens {
+		allowed[beta] = struct{}{}
+	}
+	for _, beta := range optional {
 		allowed[beta] = struct{}{}
 	}
 	return allowed
@@ -1436,7 +1448,6 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		"Anthropic-Beta",
 		"Anthropic-Dangerous-Direct-Browser-Access",
 		"X-Claude-Code-Session-Id",
-		"x-client-request-id",
 		"Authorization",
 		"x-api-key",
 	} {
@@ -1445,10 +1456,10 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 
 	if isAnthropicBase && useAPIKey {
 		r.Header.Set("x-api-key", apiKey)
-		r.Header.Set("Anthropic-Dangerous-Direct-Browser-Access", "true")
 	} else {
 		r.Header.Set("Authorization", "Bearer "+apiKey)
 	}
+	r.Header.Set("Anthropic-Dangerous-Direct-Browser-Access", "true")
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Anthropic-Version", "2023-06-01")
 	r.Header.Set("Anthropic-Beta", buildClaudeBetaHeader(ginHeaders, extraBetas))
@@ -1458,17 +1469,9 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	r.Header.Set("X-Stainless-Lang", "js")
 	r.Header.Set("X-Stainless-Timeout", hdrDefault(hd.Timeout, "600"))
 	r.Header.Set("X-Claude-Code-Session-Id", helps.CachedSessionID(apiKey))
-	r.Header.Set("x-client-request-id", uuid.New().String())
 	r.Header.Set("Connection", "keep-alive")
-	if stream {
-		r.Header.Set("Accept", "text/event-stream")
-		// SSE streams must not be compressed: the downstream scanner reads
-		// line-delimited text and cannot parse compressed bytes.
-		r.Header.Set("Accept-Encoding", "identity")
-	} else {
-		r.Header.Set("Accept", "application/json")
-		r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
-	}
+	r.Header.Set("Accept", "application/json")
+	r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
 	if stabilizeDeviceProfile {
 		helps.ApplyClaudeDeviceProfileHeaders(r, deviceProfile)
 	} else {
@@ -2244,7 +2247,7 @@ func getClientUserAgent(ctx context.Context) string {
 }
 
 // parseEntrypointFromUA extracts the entrypoint from a Claude Code User-Agent.
-// Format: "claude-cli/x.y.z (external, cli)" → "cli"
+// Format: "claude-cli/x.y.z (external, sdk-cli)" → "sdk-cli"
 // Format: "claude-cli/x.y.z (external, vscode)" → "vscode"
 // Returns "cli" if parsing fails or UA is not Claude Code.
 func parseEntrypointFromUA(userAgent string) string {
@@ -2349,6 +2352,37 @@ func computeFingerprint(messageText, version string) string {
 	return hex.EncodeToString(h[:])[:3]
 }
 
+func extractClaudeFingerprintMessageText(payload []byte) string {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() {
+		return ""
+	}
+
+	text := ""
+	messages.ForEach(func(_, msg gjson.Result) bool {
+		if msg.Get("role").String() != "user" {
+			return true
+		}
+
+		content := msg.Get("content")
+		if content.Type == gjson.String {
+			text = content.String()
+			return false
+		}
+		if content.IsArray() {
+			content.ForEach(func(_, part gjson.Result) bool {
+				if part.Get("type").String() != "text" {
+					return true
+				}
+				text = part.Get("text").String()
+				return false
+			})
+		}
+		return false
+	})
+	return text
+}
+
 // generateBillingHeader creates the x-anthropic-billing-header text block that
 // real Claude Code prepends to every system prompt array.
 // Format: x-anthropic-billing-header: cc_version=<ver>.<build>; cc_entrypoint=<ep>; cch=<hash>; [cc_workload=<wl>;]
@@ -2391,20 +2425,9 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 func checkSystemInstructionsWithSigningModeForced(payload []byte, strictMode bool, experimentalCCHSigning bool, oauthMode bool, version, entrypoint, workload string, forceBilling bool) []byte {
 	system := gjson.GetBytes(payload, "system")
 
-	// Extract original message text for fingerprint computation (before billing injection).
-	// Use the first system text block's content as the fingerprint source.
-	messageText := ""
-	if system.IsArray() {
-		system.ForEach(func(_, part gjson.Result) bool {
-			if part.Get("type").String() == "text" {
-				messageText = part.Get("text").String()
-				return false
-			}
-			return true
-		})
-	} else if system.Type == gjson.String {
-		messageText = system.String()
-	}
+	// Claude Code computes the cc_version build fingerprint from the first
+	// user text, before any billing/system prompt injection.
+	messageText := extractClaudeFingerprintMessageText(payload)
 
 	// Skip if already injected
 	firstText := gjson.GetBytes(payload, "system.0.text").String()
@@ -2415,19 +2438,10 @@ func checkSystemInstructionsWithSigningModeForced(payload []byte, strictMode boo
 	billingText := generateBillingHeader(payload, experimentalCCHSigning, version, messageText, entrypoint, workload)
 	billingBlock := buildTextBlock(billingText, nil)
 
-	// Build system blocks matching real Claude Code structure.
-	// Important: Claude Code's internal cacheScope='org' does NOT serialize to
-	// scope='org' in the API request. Only scope='global' is sent explicitly.
-	// The system prompt prefix block is sent without cache_control.
-	agentBlock := buildTextBlock("You are Claude Code, Anthropic's official CLI for Claude.", nil)
-	staticPrompt := strings.Join([]string{
-		helps.ClaudeCodeIntro,
-		helps.ClaudeCodeSystem,
-		helps.ClaudeCodeDoingTasks,
-		helps.ClaudeCodeToneAndStyle,
-		helps.ClaudeCodeOutputEfficiency,
-	}, "\n\n")
-	staticBlock := buildTextBlock(staticPrompt, nil)
+	// Build system blocks matching the current Claude Code Agent SDK shape.
+	cacheControl := map[string]string{"type": "ephemeral"}
+	agentBlock := buildTextBlock(helps.ClaudeCodeAgentIdentity, cacheControl)
+	staticBlock := buildTextBlock(helps.ClaudeCodeHarnessPrompt, cacheControl)
 
 	systemResult := "[" + billingBlock + "," + agentBlock + "," + staticBlock + "]"
 	payload, _ = sjson.SetRawBytes(payload, "system", []byte(systemResult))
@@ -2474,10 +2488,10 @@ func shouldForwardOriginalSystemText(text string, forceBilling bool) bool {
 	if strings.HasPrefix(text, "x-anthropic-billing-header:") {
 		return false
 	}
-	if text == "You are Claude Code, Anthropic's official CLI for Claude." {
+	if text == helps.ClaudeCodeAgentIdentity || text == "You are Claude Code, Anthropic's official CLI for Claude." {
 		return false
 	}
-	if strings.Contains(text, helps.ClaudeCodeIntro) && strings.Contains(text, helps.ClaudeCodeSystem) {
+	if strings.Contains(text, helps.ClaudeCodeHarnessPrompt) {
 		return false
 	}
 	return true
