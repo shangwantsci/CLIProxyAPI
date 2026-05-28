@@ -185,6 +185,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				var partsJSON []string
 				hasImage := false
 				hasFile := false
+				hasCacheControl := false
 				if parts := item.Get("content"); parts.Exists() && parts.IsArray() {
 					parts.ForEach(func(_, part gjson.Result) bool {
 						ptype := part.Get("type").String()
@@ -195,6 +196,10 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 								textAggregate.WriteString(txt)
 								contentPart := []byte(`{"type":"text","text":""}`)
 								contentPart, _ = sjson.SetBytes(contentPart, "text", txt)
+								if cacheControl := part.Get("cache_control"); cacheControl.Exists() && cacheControl.IsObject() {
+									contentPart, _ = sjson.SetRawBytes(contentPart, "cache_control", []byte(cacheControl.Raw))
+									hasCacheControl = true
+								}
 								partsJSON = append(partsJSON, string(contentPart))
 							}
 							if ptype == "input_text" {
@@ -282,7 +287,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				if len(partsJSON) > 0 {
 					msg := []byte(`{"role":"","content":[]}`)
 					msg, _ = sjson.SetBytes(msg, "role", role)
-					if len(partsJSON) == 1 && !hasImage && !hasFile {
+					if len(partsJSON) == 1 && !hasImage && !hasFile && !hasCacheControl {
 						// Preserve legacy behavior for single text content
 						msg, _ = sjson.DeleteBytes(msg, "content")
 						textPart := gjson.Parse(partsJSON[0])

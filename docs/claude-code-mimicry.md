@@ -220,15 +220,19 @@ context-1m-2025-08-07
   - Claude 原生响应、OpenAI Chat Completions 兼容响应、OpenAI Responses 兼容响应、usage queue 都遵守同一规则。
   - OpenAI 兼容层在保留 Claude cache breakdown 时使用 Anthropic 语义：`prompt_tokens` / Responses `input_tokens` 代表上游 uncached input；`cached_tokens`、`cached_creation_tokens`、`claude_cache_creation_5_m_tokens`、`claude_cache_creation_1_h_tokens` 单独暴露；并写入 `usage_semantic: "anthropic"`、`usage_source: "claude"`。
   - 只有在上游没有任何 cache breakdown 时，才允许把 `input_tokens` / `prompt_tokens` / Responses `input_tokens` 改为按原始下游请求估算的输入 token，用于避免把 Claude Code wrapper/system/billing blocks 算给用户。
+- OpenAI Chat Completions / Responses 请求侧如果带 `cache_control: {"type":"ephemeral"}`，转换成 Claude Messages 时必须保留该字段。Responses 单个 `input_text` 如果带 `cache_control`，不能折叠成普通字符串 `content`，必须保持 content part 数组；否则 Anthropic 上游收不到缓存断点，后续 usage 只会显示普通 input tokens，`cache_creation` / `cache_read` 都会是 0。
 - 2026-05-27 已对齐 sub2api 最新更新中的 `message_start` usage 读取思路；这里的“对齐 sub2api”只指 token usage/计费语义，不指 Claude Code 伪装策略。sub2api 的长上下文美元价格倍率修复不直接适用于本项目，因为本项目当前记录 token 明细，不在该路径内做本地美元计价。
 
 事故复盘与硬性约束：
 
 - 2026-05-27 的 `1bdb365c` 曾错误地把 cache breakdown 清零，导致 cctest 显示 `缓存创建=0`、`缓存读取=0`、命中率 `0%`、实际消耗倍率异常升高。这是错误实现，后续不得重复。
 - 2026-05-28 发现流式非 usage chunk 被反复触发原始请求 token 估算，导致生产 CPU 异常升高。后续任何流式 usage 改写必须先判断当前 chunk 是否存在 `usage` 或 `message.usage`，普通 `content_block_delta` / `signature_delta` 不得进入 token 估算热路径。
+- 2026-05-28 发现 OpenAI 兼容请求路径会丢失用户传入的 text content `cache_control`；Anthropic 原生 `/v1/messages` 缓存正常，但 `/v1/chat/completions` 和 `/v1/responses` 转 Claude 后没有缓存断点，导致客户重复请求看不到 cache create/read。后续排查缓存问题时必须同时验证请求侧 `cache_control` 是否穿过翻译层，而不能只看响应 usage 重写。
 - 修改 token usage、Claude Code system prompt、cache_control、CCH signing 或 OpenAI/Responses 翻译层时，必须跑以下回归测试，确认 cache breakdown 没有被抹掉：
   - `go test ./internal/runtime/executor/helps -run "TestRewriteClaudeUsageForBillablePreservesClaudeCacheBreakdown|TestRewriteClaudeStreamUsageForBillablePreservesClaudeCacheBreakdown|TestRewriteClaudeStreamUsageForBillablePreservesCacheWithoutInventingInput|TestRewriteClaudeStreamUsageForBillableMessageStartUsage|TestClaudeBillableUsageDetailPreservesClaudeCacheBreakdown|TestRewriteClaudeStreamUsageForBillableSkipsTokenEstimateForNonUsageChunks"`
+  - `go test ./internal/translator/claude/openai/chat-completions -run "TestConvertOpenAIRequestToClaude_PreservesTextCacheControl"`
   - `go test ./internal/translator/claude/openai/chat-completions -run "TestConvertClaudeResponseToOpenAINonStream_PreservesClaudeCacheBreakdownWhenBillableInputEnabled"`
+  - `go test ./internal/translator/claude/openai/responses -run "TestConvertOpenAIResponsesRequestToClaude_PreservesInputTextCacheControl"`
   - `go test ./internal/translator/claude/openai/responses -run "TestConvertClaudeResponseToOpenAIResponsesNonStream_PreservesClaudeCacheBreakdownWhenBillableInputEnabled|TestConvertClaudeResponseToOpenAIResponsesStream_PreservesClaudeCacheBreakdownWhenBillableInputEnabled"`
 
 ### 6. cloak 模式

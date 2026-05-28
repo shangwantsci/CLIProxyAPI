@@ -23,11 +23,15 @@ Claude token accounting is a production-sensitive area. Before changing Claude C
 
 Never zero, remove, or hide Anthropic cache breakdown fields in user-visible usage or the usage queue when upstream returned them. These fields include `cache_creation_input_tokens`, `cache_read_input_tokens`, `cached_tokens`, `cache_creation.ephemeral_5m_input_tokens`, `cache_creation.ephemeral_1h_input_tokens`, OpenAI-compatible `prompt_tokens_details.cached_tokens`, and `cached_creation_tokens`. Billable projection may rewrite input tokens only when upstream did not return any cache breakdown.
 
+OpenAI-compatible request translators must preserve user-provided Anthropic `cache_control` objects on text content parts when converting to Claude. Do not collapse a Responses single text part into a plain string if it carries `cache_control`; doing so prevents Anthropic prompt cache creation/read usage from appearing.
+
 Required regression tests for Claude token usage/cache changes:
 
 ```bash
 go test ./internal/runtime/executor/helps -run "TestRewriteClaudeUsageForBillablePreservesClaudeCacheBreakdown|TestRewriteClaudeStreamUsageForBillablePreservesClaudeCacheBreakdown|TestRewriteClaudeStreamUsageForBillablePreservesCacheWithoutInventingInput|TestRewriteClaudeStreamUsageForBillableMessageStartUsage|TestClaudeBillableUsageDetailPreservesClaudeCacheBreakdown"
+go test ./internal/translator/claude/openai/chat-completions -run "TestConvertOpenAIRequestToClaude_PreservesTextCacheControl"
 go test ./internal/translator/claude/openai/chat-completions -run "TestConvertClaudeResponseToOpenAINonStream_PreservesClaudeCacheBreakdownWhenBillableInputEnabled"
+go test ./internal/translator/claude/openai/responses -run "TestConvertOpenAIResponsesRequestToClaude_PreservesInputTextCacheControl"
 go test ./internal/translator/claude/openai/responses -run "TestConvertClaudeResponseToOpenAIResponsesNonStream_PreservesClaudeCacheBreakdownWhenBillableInputEnabled|TestConvertClaudeResponseToOpenAIResponsesStream_PreservesClaudeCacheBreakdownWhenBillableInputEnabled"
 ```
 

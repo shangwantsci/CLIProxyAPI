@@ -110,6 +110,7 @@ npm run build
 - 覆盖后端二进制后必须 `docker compose restart cpa-claude-proxy`，只 `docker compose up -d` 不一定生效。
 - `go test ./...` 可能存在与当前任务无关的既有失败。若使用局部测试作为验证，必须在最终说明中明确测试范围。
 - Claude token usage 是高风险区。不要把 `cache_creation_input_tokens`、`cache_read_input_tokens`、`cached_tokens` 或 OpenAI 兼容层的 `cached_tokens`/`cached_creation_tokens` 清零作为“扣除代理注入 token”的手段；这些字段是 cctest 和真实计费审计判断缓存命中的依据。
+- 缓存问题要同时查请求侧和响应侧。2026-05-28 曾确认 Anthropic 原生 `/v1/messages` 缓存正常，但 OpenAI 兼容请求翻译层丢失 text `cache_control`，导致 `/v1/chat/completions` / `/v1/responses` 重复长请求看不到 cache create/read。修改 OpenAI/Responses 转 Claude 时必须跑 `TestConvertOpenAIRequestToClaude_PreservesTextCacheControl` 和 `TestConvertOpenAIResponsesRequestToClaude_PreservesInputTextCacheControl`。
 
 ## 接手检查清单
 

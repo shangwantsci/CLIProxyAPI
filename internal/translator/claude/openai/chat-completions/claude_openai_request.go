@@ -335,6 +335,9 @@ func convertOpenAIContentPartToClaudePart(part gjson.Result) string {
 	case "text":
 		textPart := []byte(`{"type":"text","text":""}`)
 		textPart, _ = sjson.SetBytes(textPart, "text", part.Get("text").String())
+		if cacheControl := part.Get("cache_control"); cacheControl.Exists() && cacheControl.IsObject() {
+			textPart, _ = sjson.SetRawBytes(textPart, "cache_control", []byte(cacheControl.Raw))
+		}
 		return string(textPart)
 
 	case "image_url":
