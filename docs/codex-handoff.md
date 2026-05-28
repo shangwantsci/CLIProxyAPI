@@ -26,9 +26,9 @@
 - 生产入口：`http://23.153.36.12:8318/management.html`
 - 健康检查：`http://23.153.36.12:8318/healthz`
 - SSH：`root@23.153.36.12:41629`
-- 后端部署提交：`4a188fe5`
+- 后端部署提交：`293eccec`
 - 前端部署提交：`00956ca`
-- 最近一次账号备份：`/opt/cpa-claude-proxy-backups/auths-20260527-165703.tgz`
+- 最近一次账号备份：`/opt/cpa-claude-proxy-backups/auths-20260528-035458.tgz`
 
 不要把 SSH 密码、管理密码、API Key、Claude token 或代理密码写进任何文档或提交。
 
@@ -61,6 +61,9 @@ cat /opt/cpa-claude-proxy/DEPLOYED_COMMITS
   - 修复 `1bdb365c` 引入的 token usage regression。
   - Claude 原生、OpenAI Chat Completions、OpenAI Responses 和 usage queue 在上游返回 cache breakdown 时都保留 Anthropic cache 语义。
   - 已部署到 `23.153.36.12:8318`，部署记录见服务器 `/opt/cpa-claude-proxy/DEPLOYED_COMMITS`。
+- `293eccec fix: skip billable token rewrite for non-usage stream chunks`
+  - 修复流式非 usage chunk 反复触发原始请求 token 估算导致的生产 CPU 异常。
+  - 已部署到 `23.153.36.12:8318`，部署后 CPA CPU 回落到约 `0-1%`。
 
 ## 常用命令
 
