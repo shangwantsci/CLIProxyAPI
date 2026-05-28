@@ -404,6 +404,11 @@ sendLoop:
 }
 
 func (h *Handler) fetchClaudeSessionKeys(ctx context.Context, req normalizedClaudeSessionImportRequest) ([]string, int, error) {
+	sourceProxyURL := strings.TrimSpace(req.ProxyURL)
+	if sourceProxyURL == "" {
+		sourceProxyURL = randomClaudeSessionImportProxy(req.ProxyCandidates)
+	}
+
 	client := &http.Client{
 		Timeout: req.Timeout,
 		CheckRedirect: func(next *http.Request, via []*http.Request) error {
@@ -412,6 +417,15 @@ func (h *Handler) fetchClaudeSessionKeys(ctx context.Context, req normalizedClau
 			}
 			return h.validateClaudeSessionImportURL(next.URL)
 		},
+	}
+	if sourceProxyURL != "" {
+		transport, _, errTransport := proxyutil.BuildHTTPTransport(sourceProxyURL)
+		if errTransport != nil {
+			return nil, 0, fmt.Errorf("configure source fetch proxy: %w", errTransport)
+		}
+		if transport != nil {
+			client.Transport = transport
+		}
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, req.APIEndpoint, nil)
 	if err != nil {

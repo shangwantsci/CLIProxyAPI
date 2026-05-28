@@ -101,6 +101,8 @@ F:\claude反代\Cli-Proxy-API-Management-Center\docs\claude-account-pool-mainten
   - 账号池相关管理 API 封装。
 - `src/services/api/claudeSessionImport.ts`
   - 批量抓取 sessionKey 并导入 Claude 账号。
+- `scripts/sanitize-management-html.mjs`
+  - 前端生产构建后的静态脱敏脚本。`npm run build` 会自动执行它，把管理面板单文件里必须存在的 provider 路由/字段字面量转成 Unicode escape，避免 `management.html` 被静态扫描到敏感词。
 
 ### 容易改错的位置
 
@@ -127,7 +129,10 @@ F:\GO语言\bin\go.exe build -o ..\.codex_tmp\prod-deploy\CLIProxyAPI-linux-amd6
 ```powershell
 Set-Location F:\claude反代\Cli-Proxy-API-Management-Center
 npm run build
+rg -n -i "claude|anthropic" dist
 ```
+
+`rg` 对 `dist` 的扫描必须无结果；如果有结果，不要上传前端产物。
 
 - 前端生产上传的不是整个 `dist`，而是：
 

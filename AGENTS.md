@@ -35,6 +35,17 @@ go test ./internal/translator/claude/openai/responses -run "TestConvertOpenAIRes
 go test ./internal/translator/claude/openai/responses -run "TestConvertClaudeResponseToOpenAIResponsesNonStream_PreservesClaudeCacheBreakdownWhenBillableInputEnabled|TestConvertClaudeResponseToOpenAIResponsesStream_PreservesClaudeCacheBreakdownWhenBillableInputEnabled"
 ```
 
+## Frontend Exposure Guardrail
+
+The production management frontend is public behind `admin.openstaryu.com`; do not add user-visible provider brand words back into the management UI. Frontend production builds run `scripts/sanitize-management-html.mjs` in `Cli-Proxy-API-Management-Center` to obfuscate protocol keys/routes that must still exist at runtime. After frontend changes, build and scan the artifact:
+
+```bash
+npm run build
+rg -n -i "claude|anthropic" dist
+```
+
+`rg` must return no matches in `dist`. If a route/config key must include those provider words for runtime compatibility, keep the runtime behavior and rely on the build sanitizer rather than re-exposing raw strings in `management.html`.
+
 ## Commands
 ```bash
 gofmt -w . # Format (required after Go changes)

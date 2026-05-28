@@ -179,11 +179,22 @@ func TestPostClaudeSessionImportJobUsesEnabledProxyPoolWhenProxyEmpty(t *testing
 		]`))
 	}))
 	defer source.Close()
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Scheme != "http" || r.URL.Host != strings.TrimPrefix(source.URL, "http://") || r.URL.Path != "/api/accounts" {
+			t.Fatalf("proxied request URL = %q, want %s/api/accounts", r.URL.String(), source.URL)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[
+			{"session_key":"sk-one"},
+			{"session_key":"sk-two"}
+		]`))
+	}))
+	defer proxy.Close()
 
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
 	h.sessionImportAllowPrivateSources = true
 
-	enabledProxy := "socks5://user:pass@127.0.0.1:1080"
+	enabledProxy := proxy.URL
 	if err := h.autoAddProxyURL(context.Background(), enabledProxy); err != nil {
 		t.Fatalf("add enabled proxy: %v", err)
 	}
@@ -267,6 +278,50 @@ func TestPostClaudeSessionImportJobUsesEnabledProxyPoolWhenProxyEmpty(t *testing
 		if proxyURL != enabledProxy {
 			t.Fatalf("proxyURL = %q, want enabled proxy %q; all=%v", proxyURL, enabledProxy, proxies)
 		}
+	}
+}
+
+func TestFetchClaudeSessionKeysUsesProxyPoolForSourceFetch(t *testing.T) {
+	sourceHits := 0
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sourceHits++
+		http.Error(w, "direct source fetch should not be used", http.StatusTeapot)
+	}))
+	defer source.Close()
+
+	proxyHits := 0
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyHits++
+		if r.URL.Scheme != "http" || r.URL.Host != strings.TrimPrefix(source.URL, "http://") || r.URL.Path != "/api/accounts" {
+			t.Fatalf("proxied request URL = %q, want %s/api/accounts", r.URL.String(), source.URL)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"session_key":"sk-proxied"}]`))
+	}))
+	defer proxy.Close()
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
+	keys, duplicates, err := h.fetchClaudeSessionKeys(context.Background(), normalizedClaudeSessionImportRequest{
+		SourceURL:        source.URL + "/accounts",
+		APIEndpoint:      source.URL + "/api/accounts",
+		ProxyCandidates:  []string{proxy.URL},
+		Timeout:          2 * time.Second,
+		DisplaySourceURL: source.URL + "/accounts",
+	})
+	if err != nil {
+		t.Fatalf("fetch session keys: %v", err)
+	}
+	if duplicates != 0 {
+		t.Fatalf("duplicates = %d, want 0", duplicates)
+	}
+	if len(keys) != 1 || keys[0] != "sk-proxied" {
+		t.Fatalf("keys = %#v, want proxied session key", keys)
+	}
+	if proxyHits != 1 {
+		t.Fatalf("proxyHits = %d, want 1", proxyHits)
+	}
+	if sourceHits != 0 {
+		t.Fatalf("sourceHits = %d, want 0 direct source hits", sourceHits)
 	}
 }
 

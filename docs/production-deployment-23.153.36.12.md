@@ -7,9 +7,11 @@
 - 主机：`23.153.36.12`
 - SSH：`root@23.153.36.12:41629`
 - 系统：Ubuntu，Docker 已安装
-- CPA 对外端口：`8318`
-- CPA 访问入口：`http://23.153.36.12:8318/management.html`
-- CPA 健康检查：`http://23.153.36.12:8318/healthz`
+- NewAPI 对外入口：`https://api.openstaryu.com`
+- CPA 管理入口：`https://admin.openstaryu.com/management.html`
+- CPA 本机入口：`http://127.0.0.1:8318/management.html`
+- CPA 本机健康检查：`http://127.0.0.1:8318/healthz`
+- CPA 的 `8318` 端口不再公网开放；不要再把 `http://23.153.36.12:8318` 作为客户或管理入口。
 
 部署前已确认存在的生产项目：
 
@@ -18,9 +20,10 @@
 - Coolify 相关容器
 - `new-api` 监听 `127.0.0.1:13000`
 - `sub2api` 监听 `127.0.0.1:18080`
-- `80/443/8000/8080/6001/6002` 已由 Coolify/Traefik 等服务使用
+- `80/443` 由 Coolify Traefik 对公网提供 HTTP/HTTPS
+- `8000/8080/6001/6002` 已收口为 `127.0.0.1` 本机监听
 
-CPA 使用独立目录、独立容器、独立网络和独立端口，不修改上述项目。
+CPA 使用独立目录、独立容器和独立运行产物；为支持域名反代，CPA 容器同时加入 `cpa-claude-net` 和 Coolify 的 `coolify` 网络。NewAPI 中 CPA 号池渠道的 `base_url` 应为 `http://cpa-claude-proxy:8318`，避免通过公网 IP 回绕。
 
 ## CPA 固定部署布局
 
@@ -37,12 +40,20 @@ CPA 使用独立目录、独立容器、独立网络和独立端口，不修改�
 Docker 固定信息：
 
 - 容器名：`cpa-claude-proxy`
-- Docker 网络：`cpa-claude-net`
+- Docker 网络：`cpa-claude-net`、`coolify`
 - 镜像：`debian:12-slim`
-- 端口映射：`0.0.0.0:8318->8318/tcp`
+- 端口映射：`127.0.0.1:8318->8318/tcp`
 - 容器环境：
   - `MANAGEMENT_STATIC_PATH=/CLIProxyAPI/static`
   - `SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt`
+
+Traefik 动态路由：
+
+- 配置文件：`/data/coolify/proxy/dynamic/openstaryu_routes.yaml`
+- `api.openstaryu.com` -> `http://new-api-app:3000`
+- `admin.openstaryu.com` -> `http://cpa-claude-proxy:8318`
+- 两个域名均通过 Let's Encrypt 自动签发证书，并限制 ALPN 为 `http/1.1`。
+- Traefik HTTP/3/QUIC 已关闭，不公开 `443/udp`。
 
 ## 当前部署版本
 
@@ -51,6 +62,8 @@ Docker 固定信息：
 - 最近一次按本文档部署时间：`2026-05-28T08:11:50+00:00`
 - 最近一次账号备份：`/opt/cpa-claude-proxy-backups/auths-20260528-081142.tgz`
 - 最近一次后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-7cf6544a-20260528-081142.bak`
+- 最近一次网络入口收口：`2026-05-28T11:32:01+00:00`
+- 最近一次网络入口收口备份：`/root/openstaryu-hardening-20260528-113201`
 - 初始迁移来源：旧服务器 `38.76.196.12:/opt/cpa-claude-proxy`
 
 服务器上可用下面命令查看实际部署提交：
@@ -103,7 +116,10 @@ Get-FileHash -Algorithm SHA256 F:\claude反代\.codex_tmp\prod-deploy\CLIProxyAP
 ```powershell
 Set-Location F:\claude反代\Cli-Proxy-API-Management-Center
 npm run build
+rg -n -i "claude|anthropic" dist
 ```
+
+`npm run build` 会自动执行 `scripts/sanitize-management-html.mjs`。`rg` 对 `dist` 必须无输出，否则说明管理面板单文件仍有可被静态扫描命中的敏感 provider 明文，不要上传。
 
 前端生产产物是：
 
@@ -218,17 +234,41 @@ find /opt/cpa-claude-proxy/auths -maxdepth 1 -type f -printf '%f\n' | sort
 本机公网验证：
 
 ```powershell
-curl.exe -sS -o NUL -w "healthz %{http_code}\n" --max-time 10 http://23.153.36.12:8318/healthz
-curl.exe -sS -o NUL -w "management %{http_code}\n" --max-time 10 http://23.153.36.12:8318/management.html
+curl.exe -sS -o NUL -w "api %{http_code}\n" --max-time 20 https://api.openstaryu.com/
+curl.exe -sS -o NUL -w "management %{http_code}\n" --max-time 20 https://admin.openstaryu.com/management.html
 ```
 
 预期：
 
 - `cpa-claude-proxy` 容器为 `Up`
-- `8318` 端口由 `docker-proxy` 监听
+- `8318` 端口只由 `docker-proxy` 在 `127.0.0.1` 监听
 - `healthz 200`
 - `management 200`
+- `api.openstaryu.com` 和 `admin.openstaryu.com` HTTPS 均为 `200`
 - `auths` 目录存在 Claude 账号 JSON 和 `proxy_pool.json`
+
+端口收口验证：
+
+```bash
+ss -lntup
+ufw status verbose
+docker ps --format 'table {{.Names}}\t{{.Ports}}\t{{.Status}}'
+```
+
+预期公网监听只保留：
+
+- `80/tcp`
+- `443/tcp`
+- `41629/tcp`
+
+预期本机监听包括：
+
+- `127.0.0.1:8318` CPA
+- `127.0.0.1:13000` NewAPI
+- `127.0.0.1:18080` sub2api
+- `127.0.0.1:8000` Coolify UI
+- `127.0.0.1:8080` Traefik dashboard
+- `127.0.0.1:6001-6002` Coolify realtime
 
 ## 常用排障命令
 
@@ -296,8 +336,10 @@ docker compose up -d
 
 - 不要把 GitHub 私有仓库凭据放在服务器上；服务器只运行构建产物。
 - 不要把 SSH 密码、管理密码、API Key、Claude token 写进本文档。
-- 更新时只操作 `/opt/cpa-claude-proxy` 和 `/opt/cpa-claude-proxy-backups`。
-- 不要改 `/opt/new-api-production`、`/opt/sub2api-production`、Coolify 目录或相关容器。
+- 常规代码更新时只操作 `/opt/cpa-claude-proxy` 和 `/opt/cpa-claude-proxy-backups`。
+- 不要把 CPA 重新改回公网 `0.0.0.0:8318`。
+- 不要把 NewAPI 的 CPA 号池渠道改回 `http://23.153.36.12:8318`；应保持 `http://cpa-claude-proxy:8318`。
+- 不要改 `/opt/new-api-production`、`/opt/sub2api-production`、Coolify 目录或相关容器，除非任务明确涉及域名反代、端口收口或对应服务本身。
 - 账号、代理、管理密钥和客户端 API Key 由旧服务器配置/数据迁移而来，后续应通过管理面板维护。
 - 前端源码仓库是 `F:\claude反代\Cli-Proxy-API-Management-Center`，不是后端仓库内的 `static` 目录。
 - 后端源码仓库是 `F:\claude反代\CLIProxyAPI`，生产服务器不要保存 GitHub 凭据。

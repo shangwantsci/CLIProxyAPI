@@ -9,7 +9,7 @@
 - Claude Code / Claude OAuth 多账号池。
 - Claude Code 伪装与指纹一致性。
 - 管理面板中的账号健康、批量探测、代理池和策略设置。
-- 生产服务器 `23.153.36.12:8318` 的稳定部署更新。
+- 生产服务器 `23.153.36.12` 上 `api.openstaryu.com` / `admin.openstaryu.com` 的稳定部署更新。
 
 ## 仓库与路径
 
@@ -23,12 +23,21 @@
 
 ## 当前部署状态
 
-- 生产入口：`http://23.153.36.12:8318/management.html`
-- 健康检查：`http://23.153.36.12:8318/healthz`
+- NewAPI 对外入口：`https://api.openstaryu.com`
+- CPA 管理入口：`https://admin.openstaryu.com/management.html`
+- CPA 本机健康检查：`http://127.0.0.1:8318/healthz`
 - SSH：`root@23.153.36.12:41629`
 - 后端部署提交：`7cf6544a`
 - 前端部署提交：`00956ca`
 - 最近一次账号备份：`/opt/cpa-claude-proxy-backups/auths-20260528-081142.tgz`
+- 最近一次网络入口收口备份：`/root/openstaryu-hardening-20260528-113201`
+
+当前端口策略：
+
+- 公网只保留 `80/tcp`、`443/tcp`、`41629/tcp`。
+- CPA `8318` 只监听 `127.0.0.1`，通过 Traefik 的 `admin.openstaryu.com` 访问管理前端。
+- NewAPI `13000` 只监听 `127.0.0.1`，通过 Traefik 的 `api.openstaryu.com` 对外。
+- NewAPI 中 CPA 号池渠道的 `base_url` 应保持 `http://cpa-claude-proxy:8318`，不要改回公网 IP。
 
 不要把 SSH 密码、管理密码、API Key、Claude token 或代理密码写进任何文档或提交。
 
@@ -60,14 +69,25 @@ cat /opt/cpa-claude-proxy/DEPLOYED_COMMITS
 - `4a188fe5 fix: preserve Claude cache usage accounting`
   - 修复 `1bdb365c` 引入的 token usage regression。
   - Claude 原生、OpenAI Chat Completions、OpenAI Responses 和 usage queue 在上游返回 cache breakdown 时都保留 Anthropic cache 语义。
-  - 已部署到 `23.153.36.12:8318`，部署记录见服务器 `/opt/cpa-claude-proxy/DEPLOYED_COMMITS`。
+  - 已部署到生产服务器，部署记录见服务器 `/opt/cpa-claude-proxy/DEPLOYED_COMMITS`。
 - `293eccec fix: skip billable token rewrite for non-usage stream chunks`
   - 修复流式非 usage chunk 反复触发原始请求 token 估算导致的生产 CPU 异常。
-  - 已部署到 `23.153.36.12:8318`，部署后 CPA CPU 回落到约 `0-1%`。
+  - 已部署到生产服务器，部署后 CPA CPU 回落到约 `0-1%`。
 - `7cf6544a fix: preserve OpenAI cache control for Claude`
   - 修复 OpenAI Chat Completions / Responses 转 Claude 时丢失 text `cache_control` 的问题。
   - Anthropic 原生 `/v1/messages` 缓存本来正常；此次补齐 `/v1/chat/completions` 和 `/v1/responses` 的请求侧缓存断点透传。
-  - 已部署到 `23.153.36.12:8318`，服务器 `DEPLOYED_COMMITS` 显示 `backend=7cf6544a`。
+  - 已部署到生产服务器，服务器 `DEPLOYED_COMMITS` 显示 `backend=7cf6544a`。
+
+## 最近关键运维改动
+
+- `2026-05-28` openstaryu 域名和端口收口
+  - 新增 Traefik 动态路由：`api.openstaryu.com -> new-api-app:3000`，`admin.openstaryu.com -> cpa-claude-proxy:8318`。
+  - CPA Docker 端口改为 `127.0.0.1:8318->8318/tcp`，同时加入 `coolify` 网络。
+  - NewAPI 号池渠道 `base_url` 从 `http://23.153.36.12:8318` 改为 `http://cpa-claude-proxy:8318`。
+  - Coolify `8000`、Traefik `8080`、Coolify realtime `6001-6002` 均收口为 `127.0.0.1`。
+  - Traefik HTTP/3/QUIC 关闭，不再公开 `443/udp`。
+  - UFW 入站规则只保留 `41629/tcp`、`80/tcp`、`443/tcp`。
+  - 服务器备份目录：`/root/openstaryu-hardening-20260528-113201`。
 
 ## 常用命令
 
@@ -110,8 +130,11 @@ npm run build
 - 前端源码不在后端仓库。生产管理面板主要页面是前端仓库的 `src/pages/DashboardPage.tsx`。
 - `src/pages/AuthFilesPage.tsx` 是原版通用授权文件页，生产 Claude 账号池通常不是这里。
 - 前端上线产物是 `dist/index.html`，服务器上文件名是 `management.html`。
+- 管理面板对外域名是 `admin.openstaryu.com`，前端静态产物不能出现可被 FOFA/静态扫描命中的 `claude` / `anthropic` 明文字面量。前端 `npm run build` 会执行 `scripts/sanitize-management-html.mjs`，构建后必须跑 `rg -n -i "claude|anthropic" dist`，无结果才能上传。
+- 一键验证并导入账号分两段出站：抓取来源 sessionKey 列表、逐个账号验证/换授权。`proxy_url` 留空时，这两段都必须从已启用代理池随机选代理，避免导入源抓取走服务器本机 IP；指定 `proxy_url` 时使用指定代理。
 - Windows 中文路径可能导致上传脚本路径乱码，部署上传前建议复制到 `C:\tmp\cpa-prod-deploy`。
 - 覆盖后端二进制后必须 `docker compose restart cpa-claude-proxy`，只 `docker compose up -d` 不一定生效。
+- 生产入口已经从公网 `:8318` 改为域名反代。部署或排障时不要把 CPA 重新暴露成 `0.0.0.0:8318`，也不要把 NewAPI 的 CPA 渠道改回公网 IP。
 - `go test ./...` 可能存在与当前任务无关的既有失败。若使用局部测试作为验证，必须在最终说明中明确测试范围。
 - Claude token usage 是高风险区。不要把 `cache_creation_input_tokens`、`cache_read_input_tokens`、`cached_tokens` 或 OpenAI 兼容层的 `cached_tokens`/`cached_creation_tokens` 清零作为“扣除代理注入 token”的手段；这些字段是 cctest 和真实计费审计判断缓存命中的依据。
 - 缓存问题要同时查请求侧和响应侧。2026-05-28 曾确认 Anthropic 原生 `/v1/messages` 缓存正常，但 OpenAI 兼容请求翻译层丢失 text `cache_control`，导致 `/v1/chat/completions` / `/v1/responses` 重复长请求看不到 cache create/read。修改 OpenAI/Responses 转 Claude 时必须跑 `TestConvertOpenAIRequestToClaude_PreservesTextCacheControl` 和 `TestConvertOpenAIResponsesRequestToClaude_PreservesInputTextCacheControl`。
