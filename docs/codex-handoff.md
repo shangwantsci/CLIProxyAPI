@@ -27,9 +27,9 @@
 - CPA 管理入口：`https://admin.openstaryu.com/management.html`
 - CPA 本机健康检查：`http://127.0.0.1:8318/healthz`
 - SSH：`root@23.153.36.12:41629`
-- 后端部署提交：`7cf6544a`
-- 前端部署提交：`00956ca`
-- 最近一次账号备份：`/opt/cpa-claude-proxy-backups/auths-20260528-081142.tgz`
+- 后端部署提交：`933b94da`
+- 前端部署提交：`c8f38d9`
+- 最近一次账号备份：`/opt/cpa-claude-proxy-backups/auths-20260528-122721.tgz`
 - 最近一次网络入口收口备份：`/root/openstaryu-hardening-20260528-113201`
 
 当前端口策略：
@@ -77,6 +77,11 @@ cat /opt/cpa-claude-proxy/DEPLOYED_COMMITS
   - 修复 OpenAI Chat Completions / Responses 转 Claude 时丢失 text `cache_control` 的问题。
   - Anthropic 原生 `/v1/messages` 缓存本来正常；此次补齐 `/v1/chat/completions` 和 `/v1/responses` 的请求侧缓存断点透传。
   - 已部署到生产服务器，服务器 `DEPLOYED_COMMITS` 显示 `backend=7cf6544a`。
+- `933b94da fix: proxy session import source fetch`
+  - 修复一键验证并导入账号时，来源 sessionKey 列表抓取可能走服务器本机 IP 的问题。
+  - `proxy_url` 留空时，来源抓取和账号验证都会从已启用代理池随机选代理；指定 `proxy_url` 时两段都使用指定代理。
+  - 同次部署前端 `c8f38d9`，管理面板改为中性品牌并增加生产构建敏感词扫描。
+  - 已部署到生产服务器，服务器 `DEPLOYED_COMMITS` 显示 `backend=933b94da`、`frontend=c8f38d9`。
 
 ## 最近关键运维改动
 
