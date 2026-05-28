@@ -46,11 +46,11 @@ Docker 固定信息：
 
 ## 当前部署版本
 
-- 后端提交：`293eccec`
+- 后端提交：`7cf6544a`
 - 前端提交：`00956ca`
-- 最近一次按本文档部署时间：`2026-05-28T03:55:00+00:00`
-- 最近一次账号备份：`/opt/cpa-claude-proxy-backups/auths-20260528-035458.tgz`
-- 最近一次后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-293eccec-20260528-035458.bak`
+- 最近一次按本文档部署时间：`2026-05-28T08:11:50+00:00`
+- 最近一次账号备份：`/opt/cpa-claude-proxy-backups/auths-20260528-081142.tgz`
+- 最近一次后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-7cf6544a-20260528-081142.bak`
 - 初始迁移来源：旧服务器 `38.76.196.12:/opt/cpa-claude-proxy`
 
 服务器上可用下面命令查看实际部署提交：

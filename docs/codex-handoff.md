@@ -26,9 +26,9 @@
 - 生产入口：`http://23.153.36.12:8318/management.html`
 - 健康检查：`http://23.153.36.12:8318/healthz`
 - SSH：`root@23.153.36.12:41629`
-- 后端部署提交：`293eccec`
+- 后端部署提交：`7cf6544a`
 - 前端部署提交：`00956ca`
-- 最近一次账号备份：`/opt/cpa-claude-proxy-backups/auths-20260528-035458.tgz`
+- 最近一次账号备份：`/opt/cpa-claude-proxy-backups/auths-20260528-081142.tgz`
 
 不要把 SSH 密码、管理密码、API Key、Claude token 或代理密码写进任何文档或提交。
 
@@ -64,6 +64,10 @@ cat /opt/cpa-claude-proxy/DEPLOYED_COMMITS
 - `293eccec fix: skip billable token rewrite for non-usage stream chunks`
   - 修复流式非 usage chunk 反复触发原始请求 token 估算导致的生产 CPU 异常。
   - 已部署到 `23.153.36.12:8318`，部署后 CPA CPU 回落到约 `0-1%`。
+- `7cf6544a fix: preserve OpenAI cache control for Claude`
+  - 修复 OpenAI Chat Completions / Responses 转 Claude 时丢失 text `cache_control` 的问题。
+  - Anthropic 原生 `/v1/messages` 缓存本来正常；此次补齐 `/v1/chat/completions` 和 `/v1/responses` 的请求侧缓存断点透传。
+  - 已部署到 `23.153.36.12:8318`，服务器 `DEPLOYED_COMMITS` 显示 `backend=7cf6544a`。
 
 ## 常用命令
 
