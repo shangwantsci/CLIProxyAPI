@@ -125,6 +125,9 @@ func RewriteClaudeUsageForBillable(ctx context.Context, payload []byte) []byte {
 	if !gjson.ValidBytes(payload) {
 		return payload
 	}
+	if !gjson.GetBytes(payload, "usage").Exists() && !gjson.GetBytes(payload, "message.usage").Exists() {
+		return payload
+	}
 	count, ok := ClaudeBillableInputTokens(ctx, gjson.GetBytes(payload, "model").String(), "claude", nil)
 	if !ok {
 		return payload

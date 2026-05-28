@@ -3,7 +3,9 @@ package helps
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
@@ -199,5 +201,22 @@ func TestRewriteClaudeStreamUsageForBillablePreservesSignatureDelta(t *testing.T
 
 	if !bytes.Equal(out, line) {
 		t.Fatalf("signature_delta changed:\nout=%s\nwant=%s", string(out), string(line))
+	}
+}
+
+func TestRewriteClaudeStreamUsageForBillableSkipsTokenEstimateForNonUsageChunks(t *testing.T) {
+	largeOriginal := []byte(`{"messages":[{"role":"user","content":"` + strings.Repeat("large prompt ", 20_000) + `"}]}`)
+	ctx := WithClaudeBillableUsage(context.Background(), true, "claude-opus-4-7", "claude", largeOriginal)
+	line := []byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}`)
+
+	started := time.Now()
+	for i := 0; i < 100; i++ {
+		out := RewriteClaudeStreamUsageForBillable(ctx, line)
+		if !bytes.Equal(out, line) {
+			t.Fatalf("non-usage chunk changed:\nout=%s\nwant=%s", string(out), string(line))
+		}
+	}
+	if elapsed := time.Since(started); elapsed > 75*time.Millisecond {
+		t.Fatalf("non-usage stream chunks took %s; expected no repeated original-request token estimation", elapsed)
 	}
 }

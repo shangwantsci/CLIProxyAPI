@@ -225,8 +225,9 @@ context-1m-2025-08-07
 事故复盘与硬性约束：
 
 - 2026-05-27 的 `1bdb365c` 曾错误地把 cache breakdown 清零，导致 cctest 显示 `缓存创建=0`、`缓存读取=0`、命中率 `0%`、实际消耗倍率异常升高。这是错误实现，后续不得重复。
+- 2026-05-28 发现流式非 usage chunk 被反复触发原始请求 token 估算，导致生产 CPU 异常升高。后续任何流式 usage 改写必须先判断当前 chunk 是否存在 `usage` 或 `message.usage`，普通 `content_block_delta` / `signature_delta` 不得进入 token 估算热路径。
 - 修改 token usage、Claude Code system prompt、cache_control、CCH signing 或 OpenAI/Responses 翻译层时，必须跑以下回归测试，确认 cache breakdown 没有被抹掉：
-  - `go test ./internal/runtime/executor/helps -run "TestRewriteClaudeUsageForBillablePreservesClaudeCacheBreakdown|TestRewriteClaudeStreamUsageForBillablePreservesClaudeCacheBreakdown|TestRewriteClaudeStreamUsageForBillablePreservesCacheWithoutInventingInput|TestRewriteClaudeStreamUsageForBillableMessageStartUsage|TestClaudeBillableUsageDetailPreservesClaudeCacheBreakdown"`
+  - `go test ./internal/runtime/executor/helps -run "TestRewriteClaudeUsageForBillablePreservesClaudeCacheBreakdown|TestRewriteClaudeStreamUsageForBillablePreservesClaudeCacheBreakdown|TestRewriteClaudeStreamUsageForBillablePreservesCacheWithoutInventingInput|TestRewriteClaudeStreamUsageForBillableMessageStartUsage|TestClaudeBillableUsageDetailPreservesClaudeCacheBreakdown|TestRewriteClaudeStreamUsageForBillableSkipsTokenEstimateForNonUsageChunks"`
   - `go test ./internal/translator/claude/openai/chat-completions -run "TestConvertClaudeResponseToOpenAINonStream_PreservesClaudeCacheBreakdownWhenBillableInputEnabled"`
   - `go test ./internal/translator/claude/openai/responses -run "TestConvertClaudeResponseToOpenAIResponsesNonStream_PreservesClaudeCacheBreakdownWhenBillableInputEnabled|TestConvertClaudeResponseToOpenAIResponsesStream_PreservesClaudeCacheBreakdownWhenBillableInputEnabled"`
 
