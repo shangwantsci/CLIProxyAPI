@@ -59,6 +59,7 @@ type serverOptionConfig struct {
 	keepAliveTimeout     time.Duration
 	keepAliveOnTimeout   func()
 	postAuthHook         auth.PostAuthHook
+	configUpdateHook     func(*config.Config)
 }
 
 // ServerOption customises HTTP server construction.
@@ -123,6 +124,13 @@ func WithRequestLoggerFactory(factory func(*config.Config, string) logging.Reque
 func WithPostAuthHook(hook auth.PostAuthHook) ServerOption {
 	return func(cfg *serverOptionConfig) {
 		cfg.postAuthHook = hook
+	}
+}
+
+// WithConfigUpdateHook registers a hook to apply config.yaml saves to the live service.
+func WithConfigUpdateHook(hook func(*config.Config)) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.configUpdateHook = hook
 	}
 }
 
@@ -287,11 +295,17 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	if optionState.postAuthHook != nil {
 		s.mgmt.SetPostAuthHook(optionState.postAuthHook)
 	}
+	configUpdateHook := optionState.configUpdateHook
+	if configUpdateHook == nil {
+		configUpdateHook = s.UpdateClients
+	}
+	s.mgmt.SetConfigUpdateHook(configUpdateHook)
 	s.localPassword = optionState.localPassword
 
 	// Home heartbeat gate: when home is enabled, block all endpoints with 503 until the
 	// subscribe-config heartbeat connection is healthy.
 	engine.Use(s.homeHeartbeatMiddleware())
+	engine.Use(s.apiConnectionsGateMiddleware())
 
 	// Setup routes
 	s.setupRoutes()
@@ -621,6 +635,9 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/ws-auth", s.mgmt.GetWebsocketAuth)
 		mgmt.PUT("/ws-auth", s.mgmt.PutWebsocketAuth)
 		mgmt.PATCH("/ws-auth", s.mgmt.PutWebsocketAuth)
+		mgmt.GET("/api-connections", s.mgmt.GetAPIConnections)
+		mgmt.PUT("/api-connections", s.mgmt.PutAPIConnections)
+		mgmt.PATCH("/api-connections", s.mgmt.PutAPIConnections)
 
 		mgmt.GET("/ampcode", s.mgmt.GetAmpCode)
 		mgmt.GET("/ampcode/upstream-url", s.mgmt.GetAmpUpstreamURL)
@@ -1342,6 +1359,40 @@ func corsMiddleware() gin.HandlerFunc {
 		}
 
 		c.Next()
+	}
+}
+
+func (s *Server) apiConnectionsGateMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if s == nil || s.cfg == nil || !s.cfg.DisableAPIConnections {
+			c.Next()
+			return
+		}
+		if !isPublicAPIConnectionPath(c.Request.URL.Path) {
+			c.Next()
+			return
+		}
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "api_connections_disabled",
+			"message": "API connections are temporarily disabled",
+		})
+	}
+}
+
+func isPublicAPIConnectionPath(path string) bool {
+	switch {
+	case path == "/v1" || strings.HasPrefix(path, "/v1/"):
+		return true
+	case path == "/v1beta" || strings.HasPrefix(path, "/v1beta/"):
+		return true
+	case path == "/backend-api/codex" || strings.HasPrefix(path, "/backend-api/codex/"):
+		return true
+	case path == "/api/provider" || strings.HasPrefix(path, "/api/provider/"):
+		return true
+	case strings.HasPrefix(path, "/v1internal:"):
+		return true
+	default:
+		return false
 	}
 }
 

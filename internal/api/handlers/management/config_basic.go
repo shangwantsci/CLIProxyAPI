@@ -108,6 +108,23 @@ func WriteConfig(path string, data []byte) error {
 	return f.Close()
 }
 
+func cloneConfig(src *config.Config) *config.Config {
+	if src == nil {
+		return &config.Config{}
+	}
+	data, err := yaml.Marshal(src)
+	if err != nil {
+		cp := *src
+		return &cp
+	}
+	var dst config.Config
+	if err = yaml.Unmarshal(data, &dst); err != nil {
+		cp := *src
+		return &cp
+	}
+	return &dst
+}
+
 func (h *Handler) PutConfigYAML(c *gin.Context) {
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
@@ -147,18 +164,21 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 		return
 	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if WriteConfig(h.configFilePath, body) != nil {
+		h.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": "failed to write config"})
 		return
 	}
 	// Reload into handler to keep memory in sync
 	newCfg, err := config.LoadConfig(h.configFilePath)
 	if err != nil {
+		h.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "reload_failed", "message": err.Error()})
 		return
 	}
 	h.cfg = newCfg
+	h.mu.Unlock()
+	h.notifyConfigUpdated(newCfg)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "changed": []string{"config"}})
 }
 
@@ -255,6 +275,46 @@ func (h *Handler) PutWebsocketAuth(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.WebsocketAuth = v })
 }
 
+// API connections
+func (h *Handler) GetAPIConnections(c *gin.Context) {
+	disabled := h != nil && h.cfg != nil && h.cfg.DisableAPIConnections
+	c.JSON(200, gin.H{"enabled": !disabled, "disabled": disabled})
+}
+func (h *Handler) PutAPIConnections(c *gin.Context) {
+	var body struct {
+		Enabled  *bool `json:"enabled"`
+		Disabled *bool `json:"disabled"`
+		Value    *bool `json:"value"`
+	}
+	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+
+	var disabled bool
+	switch {
+	case body.Enabled != nil:
+		disabled = !*body.Enabled
+	case body.Disabled != nil:
+		disabled = *body.Disabled
+	case body.Value != nil:
+		disabled = !*body.Value
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+
+	newCfg := cloneConfig(h.cfg)
+	newCfg.DisableAPIConnections = disabled
+	h.mu.Lock()
+	h.cfg = newCfg
+	ok := h.persistLocked(c)
+	h.mu.Unlock()
+	if ok {
+		h.notifyConfigUpdated(newCfg)
+	}
+}
+
 // Request retry
 func (h *Handler) GetRequestRetry(c *gin.Context) {
 	c.JSON(200, gin.H{"request-retry": h.cfg.RequestRetry})
@@ -313,8 +373,15 @@ func (h *Handler) PutRoutingStrategy(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid strategy"})
 		return
 	}
-	h.cfg.Routing.Strategy = normalized
-	h.persist(c)
+	newCfg := cloneConfig(h.cfg)
+	newCfg.Routing.Strategy = normalized
+	h.mu.Lock()
+	h.cfg = newCfg
+	persisted := h.persistLocked(c)
+	h.mu.Unlock()
+	if persisted {
+		h.notifyConfigUpdated(newCfg)
+	}
 }
 
 // Proxy URL

@@ -9,7 +9,7 @@
 - Claude Code / Claude OAuth 多账号池。
 - Claude Code 伪装与指纹一致性。
 - 管理面板中的账号健康、批量探测、代理池和策略设置。
-- 生产服务器 `23.153.36.12` 上 `api.openstaryu.com` / `admin.openstaryu.com` 的稳定部署更新。
+- 生产服务器 `23.153.36.248` 上 `api.openstaryu.com` / `admin.openstaryu.com` 的稳定部署更新。
 
 ## 仓库与路径
 
@@ -26,7 +26,7 @@
 - NewAPI 对外入口：`https://api.openstaryu.com`
 - CPA 管理入口：`https://admin.openstaryu.com/management.html`
 - CPA 本机健康检查：`http://127.0.0.1:8318/healthz`
-- SSH：`root@23.153.36.12:41629`
+- SSH：`root@23.153.36.248:41629`
 - 后端部署提交：`21c88d4e`
 - 前端部署提交：`78d54e1`
 - 最近一次账号备份：`/opt/cpa-claude-proxy-backups/auths-20260529-115241.tgz`

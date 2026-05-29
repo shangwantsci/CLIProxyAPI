@@ -48,6 +48,7 @@ type Handler struct {
 	envSecret           string
 	logDir              string
 	postAuthHook        coreauth.PostAuthHook
+	configUpdateHook    func(*config.Config)
 	sessionImportMu     sync.Mutex
 	sessionImportJobs   map[string]*claudeSessionImportJob
 	sessionImportActive string
@@ -151,6 +152,28 @@ func (h *Handler) SetLogDirectory(dir string) {
 // SetPostAuthHook registers a hook to be called after auth record creation but before persistence.
 func (h *Handler) SetPostAuthHook(hook coreauth.PostAuthHook) {
 	h.postAuthHook = hook
+}
+
+// SetConfigUpdateHook registers a hook to apply freshly saved config to the live server.
+func (h *Handler) SetConfigUpdateHook(hook func(*config.Config)) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.configUpdateHook = hook
+	h.mu.Unlock()
+}
+
+func (h *Handler) notifyConfigUpdated(cfg *config.Config) {
+	if h == nil || cfg == nil {
+		return
+	}
+	h.mu.Lock()
+	hook := h.configUpdateHook
+	h.mu.Unlock()
+	if hook != nil {
+		hook(cfg)
+	}
 }
 
 // Middleware enforces access control for management endpoints.

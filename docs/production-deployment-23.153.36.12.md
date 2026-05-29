@@ -1,17 +1,17 @@
-# CPA Claude Proxy 生产部署记录：23.153.36.12
+# CPA Claude Proxy 生产部署记录：23.153.36.248
 
-本文档固定新生产服务器上的部署位置、隔离边界、更新流程和排障入口。文档不记录任何 SSH 密码、管理密码、API Key、Claude token 或代理密码。
+本文档固定新生产服务器上的部署位置、隔离边界、更新流程和排障入口。文档名保留旧 IP 仅为兼容既有引用；当前生产主机是 `23.153.36.248`。文档不记录任何 SSH 密码、管理密码、API Key、Claude token 或代理密码。
 
 ## 服务器现状
 
-- 主机：`23.153.36.12`
-- SSH：`root@23.153.36.12:41629`
+- 主机：`23.153.36.248`
+- SSH：`root@23.153.36.248:41629`
 - 系统：Ubuntu，Docker 已安装
 - NewAPI 对外入口：`https://api.openstaryu.com`
 - CPA 管理入口：`https://admin.openstaryu.com/management.html`
 - CPA 本机入口：`http://127.0.0.1:8318/management.html`
 - CPA 本机健康检查：`http://127.0.0.1:8318/healthz`
-- CPA 的 `8318` 端口不再公网开放；不要再把 `http://23.153.36.12:8318` 作为客户或管理入口。
+- CPA 的 `8318` 端口不再公网开放；不要再把 `http://23.153.36.248:8318` 作为客户或管理入口。
 
 部署前已确认存在的生产项目：
 
@@ -344,7 +344,7 @@ docker compose up -d
 - 不要把 SSH 密码、管理密码、API Key、Claude token 写进本文档。
 - 常规代码更新时只操作 `/opt/cpa-claude-proxy` 和 `/opt/cpa-claude-proxy-backups`。
 - 不要把 CPA 重新改回公网 `0.0.0.0:8318`。
-- 不要把 NewAPI 的 CPA 号池渠道改回 `http://23.153.36.12:8318`；应保持 `http://cpa-claude-proxy:8318`。
+- 不要把 NewAPI 的 CPA 号池渠道改回公网 IP `:8318`；应保持 `http://cpa-claude-proxy:8318`。
 - 不要改 `/opt/new-api-production`、`/opt/sub2api-production`、Coolify 目录或相关容器，除非任务明确涉及域名反代、端口收口或对应服务本身。
 - 账号、代理、管理密钥和客户端 API Key 由旧服务器配置/数据迁移而来，后续应通过管理面板维护。
 - 前端源码仓库是 `F:\claude反代\Cli-Proxy-API-Management-Center`，不是后端仓库内的 `static` 目录。

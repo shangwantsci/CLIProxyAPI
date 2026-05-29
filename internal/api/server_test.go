@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -84,6 +85,162 @@ func TestHealthz(t *testing.T) {
 			t.Fatalf("expected empty body for HEAD request, got %q", rr.Body.String())
 		}
 	})
+}
+
+func TestAPIConnectionsDisabledBlocksPublicAPIRoutes(t *testing.T) {
+	server := newTestServer(t)
+	server.cfg.DisableAPIConnections = true
+
+	wsHit := false
+	server.AttachWebsocketRoute("/v1/ws-test", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wsHit = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	testCases := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "v1 models", method: http.MethodGet, path: "/v1/models"},
+		{name: "v1 chat", method: http.MethodPost, path: "/v1/chat/completions"},
+		{name: "codex direct", method: http.MethodPost, path: "/backend-api/codex/responses"},
+		{name: "gemini v1beta", method: http.MethodGet, path: "/v1beta/models"},
+		{name: "amp provider alias", method: http.MethodGet, path: "/api/provider/openai/models"},
+		{name: "gemini cli internal", method: http.MethodPost, path: "/v1internal:generateContent"},
+		{name: "websocket route", method: http.MethodGet, path: "/v1/ws-test"},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			req.Header.Set("Authorization", "Bearer test-key")
+			rr := httptest.NewRecorder()
+			server.engine.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusServiceUnavailable, rr.Body.String())
+			}
+			if body := rr.Body.String(); !strings.Contains(body, "api_connections_disabled") {
+				t.Fatalf("response body missing api_connections_disabled: %s", body)
+			}
+		})
+	}
+
+	if wsHit {
+		t.Fatal("websocket handler should not be reached when API connections are disabled")
+	}
+}
+
+func TestAPIConnectionsDisabledDoesNotHideManagementOrHealth(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+
+	server := newTestServer(t)
+	server.cfg.DisableAPIConnections = true
+
+	healthReq := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	healthRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(healthRR, healthReq)
+	if healthRR.Code != http.StatusOK {
+		t.Fatalf("healthz status = %d, want %d body=%s", healthRR.Code, http.StatusOK, healthRR.Body.String())
+	}
+
+	configReq := httptest.NewRequest(http.MethodGet, "/v0/management/config", nil)
+	configReq.Header.Set("Authorization", "Bearer test-management-key")
+	configRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(configRR, configReq)
+	if configRR.Code != http.StatusOK {
+		t.Fatalf("management config status = %d, want %d body=%s", configRR.Code, http.StatusOK, configRR.Body.String())
+	}
+}
+
+func TestPutConfigYAMLHotReloadsServerConfig(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+
+	server := newTestServer(t)
+	body := strings.NewReader(strings.Join([]string{
+		"host: 127.0.0.1",
+		"port: 0",
+		"api-keys:",
+		"  - test-key",
+		"disable-api-connections: true",
+		"routing:",
+		"  strategy: fill-first",
+		"",
+	}, "\n"))
+
+	req := httptest.NewRequest(http.MethodPut, "/v0/management/config.yaml", body)
+	req.Header.Set("Authorization", "Bearer test-management-key")
+	req.Header.Set("Content-Type", "application/yaml")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if got := server.cfg.Routing.Strategy; got != "fill-first" {
+		t.Fatalf("server routing strategy = %q, want fill-first", got)
+	}
+	if !server.cfg.DisableAPIConnections {
+		t.Fatal("server DisableAPIConnections = false, want true")
+	}
+	if server.handlers == nil || server.handlers.Cfg == nil || !server.handlers.Cfg.DisableAPIConnections {
+		t.Fatal("base API handler config was not hot-reloaded")
+	}
+}
+
+func TestManagementAPIConnectionsEndpointPersistsAndApplies(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+
+	server := newTestServer(t)
+	if err := os.WriteFile(server.configFilePath, []byte("api-keys:\n  - test-key\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/v0/management/api-connections", strings.NewReader(`{"enabled":false}`))
+	req.Header.Set("Authorization", "Bearer test-management-key")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("disable status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if !server.cfg.DisableAPIConnections {
+		t.Fatal("DisableAPIConnections = false, want true after management disable")
+	}
+
+	data, err := os.ReadFile(server.configFilePath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !strings.Contains(string(data), "disable-api-connections: true") {
+		t.Fatalf("config file missing disable flag:\n%s", string(data))
+	}
+
+	req = httptest.NewRequest(http.MethodPut, "/v0/management/api-connections", strings.NewReader(`{"enabled":true}`))
+	req.Header.Set("Authorization", "Bearer test-management-key")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("enable status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if server.cfg.DisableAPIConnections {
+		t.Fatal("DisableAPIConnections = true, want false after management enable")
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/api-connections", nil)
+	req.Header.Set("Authorization", "Bearer test-management-key")
+	rr = httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("get status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	payload, _ := io.ReadAll(rr.Body)
+	if !strings.Contains(string(payload), `"enabled":true`) {
+		t.Fatalf("get response should report enabled=true, got %s", string(payload))
+	}
 }
 
 func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {

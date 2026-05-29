@@ -11,7 +11,7 @@ This fork has project-operation docs that must be treated as working memory for 
 
 - `docs/codex-handoff.md` — first-stop handoff document for a new Codex window. It records the fork goal, local repositories, current production state, recent important commits, known pitfalls, and takeover checklist.
 - `docs/project-file-map.md` — file map for the backend/frontend split. Read this before locating files or deciding whether a task belongs in backend or frontend. This is the guardrail against editing the wrong repository or the wrong frontend page.
-- `docs/production-deployment-23.153.36.12.md` — standard production deployment and rollback flow for `23.153.36.12:8318`. Read this before any server update. Never write SSH passwords, management passwords, API keys, Claude tokens, or proxy passwords into docs or commits.
+- `docs/production-deployment-23.153.36.12.md` — standard production deployment and rollback flow; the filename is legacy, and the current server host is `23.153.36.248`. Read this before any server update. Never write SSH passwords, management passwords, API keys, Claude tokens, or proxy passwords into docs or commits.
 - `docs/claude-code-mimicry.md` — current Claude Code compatibility and fingerprint strategy. Read this before touching Claude headers, device profile, system prompt, cloak behavior, beta tokens, CCH signing, or mimicry audit/guard logic.
 - `F:\claude反代\Cli-Proxy-API-Management-Center\docs\claude-account-pool-maintenance.md` — frontend account-pool maintenance map. Read this before changing the production management UI, especially account pool, probe jobs, quota display, detail drawers, settings modals, or bulk actions.
 

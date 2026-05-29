@@ -34,6 +34,10 @@ type SDKConfig struct {
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
+	// DisableAPIConnections temporarily closes public API entrypoints before requests reach upstream credentials.
+	// Management endpoints, health checks and OAuth callbacks remain available so operators can re-enable access.
+	DisableAPIConnections bool `yaml:"disable-api-connections" json:"disable-api-connections"`
+
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`
