@@ -2562,6 +2562,30 @@ func TestCheckSystemInstructionsWithMode_ArraySystemStillWorks(t *testing.T) {
 	}
 }
 
+func TestCheckSystemInstructionsWithMode_ForwardsSystemCacheControlToReminder(t *testing.T) {
+	payload := []byte(`{"system":[{"type":"text","text":"Cache this system prompt.","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hi"}]}`)
+
+	out := checkSystemInstructionsWithSigningModeForced(payload, false, false, false, helps.DefaultClaudeVersion(nil), "", "", true)
+
+	content := gjson.GetBytes(out, "messages.0.content")
+	if !content.IsArray() {
+		t.Fatalf("messages[0].content should become an array so the forwarded system reminder can keep cache_control, got %s", content.Raw)
+	}
+	blocks := content.Array()
+	if len(blocks) != 2 {
+		t.Fatalf("messages[0].content should contain forwarded reminder plus original user text, got %d blocks", len(blocks))
+	}
+	if got := blocks[0].Get("text").String(); got != expectedForwardedSystemReminder("Cache this system prompt.") {
+		t.Fatalf("forwarded reminder text = %q", got)
+	}
+	if got := blocks[0].Get("cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("forwarded reminder cache_control.type = %q, want ephemeral", got)
+	}
+	if got := blocks[1].Get("text").String(); got != "hi" {
+		t.Fatalf("original user text = %q, want hi", got)
+	}
+}
+
 // Test case 5: Special characters in string system prompt survive forwarding
 func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 	payload := []byte(`{"system":"Use <xml> tags & \"quotes\" in output.","messages":[{"role":"user","content":"hi"}]}`)
@@ -2614,6 +2638,95 @@ func TestClaudeExecutor_ExperimentalCCHSigningDisabledByDefaultKeepsLegacyHeader
 	}
 	if strings.Contains(billingHeader, "cch=00000;") {
 		t.Fatalf("legacy mode should not forward cch placeholder, got %q", billingHeader)
+	}
+}
+
+func TestClaudeExecutor_Execute_ForwardsSystemCacheControlThroughCloaking(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"system":[{"type":"text","text":"Cache this system prompt.","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hi"}]}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(seenBody) == 0 {
+		t.Fatal("expected request body to be captured")
+	}
+
+	content := gjson.GetBytes(seenBody, "messages.0.content")
+	if !content.IsArray() {
+		t.Fatalf("messages[0].content should remain an array after full Execute path, got %s", content.Raw)
+	}
+	if got := gjson.GetBytes(seenBody, "messages.0.content.0.text").String(); got != expectedForwardedSystemReminder("Cache this system prompt.") {
+		t.Fatalf("forwarded reminder text = %q", got)
+	}
+	if got := gjson.GetBytes(seenBody, "messages.0.content.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("forwarded reminder cache_control.type = %q, want ephemeral", got)
+	}
+	if got := gjson.GetBytes(seenBody, "messages.0.content.1.text").String(); got != "hi" {
+		t.Fatalf("original user text = %q, want hi", got)
+	}
+	if got := countCacheControls(seenBody); got > 4 {
+		t.Fatalf("cache_control count = %d, want <= 4", got)
+	}
+}
+
+func TestClaudeExecutor_Execute_PreservesCacheMarkedSystemTextForOAuthCloaking(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{
+		ClaudeMimicryGuard: config.ClaudeMimicryGuardConfig{Mode: "observe"},
+	})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"base_url": server.URL,
+		},
+		Metadata: map[string]any{
+			"access_token": "sk-ant-oat-test-token",
+		},
+	}
+	const systemText = "Cache this OAuth system prompt exactly."
+	payload := []byte(`{"system":[{"type":"text","text":"` + systemText + `","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hi"}]}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(seenBody) == 0 {
+		t.Fatal("expected request body to be captured")
+	}
+
+	if got := gjson.GetBytes(seenBody, "messages.0.content.0.text").String(); got != expectedForwardedSystemReminder(systemText) {
+		t.Fatalf("OAuth forwarded reminder text = %q", got)
+	}
+	if got := gjson.GetBytes(seenBody, "messages.0.content.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("OAuth forwarded reminder cache_control.type = %q, want ephemeral", got)
 	}
 }
 

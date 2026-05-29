@@ -206,6 +206,7 @@ context-1m-2025-08-07
 - 非 strict cloak 模式下，会把用户 system prompt 保留并前置/转移到请求中。
 - strict cloak 模式下，会更强地清理用户 system prompt，只保留 Claude Code 风格 prompt。
 - 当前 Agent SDK 身份块和 Harness 块已自带 `cache_control`；通用 cache 注入逻辑不会再重复给 system 额外补点。
+- 当非 strict cloak 把原始 system text 转移到首条 user message 的 `<system-reminder>` 时，如果原始最后一个被转发的 system text block 带合法 `cache_control: {"type":"ephemeral"}`，该断点会随转移后的 reminder block 保留；OAuth cloaking 也会保留这类显式 cache-marked system 文本，避免客户长前缀被 sanitize 后无法创建 prompt cache。非法 `cache_control.type` 不会被转发，避免把客户端异常参数放大成上游错误。
 
 ### 5.1 请求形态修复优先
 

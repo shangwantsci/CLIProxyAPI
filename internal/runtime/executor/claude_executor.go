@@ -2629,12 +2629,14 @@ func checkSystemInstructionsWithSigningModeForced(payload []byte, strictMode boo
 	// Collect user system instructions and prepend to first user message
 	if !strictMode {
 		var userSystemParts []string
+		var forwardedCacheControl map[string]string
 		if system.IsArray() {
 			system.ForEach(func(_, part gjson.Result) bool {
 				if part.Get("type").String() == "text" {
 					txt := strings.TrimSpace(part.Get("text").String())
 					if shouldForwardOriginalSystemText(txt, forceBilling) {
 						userSystemParts = append(userSystemParts, txt)
+						forwardedCacheControl = validForwardedSystemCacheControl(part)
 					}
 				}
 				return true
@@ -2645,16 +2647,29 @@ func checkSystemInstructionsWithSigningModeForced(payload []byte, strictMode boo
 
 		if len(userSystemParts) > 0 {
 			combined := strings.Join(userSystemParts, "\n\n")
-			if oauthMode {
+			if oauthMode && forwardedCacheControl == nil {
 				combined = sanitizeForwardedSystemPrompt(combined)
 			}
 			if strings.TrimSpace(combined) != "" {
-				payload = prependToFirstUserMessage(payload, combined)
+				payload = prependToFirstUserMessage(payload, combined, forwardedCacheControl)
 			}
 		}
 	}
 
 	return payload
+}
+
+func validForwardedSystemCacheControl(part gjson.Result) map[string]string {
+	cc := part.Get("cache_control")
+	if !cc.IsObject() || cc.Get("type").String() != "ephemeral" {
+		return nil
+	}
+	out := map[string]string{"type": "ephemeral"}
+	switch ttl := cc.Get("ttl").String(); ttl {
+	case "5m", "1h":
+		out["ttl"] = ttl
+	}
+	return out
 }
 
 func shouldForwardOriginalSystemText(text string, forceBilling bool) bool {
@@ -2715,7 +2730,7 @@ func buildTextBlock(text string, cacheControl map[string]string) string {
 // prependToFirstUserMessage prepends text content to the first user message.
 // This avoids putting non-Claude-Code system instructions in system[] which
 // triggers Anthropic's extra usage billing for OAuth-proxied requests.
-func prependToFirstUserMessage(payload []byte, text string) []byte {
+func prependToFirstUserMessage(payload []byte, text string, cacheControl map[string]string) []byte {
 	messages := gjson.GetBytes(payload, "messages")
 	if !messages.Exists() || !messages.IsArray() {
 		return payload
@@ -2748,6 +2763,9 @@ IMPORTANT: this context may or may not be relevant to your tasks. You should not
 
 	if content.IsArray() {
 		newBlock := fmt.Sprintf(`{"type":"text","text":%q}`, prefixBlock)
+		if cacheControl != nil {
+			newBlock = buildTextBlock(prefixBlock, cacheControl)
+		}
 		var newArray string
 		if content.Raw == "[]" || content.Raw == "" {
 			newArray = "[" + newBlock + "]"
@@ -2756,8 +2774,15 @@ IMPORTANT: this context may or may not be relevant to your tasks. You should not
 		}
 		payload, _ = sjson.SetRawBytes(payload, contentPath, []byte(newArray))
 	} else if content.Type == gjson.String {
-		newText := prefixBlock + content.String()
-		payload, _ = sjson.SetBytes(payload, contentPath, newText)
+		if cacheControl == nil {
+			newText := prefixBlock + content.String()
+			payload, _ = sjson.SetBytes(payload, contentPath, newText)
+		} else {
+			newBlock := buildTextBlock(prefixBlock, cacheControl)
+			originalBlock := buildTextBlock(content.String(), nil)
+			newArray := "[" + newBlock + "," + originalBlock + "]"
+			payload, _ = sjson.SetRawBytes(payload, contentPath, []byte(newArray))
+		}
 	}
 
 	return payload
