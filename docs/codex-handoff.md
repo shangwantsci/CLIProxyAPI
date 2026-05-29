@@ -27,9 +27,9 @@
 - CPA 管理入口：`https://admin.openstaryu.com/management.html`
 - CPA 本机健康检查：`http://127.0.0.1:8318/healthz`
 - SSH：`root@23.153.36.12:41629`
-- 后端部署提交：`933b94da`
-- 前端部署提交：`c8f38d9`
-- 最近一次账号备份：`/opt/cpa-claude-proxy-backups/auths-20260528-122721.tgz`
+- 后端部署提交：`3dfa9d56`
+- 前端部署提交：`78d54e1`
+- 最近一次账号备份：`/opt/cpa-claude-proxy-backups/auths-20260529-061143.tgz`
 - 最近一次网络入口收口备份：`/root/openstaryu-hardening-20260528-113201`
 
 当前端口策略：
@@ -82,6 +82,11 @@ cat /opt/cpa-claude-proxy/DEPLOYED_COMMITS
   - `proxy_url` 留空时，来源抓取和账号验证都会从已启用代理池随机选代理；指定 `proxy_url` 时两段都使用指定代理。
   - 同次部署前端 `c8f38d9`，管理面板改为中性品牌并增加生产构建敏感词扫描。
   - 已部署到生产服务器，服务器 `DEPLOYED_COMMITS` 显示 `backend=933b94da`、`frontend=c8f38d9`。
+- `3dfa9d56 fix: harden Claude mimicry repair`
+  - 对 Claude 请求形态执行“修复优先”：`xhigh` 降为 `high`、thinking budget clamp、空 text block 删除、`context_management` 自动补 beta。
+  - device profile 改为可信自适应，拒绝 `local/undefined/999` 和“高 CLI 版本 + 低 package”的不自洽组合，避免污染账号 metadata。
+  - 客户端请求形态错误不再污染账号健康，例如 `budget out of range`、`thinking not supported`、`unknown level`。
+  - 已部署到生产服务器，服务器 `DEPLOYED_COMMITS` 显示 `backend=3dfa9d56`、`frontend=78d54e1`。
 
 ## 最近关键运维改动
 

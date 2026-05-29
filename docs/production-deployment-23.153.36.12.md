@@ -57,11 +57,11 @@ Traefik 动态路由：
 
 ## 当前部署版本
 
-- 后端提交：`88c53e68`
+- 后端提交：`3dfa9d56`
 - 前端提交：`78d54e1`
-- 最近一次按本文档部署时间：`2026-05-29T02:30:13+00:00`
-- 最近一次账号备份：`/opt/cpa-claude-proxy-backups/auths-20260529-023007.tgz`
-- 最近一次后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-88c53e68-20260529-023007.bak`
+- 最近一次按本文档部署时间：`2026-05-29T06:11:44+00:00`
+- 最近一次账号备份：`/opt/cpa-claude-proxy-backups/auths-20260529-061143.tgz`
+- 最近一次后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-3dfa9d56-20260529-061143.bak`
 - 最近一次网络入口收口：`2026-05-28T11:32:01+00:00`
 - 最近一次网络入口收口备份：`/root/openstaryu-hardening-20260528-113201`
 - 初始迁移来源：旧服务器 `38.76.196.12:/opt/cpa-claude-proxy`
@@ -162,6 +162,12 @@ mkdir -p /tmp/cpa-claude-stage
 ```bash
 mkdir -p /opt/cpa-claude-proxy-backups
 tar -czf /opt/cpa-claude-proxy-backups/auths-$(date +%Y%m%d-%H%M%S).tgz -C /opt/cpa-claude-proxy auths
+```
+
+如果 `auths/logs` 正在高频写入或轮转，`tar` 可能因日志文件变化返回非 0。账号回滚关键数据是账号 JSON 与代理配置，可在这种情况下排除日志目录：
+
+```bash
+tar --exclude='auths/logs' -czf /opt/cpa-claude-proxy-backups/auths-$(date +%Y%m%d-%H%M%S).tgz -C /opt/cpa-claude-proxy auths
 ```
 
 ### 7. 覆盖运行产物并重启
