@@ -27,9 +27,9 @@
 - CPA 管理入口：`https://admin.openstaryu.com/management.html`
 - CPA 本机健康检查：`http://127.0.0.1:8318/healthz`
 - SSH：`root@23.153.36.12:41629`
-- 后端部署提交：`3dfa9d56`
+- 后端部署提交：`21c88d4e`
 - 前端部署提交：`78d54e1`
-- 最近一次账号备份：`/opt/cpa-claude-proxy-backups/auths-20260529-061143.tgz`
+- 最近一次账号备份：`/opt/cpa-claude-proxy-backups/auths-20260529-115241.tgz`
 - 最近一次网络入口收口备份：`/root/openstaryu-hardening-20260528-113201`
 
 当前端口策略：
@@ -87,6 +87,11 @@ cat /opt/cpa-claude-proxy/DEPLOYED_COMMITS
   - device profile 改为可信自适应，拒绝 `local/undefined/999` 和“高 CLI 版本 + 低 package”的不自洽组合，避免污染账号 metadata。
   - 客户端请求形态错误不再污染账号健康，例如 `budget out of range`、`thinking not supported`、`unknown level`。
   - 已部署到生产服务器，服务器 `DEPLOYED_COMMITS` 显示 `backend=3dfa9d56`、`frontend=78d54e1`。
+- `21c88d4e fix: preserve Claude cache-marked system prompts`
+  - 修复非 strict cloak 把客户原始 `system.cache_control` 搬到首条 user `<system-reminder>` 时丢失缓存断点的问题。
+  - 生产账号均为 Claude OAuth 形态，因此对显式带合法 `cache_control: {"type":"ephemeral"}` 的 system 文本跳过 OAuth sanitize，保留长前缀用于 prompt cache；无 cache_control 的普通 system 仍保持原 sanitize 策略。
+  - 已用 `https://api.openstaryu.com` 客户入口验证：第一次请求返回 `cache_creation_input_tokens=16065`，第二次同前缀返回 `cache_read_input_tokens=16065`。
+  - 已部署到生产服务器，服务器 `DEPLOYED_COMMITS` 显示 `backend=21c88d4e`、`frontend=78d54e1`。
 
 ## 最近关键运维改动
 
