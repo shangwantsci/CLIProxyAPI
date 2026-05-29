@@ -32,6 +32,7 @@ const (
 
 var (
 	claudeCLIVersionPattern = regexp.MustCompile(`^claude-cli/(\d+)\.(\d+)\.(\d+)`)
+	dottedVersionPattern    = regexp.MustCompile(`^(\d+)\.(\d+)\.(\d+)$`)
 
 	claudeDeviceProfileCache            = make(map[string]claudeDeviceProfileCacheEntry)
 	claudeDeviceProfileCacheMu          sync.RWMutex
@@ -163,6 +164,15 @@ func mapStainlessArch() string {
 
 func parseClaudeCLIVersion(userAgent string) (claudeCLIVersion, bool) {
 	matches := claudeCLIVersionPattern.FindStringSubmatch(strings.TrimSpace(userAgent))
+	return parseDottedVersionMatches(matches)
+}
+
+func parseDottedVersion(raw string) (claudeCLIVersion, bool) {
+	matches := dottedVersionPattern.FindStringSubmatch(strings.TrimSpace(raw))
+	return parseDottedVersionMatches(matches)
+}
+
+func parseDottedVersionMatches(matches []string) (claudeCLIVersion, bool) {
 	if len(matches) != 4 {
 		return claudeCLIVersion{}, false
 	}
@@ -179,6 +189,27 @@ func parseClaudeCLIVersion(userAgent string) (claudeCLIVersion, bool) {
 		return claudeCLIVersion{}, false
 	}
 	return claudeCLIVersion{major: major, minor: minor, patch: patch}, true
+}
+
+func isTrustedClaudeDeviceProfile(profile, baseline ClaudeDeviceProfile) bool {
+	if profile.UserAgent == "" || !profile.hasVersion {
+		return false
+	}
+	userAgent := strings.ToLower(profile.UserAgent)
+	if strings.Contains(userAgent, "undefined") || strings.Contains(userAgent, "local") {
+		return false
+	}
+	if profile.version.major > 10 {
+		return false
+	}
+	if baseline.hasVersion && profile.version.Compare(baseline.version) > 0 {
+		profilePackage, hasProfilePackage := parseDottedVersion(profile.PackageVersion)
+		baselinePackage, hasBaselinePackage := parseDottedVersion(baseline.PackageVersion)
+		if hasProfilePackage && hasBaselinePackage && profilePackage.Compare(baselinePackage) < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func shouldUpgradeClaudeDeviceProfile(candidate, current ClaudeDeviceProfile) bool {
@@ -318,7 +349,11 @@ func claudeDeviceProfileFromMetadata(auth *cliproxyauth.Auth, baseline ClaudeDev
 	if profile.Arch == "" {
 		profile.Arch = baseline.Arch
 	}
-	return normalizeClaudeDeviceProfile(profile, baseline), true
+	profile = normalizeClaudeDeviceProfile(profile, baseline)
+	if !isTrustedClaudeDeviceProfile(profile, baseline) {
+		return ClaudeDeviceProfile{}, false
+	}
+	return profile, true
 }
 
 func claudeDeviceProfileMetadata(profile ClaudeDeviceProfile) map[string]any {
@@ -385,6 +420,9 @@ func ResolveClaudeDeviceProfile(auth *cliproxyauth.Auth, apiKey string, headers 
 	candidate, hasCandidate := extractClaudeDeviceProfile(headers, cfg)
 	if hasCandidate {
 		candidate = pinClaudeDeviceProfilePlatform(candidate, baseline)
+	}
+	if hasCandidate && !isTrustedClaudeDeviceProfile(candidate, baseline) {
+		hasCandidate = false
 	}
 	if hasCandidate && !shouldUpgradeClaudeDeviceProfile(candidate, baseline) {
 		hasCandidate = false

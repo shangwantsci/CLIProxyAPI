@@ -256,6 +256,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, stream)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
+	body = repairClaudeRequestShapeBeforeThinking(body)
 	ctx = helps.WithClaudeBillableUsage(ctx, config.ClaudeBillableUsageEnabled(e.cfg), baseModel, from.String(), originalPayloadSource)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
@@ -271,6 +272,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body = ensureModelMaxTokens(body, baseModel)
+	body = repairClaudeRequestShape(body)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
@@ -293,6 +295,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Extract betas from body and convert to header
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
+	extraBetas = inferClaudeBetasFromBody(body, extraBetas)
 	bodyForTranslation := body
 	bodyForUpstream := body
 	oauthToken := isClaudeOAuthToken(apiKey)
@@ -449,6 +452,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
+	body = repairClaudeRequestShapeBeforeThinking(body)
 	ctx = helps.WithClaudeBillableUsage(ctx, config.ClaudeBillableUsageEnabled(e.cfg), baseModel, from.String(), originalPayloadSource)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
@@ -464,6 +468,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body = ensureModelMaxTokens(body, baseModel)
+	body = repairClaudeRequestShape(body)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
@@ -483,6 +488,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// Extract betas from body and convert to header
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
+	extraBetas = inferClaudeBetasFromBody(body, extraBetas)
 	bodyForTranslation := body
 	bodyForUpstream := body
 	oauthToken := isClaudeOAuthToken(apiKey)
@@ -751,6 +757,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	stream := from != to
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
+	body = repairClaudeRequestShape(body)
 
 	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
 
@@ -761,6 +768,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	// Extract betas from body and convert to header (for count_tokens too)
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
+	extraBetas = inferClaudeBetasFromBody(body, extraBetas)
 	oauthToken := isClaudeOAuthToken(apiKey)
 	if oauthToken {
 		body, _ = prepareClaudeOAuthToolNamesForUpstream(body, claudeToolPrefix, auth.ToolPrefixDisabled())
@@ -1129,6 +1137,150 @@ func normalizeClaudeTemperatureForThinking(body []byte) []byte {
 		body, _ = sjson.SetBytes(body, "temperature", 1)
 	}
 	return body
+}
+
+func repairClaudeRequestShape(body []byte) []byte {
+	body = repairClaudeRequestShapeBeforeThinking(body)
+	body = repairClaudeContextManagement(body)
+	return body
+}
+
+func repairClaudeRequestShapeBeforeThinking(body []byte) []byte {
+	body = repairClaudeAdaptiveEffort(body)
+	body = repairClaudeThinkingBudget(body)
+	body = repairClaudeMessageContent(body)
+	return body
+}
+
+func repairClaudeAdaptiveEffort(body []byte) []byte {
+	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
+	if thinkingType != "enabled" && thinkingType != "adaptive" && thinkingType != "auto" {
+		return body
+	}
+	effort := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "output_config.effort").String()))
+	if effort != "xhigh" {
+		return body
+	}
+	body, _ = sjson.SetBytes(body, "output_config.effort", "high")
+	return body
+}
+
+func repairClaudeThinkingBudget(body []byte) []byte {
+	budgetResult := gjson.GetBytes(body, "thinking.budget_tokens")
+	if !budgetResult.Exists() || budgetResult.Type != gjson.Number {
+		return body
+	}
+	budget := int(budgetResult.Int())
+	if budget <= 0 {
+		return body
+	}
+
+	modelInfo := registry.LookupModelInfo(gjson.GetBytes(body, "model").String(), "claude")
+	if modelInfo == nil || modelInfo.Thinking == nil {
+		return body
+	}
+	minBudget := modelInfo.Thinking.Min
+	maxBudget := modelInfo.Thinking.Max
+	if minBudget > 0 && budget < minBudget {
+		budget = minBudget
+	}
+	if maxBudget > 0 && budget > maxBudget {
+		budget = maxBudget
+	}
+	if maxTokens := gjson.GetBytes(body, "max_tokens"); maxTokens.Exists() && maxTokens.Type == gjson.Number && maxTokens.Int() > 0 && int(maxTokens.Int()) <= budget {
+		adjusted := int(maxTokens.Int()) - 1
+		if minBudget <= 0 || adjusted >= minBudget {
+			budget = adjusted
+		}
+	}
+	if budget != int(budgetResult.Int()) {
+		body, _ = sjson.SetBytes(body, "thinking.budget_tokens", budget)
+	}
+	return body
+}
+
+func repairClaudeContextManagement(body []byte) []byte {
+	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
+	if thinkingType == "enabled" || thinkingType == "adaptive" || thinkingType == "auto" {
+		return body
+	}
+
+	edits := gjson.GetBytes(body, "context_management.edits")
+	if !edits.Exists() || !edits.IsArray() {
+		return body
+	}
+
+	cleaned := make([]any, 0, len(edits.Array()))
+	removed := false
+	edits.ForEach(func(_, edit gjson.Result) bool {
+		if edit.IsObject() && edit.Get("type").String() == "clear_thinking_20251015" {
+			removed = true
+			return true
+		}
+		cleaned = append(cleaned, edit.Value())
+		return true
+	})
+	if !removed {
+		return body
+	}
+	if len(cleaned) == 0 {
+		body, _ = sjson.DeleteBytes(body, "context_management.edits")
+		if cm := gjson.GetBytes(body, "context_management"); cm.Exists() && cm.IsObject() && len(cm.Map()) == 0 {
+			body, _ = sjson.DeleteBytes(body, "context_management")
+		}
+		return body
+	}
+	body, _ = sjson.SetBytes(body, "context_management.edits", cleaned)
+	return body
+}
+
+func repairClaudeMessageContent(body []byte) []byte {
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return body
+	}
+
+	messages.ForEach(func(messageIndex, message gjson.Result) bool {
+		content := message.Get("content")
+		if !content.Exists() || !content.IsArray() {
+			return true
+		}
+		cleaned := make([]any, 0, len(content.Array()))
+		removed := false
+		content.ForEach(func(_, block gjson.Result) bool {
+			if block.IsObject() && block.Get("type").String() == "text" && block.Get("text").Exists() && block.Get("text").String() == "" {
+				removed = true
+				return true
+			}
+			cleaned = append(cleaned, block.Value())
+			return true
+		})
+		if removed && len(cleaned) > 0 {
+			body, _ = sjson.SetBytes(body, fmt.Sprintf("messages.%d.content", messageIndex.Int()), cleaned)
+		}
+		return true
+	})
+	return body
+}
+
+func inferClaudeBetasFromBody(body []byte, betas []string) []string {
+	if gjson.GetBytes(body, "context_management").Exists() {
+		betas = appendClaudeBetaToken(betas, "context-management-2025-06-27")
+	}
+	return betas
+}
+
+func appendClaudeBetaToken(tokens []string, beta string) []string {
+	beta = strings.TrimSpace(beta)
+	if beta == "" {
+		return tokens
+	}
+	for _, token := range tokens {
+		if strings.TrimSpace(token) == beta {
+			return tokens
+		}
+	}
+	return append(tokens, beta)
 }
 
 var claudeDroppedBetaTokens = map[string]struct{}{

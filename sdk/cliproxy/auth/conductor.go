@@ -2948,6 +2948,16 @@ func isClientRequestInvalidMessage(message string) bool {
 		strings.Contains(upper, "FAILED_PRECONDITION") {
 		return true
 	}
+	if strings.Contains(lower, "budget") &&
+		(strings.Contains(lower, "out of range") || strings.Contains(lower, "cannot be converted to a valid level")) {
+		return true
+	}
+	if strings.Contains(lower, "thinking not supported") {
+		return true
+	}
+	if strings.Contains(lower, "unknown level:") {
+		return true
+	}
 	return strings.Contains(lower, "level") &&
 		strings.Contains(lower, "not supported") &&
 		strings.Contains(lower, "valid levels:")

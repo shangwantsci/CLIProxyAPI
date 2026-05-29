@@ -343,6 +343,83 @@ func TestApplyClaudeHeaders_TracksHighestClaudeCLIFingerprint(t *testing.T) {
 	assertClaudeFingerprint(t, lowerReq.Header, "claude-cli/2.1.63 (external, cli)", "0.75.0", "v24.4.0", "MacOS", "arm64")
 }
 
+func TestApplyClaudeHeaders_RejectsImplausibleClaudeClientFingerprint(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+
+	auth := &cliproxyauth.Auth{
+		ID: "auth-implausible-fingerprint",
+		Attributes: map[string]string{
+			"api_key": "key-implausible-fingerprint",
+		},
+	}
+	req := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent":                  []string{"claude-cli/999.0.0-local (undefined, sdk-cli)"},
+		"X-Stainless-Package-Version": []string{"0.80.0"},
+		"X-Stainless-Runtime-Version": []string{"v24.3.0"},
+		"X-Stainless-Os":              []string{"Linux"},
+		"X-Stainless-Arch":            []string{"x64"},
+	})
+
+	applyClaudeHeaders(req, auth, "key-implausible-fingerprint", false, nil, &config.Config{})
+
+	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.154 (external, sdk-cli)", "0.94.0", "v24.3.0", "Windows", "x64")
+	if _, ok := auth.Metadata["claude_device_profile"]; ok {
+		t.Fatalf("implausible fingerprint should not be persisted to auth metadata: %#v", auth.Metadata["claude_device_profile"])
+	}
+}
+
+func TestApplyClaudeHeaders_RejectsHigherCliWithOlderPackageVersion(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+
+	auth := &cliproxyauth.Auth{
+		ID: "auth-incoherent-package",
+		Attributes: map[string]string{
+			"api_key": "key-incoherent-package",
+		},
+	}
+	req := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent":                  []string{"claude-cli/2.2.126 (external, cli)"},
+		"X-Stainless-Package-Version": []string{"0.81.0"},
+		"X-Stainless-Runtime-Version": []string{"v24.3.0"},
+		"X-Stainless-Os":              []string{"Linux"},
+		"X-Stainless-Arch":            []string{"x64"},
+	})
+
+	applyClaudeHeaders(req, auth, "key-incoherent-package", false, nil, &config.Config{})
+
+	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.154 (external, sdk-cli)", "0.94.0", "v24.3.0", "Windows", "x64")
+	if _, ok := auth.Metadata["claude_device_profile"]; ok {
+		t.Fatalf("incoherent fingerprint should not be persisted to auth metadata: %#v", auth.Metadata["claude_device_profile"])
+	}
+}
+
+func TestApplyClaudeHeaders_RejectsPollutedMetadataDeviceProfile(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+
+	auth := &cliproxyauth.Auth{
+		ID: "auth-polluted-metadata",
+		Attributes: map[string]string{
+			"api_key": "key-polluted-metadata",
+		},
+		Metadata: map[string]any{
+			"claude_device_profile": map[string]any{
+				"user_agent":      "claude-cli/2.2.126 (external, cli)",
+				"package_version": "0.81.0",
+				"runtime_version": "v24.3.0",
+				"os":              "Linux",
+				"arch":            "x64",
+			},
+		},
+	}
+	req := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent": []string{"CherryStudio/1.0"},
+	})
+
+	applyClaudeHeaders(req, auth, "key-polluted-metadata", false, nil, &config.Config{})
+
+	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.154 (external, sdk-cli)", "0.94.0", "v24.3.0", "Windows", "x64")
+}
+
 func TestApplyClaudeHeaders_DoesNotDowngradeConfiguredBaselineOnFirstClaudeClient(t *testing.T) {
 	resetClaudeDeviceProfileCache()
 	stabilize := true
@@ -2733,6 +2810,72 @@ func TestNormalizeClaudeTemperatureForThinking_AfterForcedToolChoiceKeepsOrigina
 	}
 	if got := gjson.GetBytes(out, "temperature").Float(); got != 0 {
 		t.Fatalf("temperature = %v, want 0", got)
+	}
+}
+
+func TestRepairClaudeRequestShape_ClampsAdaptiveEffort(t *testing.T) {
+	payload := []byte(`{"thinking":{"type":"adaptive"},"output_config":{"effort":"xhigh"},"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if got := gjson.GetBytes(out, "output_config.effort").String(); got != "high" {
+		t.Fatalf("output_config.effort = %q, want high", got)
+	}
+}
+
+func TestRepairClaudeRequestShape_ClampsThinkingBudgetToKnownModelRange(t *testing.T) {
+	payload := []byte(`{"model":"claude-opus-4-8","thinking":{"type":"enabled","budget_tokens":200000},"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if got := gjson.GetBytes(out, "thinking.budget_tokens").Int(); got != 128000 {
+		t.Fatalf("thinking.budget_tokens = %d, want 128000", got)
+	}
+}
+
+func TestRepairClaudeRequestShape_RemovesClearThinkingWithoutThinking(t *testing.T) {
+	payload := []byte(`{"context_management":{"edits":[{"type":"clear_thinking_20251015","keep":"all"},{"type":"other","keep":"all"}]},"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if got := gjson.GetBytes(out, "context_management.edits.#").Int(); got != 1 {
+		t.Fatalf("context_management.edits count = %d, want 1", got)
+	}
+	if got := gjson.GetBytes(out, "context_management.edits.0.type").String(); got != "other" {
+		t.Fatalf("remaining edit type = %q, want other", got)
+	}
+}
+
+func TestRepairClaudeRequestShapeBeforeThinking_PreservesClearThinkingUntilFinalThinkingShape(t *testing.T) {
+	payload := []byte(`{"context_management":{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]},"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	out := repairClaudeRequestShapeBeforeThinking(payload)
+
+	if got := gjson.GetBytes(out, "context_management.edits.#").Int(); got != 1 {
+		t.Fatalf("context_management.edits count = %d, want 1", got)
+	}
+	if got := gjson.GetBytes(out, "context_management.edits.0.type").String(); got != "clear_thinking_20251015" {
+		t.Fatalf("edit type = %q, want clear_thinking_20251015", got)
+	}
+}
+
+func TestRepairClaudeRequestShape_RemovesEmptyTextBlocks(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":""},{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if got := gjson.GetBytes(out, "messages.0.content.#").Int(); got != 1 {
+		t.Fatalf("content count = %d, want 1", got)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.text").String(); got != "hi" {
+		t.Fatalf("remaining text = %q, want hi", got)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("cache_control.type = %q, want ephemeral", got)
+	}
+}
+
+func TestInferClaudeBetasFromBody_AddsContextManagementBeta(t *testing.T) {
+	payload := []byte(`{"context_management":{"edits":[{"type":"clear_thinking_20251015"}]},"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	betas := inferClaudeBetasFromBody(payload, nil)
+
+	if !stringInSlice("context-management-2025-06-27", betas) {
+		t.Fatalf("betas = %#v, want context-management beta", betas)
 	}
 }
 

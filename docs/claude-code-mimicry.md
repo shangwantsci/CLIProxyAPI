@@ -49,6 +49,10 @@ X-Stainless-Arch: x64
   - `claude_device_profile`
   - `claude_device_profile_updated_at`
 - 解析到的客户端版本必须不低于当前 baseline，低版本或缺字段会回退到 baseline。
+- device profile 学习是“可信自适应”，不是只按 UA 版本号无条件升级：
+  - UA 中包含 `undefined`、`local` 或明显异常主版本号的候选会被拒绝。
+  - 候选 CLI 版本高于 baseline，但 `X-Stainless-Package-Version` 低于 baseline 时会被拒绝，避免 `claude-cli/2.2.126` 搭配旧 package 的不自洽组合污染账号 metadata。
+  - 已写入账号 metadata 的历史污染 profile 也会在读取时重新校验，不可信时回退到当前 baseline。
 - OS/arch 会被 pin 到当前 baseline，避免跨平台组合漂移。
 
 ### 2. 上游请求头重写
@@ -178,6 +182,7 @@ context-1m-2025-08-07
 - 对客户端传入 beta 做过滤和去重。
 - 强制补齐 Claude Code 默认 beta。
 - 客户端/请求体显式传入的已知 beta 可以保留；不再把历史观察到的所有 beta 都默认注入，避免请求形态过宽。
+- 请求体包含 `context_management` 时会自动补 `context-management-2025-06-27`，避免客户端忘记带 beta 时被上游直接拒绝。
 - 每次更新 beta 列表必须说明来源，最好来自真实 Claude Code 抓包。
 
 ### 5. Claude Code system prompt 静态块
@@ -202,7 +207,25 @@ context-1m-2025-08-07
 - strict cloak 模式下，会更强地清理用户 system prompt，只保留 Claude Code 风格 prompt。
 - 当前 Agent SDK 身份块和 Harness 块已自带 `cache_control`；通用 cache 注入逻辑不会再重复给 system 额外补点。
 
-### 5.1 `cc_version` build 指纹
+### 5.1 请求形态修复优先
+
+代码入口：`internal/runtime/executor/claude_executor.go`
+
+当前策略：
+
+- 对外接客户端优先修复可安全修复的请求，而不是直接拦截。
+- `thinking.type` 为 `enabled`、`adaptive` 或 `auto` 时，`output_config.effort=xhigh` 会降级为 `high`。这是按 2026-05-29 生产日志中上游明确拒绝 `xhigh`，且真实 Opus 4.8 OAuth 抓包使用 `high` 校准。
+- `thinking.budget_tokens` 超出已知模型 `thinking.min/max` 时会 clamp 到模型范围内；如请求同时设置 `max_tokens`，会尽量保持 `budget_tokens < max_tokens`。
+- `messages[*].content` 中空字符串 text block 会删除；如果非空 text block 带 `cache_control`，该字段必须保留。
+- `context_management.edits` 中的 `clear_thinking_20251015` 只有在最终请求没有 `enabled/adaptive/auto` thinking 时才会删除，避免被上游以“clear_thinking 需要 thinking”为由拒绝。
+- 前置修复和最终修复分层执行：`ApplyThinking` 前只修会导致本地 thinking 校验失败的字段；`ApplyThinking` 和 payload config 完成后再根据最终 body 处理 `context_management`，避免误删模型后缀稍后启用 thinking 的合法请求。
+
+硬性约束：
+
+- 这里不得改 OAuth / refresh_token 路径。
+- 这里不得改响应 usage 重写逻辑；任何涉及 `cache_control` 的请求修复都必须保留上游 cache breakdown 的透传测试。
+
+### 5.2 `cc_version` build 指纹
 
 代码入口：`internal/runtime/executor/claude_executor.go`
 
@@ -212,7 +235,7 @@ context-1m-2025-08-07
 - 指纹输入取第一条 user 消息里的第一个 text 内容，而不是 system prompt。
 - 这是 2026-05-27 从本机 Claude Code `v2.1.152` 二进制和请求形态中观察到的行为；测试 `TestCheckSystemInstructionsWithMode_BillingFingerprintUsesFirstUserText` 覆盖该规则。
 
-### 5.2 thinking/signature 与 token usage
+### 5.3 thinking/signature 与 token usage
 
 代码入口：
 
@@ -295,6 +318,12 @@ context-1m-2025-08-07
   - `degrade`
   - `block`
 - 会记录最近事件，用于排查哪类客户端触发了伪装风险。
+- 上游 400 中可归因于客户端请求形态的问题不会污染账号健康统计，例如：
+  - `level ... not supported`
+  - `budget ... out of range`
+  - `thinking not supported`
+  - `unknown level`
+- 账号健康语义仍保持：认证失败、组织禁用、quota、上游不可用等账号或上游状态类错误才进入账号健康/冷却路径。
 
 ## 维护流程
 
@@ -326,6 +355,12 @@ context-1m-2025-08-07
 ```powershell
 Set-Location F:\claude反代\CLIProxyAPI
 F:\GO语言\bin\go.exe test -count=1 ./internal/runtime/executor ./internal/runtime/executor/helps
+```
+
+如果 `./internal/runtime/executor` 整包存在其他 provider 的既有失败，可先跑 Claude 定向回归：
+
+```powershell
+F:\GO语言\bin\go.exe test -count=1 ./internal/runtime/executor -run "TestRepairClaudeRequestShape|TestInferClaudeBetasFromBody|TestApplyClaudeHeaders|TestAuditClaudeMimicry|TestClaudeExecutor_Execute_Opus48MatchesClaudeCode214RequestShape"
 ```
 
 如果改动同时影响账号状态或管理面板字段：
