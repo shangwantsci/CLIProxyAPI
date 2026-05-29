@@ -155,7 +155,7 @@ func TestApplyClaudeHeaders_UsesConfiguredBaselineFingerprint(t *testing.T) {
 		t.Fatalf("X-Claude-Code-Session-Id = %q, want cached session id", got)
 	}
 	if got := req.Header.Get("x-client-request-id"); got != "" {
-		t.Fatalf("x-client-request-id = %q, want omitted to match Claude Code 2.1.152", got)
+		t.Fatalf("x-client-request-id = %q, want omitted to match Claude Code 2.1.154", got)
 	}
 	if got := req.Header.Get("Anthropic-Dangerous-Direct-Browser-Access"); got != "true" {
 		t.Fatalf("Anthropic-Dangerous-Direct-Browser-Access = %q, want true", got)
@@ -187,6 +187,7 @@ func TestApplyClaudeHeaders_AddsLatestClaudeCodeMimicryBetas(t *testing.T) {
 		"structured-outputs-2025-12-15",
 		"fast-mode-2026-02-01",
 		"redact-thinking-2026-02-12",
+		"mid-conversation-system-2026-04-07",
 	} {
 		if strings.Contains(got, beta) {
 			t.Fatalf("Anthropic-Beta = %q, should not inject optional beta %s by default", got, beta)
@@ -277,7 +278,7 @@ func TestApplyClaudeHeaders_DefaultDeviceProfileUsesCoherentBaseline(t *testing.
 	})
 	applyClaudeHeaders(req, &cliproxyauth.Auth{}, "key-default-fingerprint", false, nil, &config.Config{})
 
-	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.152 (external, sdk-cli)", "0.94.0", "v24.3.0", "Windows", "x64")
+	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.154 (external, sdk-cli)", "0.94.0", "v24.3.0", "Windows", "x64")
 }
 
 func TestApplyClaudeHeaders_TracksHighestClaudeCLIFingerprint(t *testing.T) {
@@ -606,7 +607,7 @@ func TestApplyClaudeHeaders_PersistsLearnedDeviceProfileToAuthMetadata(t *testin
 	}
 
 	officialReq := newClaudeHeaderTestRequest(t, http.Header{
-		"User-Agent":                  []string{"claude-cli/2.1.153 (external, cli)"},
+		"User-Agent":                  []string{"claude-cli/2.1.155 (external, cli)"},
 		"X-Stainless-Package-Version": []string{"0.95.0"},
 		"X-Stainless-Runtime-Version": []string{"v24.4.0"},
 		"X-Stainless-Os":              []string{"Linux"},
@@ -618,7 +619,7 @@ func TestApplyClaudeHeaders_PersistsLearnedDeviceProfileToAuthMetadata(t *testin
 	if !ok {
 		t.Fatalf("metadata.claude_device_profile = %T, want map[string]any", auth.Metadata["claude_device_profile"])
 	}
-	if got, _ := profileMeta["user_agent"].(string); got != "claude-cli/2.1.153 (external, cli)" {
+	if got, _ := profileMeta["user_agent"].(string); got != "claude-cli/2.1.155 (external, cli)" {
 		t.Fatalf("metadata.claude_device_profile.user_agent = %q, want learned official UA", got)
 	}
 	if got, _ := profileMeta["os"].(string); got != "Windows" {
@@ -636,7 +637,7 @@ func TestApplyClaudeHeaders_PersistsLearnedDeviceProfileToAuthMetadata(t *testin
 		"User-Agent": []string{"CherryStudio/1.0"},
 	})
 	applyClaudeHeaders(thirdPartyReq, auth, "key-metadata-profile", false, nil, cfg)
-	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.153 (external, cli)", "0.95.0", "v24.4.0", "Windows", "x64")
+	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.155 (external, cli)", "0.95.0", "v24.4.0", "Windows", "x64")
 }
 
 func TestApplyClaudeHeaders_ThirdPartyBaselineThenOfficialUpgradeKeepsPinnedPlatform(t *testing.T) {
@@ -1911,7 +1912,7 @@ func TestEnsureModelMaxTokens_SkipsUnregisteredModel(t *testing.T) {
 }
 
 // TestClaudeExecutor_ExecuteStream_MatchesClaudeCodeAcceptHeaders verifies that
-// streaming requests match Claude Code 2.1.152's latest request headers. The
+// streaming requests match Claude Code 2.1.154's latest request headers. The
 // executor decodes compressed upstream bodies before scanning SSE lines.
 func TestClaudeExecutor_ExecuteStream_MatchesClaudeCodeAcceptHeaders(t *testing.T) {
 	var gotEncoding, gotAccept string
@@ -1950,6 +1951,70 @@ func TestClaudeExecutor_ExecuteStream_MatchesClaudeCodeAcceptHeaders(t *testing.
 	}
 	if gotAccept != "application/json" {
 		t.Errorf("Accept = %q, want %q", gotAccept, "application/json")
+	}
+}
+
+func TestClaudeExecutor_Execute_Opus48MatchesClaudeCode214RequestShape(t *testing.T) {
+	var gotBeta string
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBeta = r.Header.Get("Anthropic-Beta")
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-opus-4-8","role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-opus-48",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-opus-4-8",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	wantBeta := strings.Join([]string{
+		"claude-code-20250219",
+		"interleaved-thinking-2025-05-14",
+		"mid-conversation-system-2026-04-07",
+		"effort-2025-11-24",
+	}, ",")
+	if gotBeta != wantBeta {
+		t.Fatalf("Anthropic-Beta = %q, want %q", gotBeta, wantBeta)
+	}
+	for _, beta := range strings.Split(wantBeta, ",") {
+		if !strings.Contains(gotBeta, beta) {
+			t.Fatalf("Anthropic-Beta = %q, missing %s", gotBeta, beta)
+		}
+	}
+	if got := gjson.GetBytes(gotBody, "max_tokens").Int(); got != 64000 {
+		t.Fatalf("max_tokens = %d, want 64000 for Claude Code 2.1.154 Opus 4.8 shape; body=%s", got, string(gotBody))
+	}
+	blocks := gjson.GetBytes(gotBody, "system").Array()
+	if len(blocks) != 3 {
+		t.Fatalf("system blocks = %d, want billing + identity + runtime context; body=%s", len(blocks), string(gotBody))
+	}
+	if got := blocks[1].Get("text").String(); got != helps.ClaudeCodeAgentIdentity {
+		t.Fatalf("system.1.text = %q, want Claude Code agent identity", got)
+	}
+	if got := blocks[2].Get("text").String(); !isClaudeCodeRuntimeContextPrompt(got) {
+		t.Fatalf("system.2.text should be Claude Code 2.1.154 runtime context, got %q", got)
+	}
+	if got := gjson.GetBytes(gotBody, "system.2.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("system.2.cache_control.type = %q, want ephemeral", got)
 	}
 }
 
@@ -2290,8 +2355,12 @@ func TestClaudeExecutor_ExecuteStream_AcceptEncodingOverrideCannotBypassClaudeCo
 	}
 }
 
-func expectedClaudeCodeStaticPrompt() string {
-	return helps.ClaudeCodeHarnessPrompt
+func isClaudeCodeRuntimeContextPrompt(text string) bool {
+	return strings.HasPrefix(text, "CWD: ") &&
+		strings.Contains(text, "\nDate: ") &&
+		strings.Contains(text, "\n\ngitStatus: This is the git status at the start of the conversation.") &&
+		!strings.Contains(text, "# Harness") &&
+		!strings.Contains(text, "interactive agent")
 }
 
 func expectedForwardedSystemReminder(text string) string {
@@ -2356,8 +2425,8 @@ func TestCheckSystemInstructionsWithMode_StringSystemPreserved(t *testing.T) {
 	if got := blocks[1].Get("cache_control.type").String(); got != "ephemeral" {
 		t.Fatalf("blocks[1] cache_control.type = %q, want ephemeral", got)
 	}
-	if blocks[2].Get("text").String() != expectedClaudeCodeStaticPrompt() {
-		t.Fatalf("blocks[2] should be static Claude Code prompt, got %q", blocks[2].Get("text").String())
+	if got := blocks[2].Get("text").String(); !isClaudeCodeRuntimeContextPrompt(got) {
+		t.Fatalf("blocks[2] should be Claude Code runtime context prompt, got %q", got)
 	}
 	if got := blocks[2].Get("cache_control.type").String(); got != "ephemeral" {
 		t.Fatalf("blocks[2] cache_control.type = %q, want ephemeral", got)
@@ -2408,8 +2477,8 @@ func TestCheckSystemInstructionsWithMode_ArraySystemStillWorks(t *testing.T) {
 	if len(blocks) != 3 {
 		t.Fatalf("expected 3 system blocks, got %d", len(blocks))
 	}
-	if blocks[2].Get("text").String() != expectedClaudeCodeStaticPrompt() {
-		t.Fatalf("blocks[2] should be static Claude Code prompt, got %q", blocks[2].Get("text").String())
+	if got := blocks[2].Get("text").String(); !isClaudeCodeRuntimeContextPrompt(got) {
+		t.Fatalf("blocks[2] should be Claude Code runtime context prompt, got %q", got)
 	}
 	if got := gjson.GetBytes(out, "messages.0.content").String(); got != expectedForwardedSystemReminder("Be concise.")+"hi" {
 		t.Fatalf("messages[0].content should include forwarded array system prompt, got %q", got)
@@ -2425,6 +2494,9 @@ func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 	blocks := gjson.GetBytes(out, "system").Array()
 	if len(blocks) != 3 {
 		t.Fatalf("expected 3 system blocks, got %d", len(blocks))
+	}
+	if got := blocks[2].Get("text").String(); !isClaudeCodeRuntimeContextPrompt(got) {
+		t.Fatalf("blocks[2] should be Claude Code runtime context prompt, got %q", got)
 	}
 	if got := gjson.GetBytes(out, "messages.0.content").String(); got != expectedForwardedSystemReminder(`Use <xml> tags & "quotes" in output.`)+"hi" {
 		t.Fatalf("forwarded system prompt text mangled, got %q", got)

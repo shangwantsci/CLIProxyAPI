@@ -54,6 +54,116 @@ func TestAuditClaudeMimicryRequest_AlignedSignedClaudeCodeShape(t *testing.T) {
 	}
 }
 
+func TestBuildClaudeMimicryBaseline_Opus48IncludesMidConversationSystemBeta(t *testing.T) {
+	baseline := BuildClaudeMimicryBaseline("claude-opus-4-8", &config.Config{})
+
+	if !stringInSlice("mid-conversation-system-2026-04-07", baseline.ExpectedBetas) {
+		t.Fatalf("ExpectedBetas = %#v, want Opus 4.8 mid-conversation system beta", baseline.ExpectedBetas)
+	}
+	if baseline.ExpectedBetaCount != len(baseline.ExpectedBetas) {
+		t.Fatalf("ExpectedBetaCount = %d, want len(ExpectedBetas)=%d", baseline.ExpectedBetaCount, len(baseline.ExpectedBetas))
+	}
+}
+
+func TestAuditClaudeMimicryRequest_ClaudeCode214OfficialOAuthBearerShape(t *testing.T) {
+	payload := []byte(`{
+		"model":"claude-opus-4-8",
+		"messages":[{"role":"user","content":[
+			{"type":"text","text":"<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is 2026-05-28.\n\n      IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.\n</system-reminder>\n\n"},
+			{"type":"text","text":"Reply exactly: OFFICIAL_OAUTH_CAPTURE_OK","cache_control":{"type":"ephemeral"}}
+		]}],
+		"system":[
+			{"type":"text","text":"You are a Claude agent, built on Anthropic's Claude Agent SDK.","cache_control":{"type":"ephemeral"}},
+			{"type":"text","text":"CWD: F:\\claude反代\\CLIProxyAPI\nDate: 2026-05-28\n\ngitStatus: This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.\n\nCurrent branch: xiaoyu/claude-oauth-cookie-mimicry\n\nMain branch (you will usually use this for PRs): main\n\nStatus:\nM internal/runtime/executor/claude_executor.go\n\nRecent commits:\nd88de94f docs: record production deployment","cache_control":{"type":"ephemeral"}}
+		],
+		"tools":[
+			{"name":"Bash","description":"execute shell commands","input_schema":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"],"additionalProperties":false}},
+			{"name":"Edit","description":"modify file contents in place","input_schema":{"type":"object","properties":{"file_path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["file_path","old_string","new_string"],"additionalProperties":false}},
+			{"name":"Read","description":"read files, images, PDFs, notebooks","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}},"required":["file_path"],"additionalProperties":false}}
+		],
+		"metadata":{"user_id":"<redacted>"},
+		"max_tokens":64000,
+		"thinking":{"type":"adaptive"},
+		"output_config":{"effort":"high"},
+		"stream":true
+	}`)
+	headers := http.Header{
+		"Accept":                                    []string{"application/json"},
+		"Accept-Encoding":                           []string{"gzip, deflate, br, zstd"},
+		"Authorization":                             []string{"Bearer sk-ant-oat-test"},
+		"Content-Type":                              []string{"application/json"},
+		"User-Agent":                                []string{"claude-cli/2.1.154 (external, sdk-cli)"},
+		"X-Claude-Code-Session-Id":                  []string{"530ccdf0-8c3b-4b4b-9169-c84d07c76165"},
+		"X-Stainless-Arch":                          []string{"x64"},
+		"X-Stainless-Lang":                          []string{"js"},
+		"X-Stainless-Os":                            []string{"Windows"},
+		"X-Stainless-Package-Version":               []string{"0.94.0"},
+		"X-Stainless-Retry-Count":                   []string{"0"},
+		"X-Stainless-Runtime":                       []string{"node"},
+		"X-Stainless-Runtime-Version":               []string{"v24.3.0"},
+		"X-Stainless-Timeout":                       []string{"600"},
+		"Anthropic-Beta":                            []string{"claude-code-20250219,interleaved-thinking-2025-05-14,mid-conversation-system-2026-04-07,effort-2025-11-24"},
+		"Anthropic-Dangerous-Direct-Browser-Access": []string{"true"},
+		"Anthropic-Version":                         []string{"2023-06-01"},
+		"X-App":                                     []string{"cli"},
+	}
+
+	audit := AuditClaudeMimicryRequest("claude-opus-4-8", "/v1/messages", payload, headers, &config.Config{})
+
+	if audit.System.Status != ClaudeMimicryStatusAligned {
+		t.Fatalf("System = %#v, want aligned official 2.1.154 bearer-token system shape", audit.System)
+	}
+	if audit.CCH.Status != ClaudeMimicryStatusWarning {
+		t.Fatalf("CCH = %#v, want warning for official bearer-token shape without billing header", audit.CCH)
+	}
+	if audit.Betas.Status != ClaudeMimicryStatusAligned {
+		t.Fatalf("Betas = %#v, want aligned Opus 4.8 beta set", audit.Betas)
+	}
+	if audit.Headers.Status != ClaudeMimicryStatusAligned {
+		t.Fatalf("Headers = %#v, want aligned official 2.1.154 headers", audit.Headers)
+	}
+}
+
+func TestAuditClaudeMimicryRequest_ClaudeCode214ToolSurfaceIsKnown(t *testing.T) {
+	payload := buildSignedClaudeMimicryTestPayload(t)
+	payload, _ = sjson.SetRawBytes(payload, "tools", []byte(`[
+		{"name":"AskUserQuestion","description":"Ask the user a question.","input_schema":{"type":"object","properties":{"question":{"type":"string"}}}},
+		{"name":"CronCreate","description":"Create a scheduled task.","input_schema":{"type":"object","properties":{"prompt":{"type":"string"}}}},
+		{"name":"CronDelete","description":"Delete a scheduled task.","input_schema":{"type":"object","properties":{"id":{"type":"string"}}}},
+		{"name":"CronList","description":"List scheduled tasks.","input_schema":{"type":"object","properties":{}}},
+		{"name":"EnterPlanMode","description":"Enter planning mode.","input_schema":{"type":"object","properties":{}}},
+		{"name":"EnterWorktree","description":"Enter a worktree.","input_schema":{"type":"object","properties":{"path":{"type":"string"}}}},
+		{"name":"ExitPlanMode","description":"Exit planning mode.","input_schema":{"type":"object","properties":{"plan":{"type":"string"}}}},
+		{"name":"ExitWorktree","description":"Exit a worktree.","input_schema":{"type":"object","properties":{}}},
+		{"name":"LSP","description":"Query language server information.","input_schema":{"type":"object","properties":{"path":{"type":"string"}}}},
+		{"name":"ScheduleWakeup","description":"Schedule a wakeup.","input_schema":{"type":"object","properties":{"prompt":{"type":"string"}}}},
+		{"name":"SendMessage","description":"Send a message.","input_schema":{"type":"object","properties":{"content":{"type":"string"}}}},
+		{"name":"TaskCreate","description":"Create a task.","input_schema":{"type":"object","properties":{"title":{"type":"string"}}}},
+		{"name":"TaskGet","description":"Get a task.","input_schema":{"type":"object","properties":{"id":{"type":"string"}}}},
+		{"name":"TaskList","description":"List tasks.","input_schema":{"type":"object","properties":{}}},
+		{"name":"TaskOutput","description":"Read task output.","input_schema":{"type":"object","properties":{"id":{"type":"string"}}}},
+		{"name":"TaskStop","description":"Stop a task.","input_schema":{"type":"object","properties":{"id":{"type":"string"}}}},
+		{"name":"TaskUpdate","description":"Update a task.","input_schema":{"type":"object","properties":{"id":{"type":"string"}}}},
+		{"name":"TeamCreate","description":"Create a team.","input_schema":{"type":"object","properties":{"name":{"type":"string"}}}},
+		{"name":"TeamDelete","description":"Delete a team.","input_schema":{"type":"object","properties":{"id":{"type":"string"}}}},
+		{"name":"Workflow","description":"Run a workflow.","input_schema":{"type":"object","properties":{"name":{"type":"string"}}}}
+	]`))
+	payload = signAnthropicMessagesBody(payload)
+
+	req := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent": []string{"claude-cli/2.1.154 (external, sdk-cli)"},
+	})
+	applyClaudeHeaders(req, &cliproxyauth.Auth{}, "sk-ant-oat-test", false, nil, &config.Config{})
+	audit := AuditClaudeMimicryRequest("claude-sonnet-4-6", "/v1/messages", payload, req.Header, &config.Config{})
+
+	if audit.Tools.Status != ClaudeMimicryStatusAligned {
+		t.Fatalf("Tools = %#v, want official Claude Code 2.1.154 tools aligned", audit.Tools)
+	}
+	if len(audit.Tools.Unknown) != 0 {
+		t.Fatalf("Tools.Unknown = %#v, want no unknown official Claude Code tools", audit.Tools.Unknown)
+	}
+}
+
 func TestAuditClaudeMimicryRequest_FlagsLeakyThirdPartyShape(t *testing.T) {
 	payload := []byte(`{
 		"model":"claude-sonnet-4-6",

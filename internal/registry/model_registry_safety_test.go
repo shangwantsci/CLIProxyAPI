@@ -147,3 +147,25 @@ func TestLookupModelInfoReturnsCloneForStaticDefinitions(t *testing.T) {
 		t.Fatalf("expected static lookup clone, got %+v", second)
 	}
 }
+
+func TestLookupModelInfoIncludesClaudeOpus48(t *testing.T) {
+	info := LookupModelInfo("claude-opus-4-8")
+	if info == nil {
+		t.Fatalf("expected claude-opus-4-8 static model definition")
+	}
+	if info.MaxCompletionTokens != 64000 {
+		t.Fatalf("MaxCompletionTokens = %d, want 64000", info.MaxCompletionTokens)
+	}
+	if info.Thinking == nil || !containsString(info.Thinking.Levels, "xhigh") || !containsString(info.Thinking.Levels, "max") {
+		t.Fatalf("Thinking = %+v, want Opus 4.8 high-effort levels", info.Thinking)
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}

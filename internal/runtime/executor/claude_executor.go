@@ -311,7 +311,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
+	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg, baseModel)
 	mimicryEvent, _, errGuard := prepareClaudeMimicryGuardEvent(ctx, e.cfg, auth, opts, baseModel, "/v1/messages", bodyForUpstream, httpReq.Header)
 	if errGuard != nil {
 		return resp, errGuard
@@ -500,7 +500,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return nil, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg)
+	applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg, baseModel)
 	mimicryEvent, _, errGuard := prepareClaudeMimicryGuardEvent(ctx, e.cfg, auth, opts, baseModel, "/v1/messages", bodyForUpstream, httpReq.Header)
 	if errGuard != nil {
 		return nil, errGuard
@@ -774,7 +774,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
+	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg, baseModel)
 	mimicryEvent, _, errGuard := prepareClaudeMimicryGuardEvent(ctx, e.cfg, auth, opts, baseModel, "/v1/messages/count_tokens", body, httpReq.Header)
 	if errGuard != nil {
 		return cliproxyexecutor.Response{}, errGuard
@@ -1141,6 +1141,8 @@ var claudeCodeDefaultBetaTokens = []string{
 	"effort-2025-11-24",
 }
 
+const claudeCodeMidConversationSystemBeta = "mid-conversation-system-2026-04-07"
+
 var claudeAllowedBetaTokens = func() map[string]struct{} {
 	optional := []string{
 		"oauth-2025-04-20",
@@ -1154,7 +1156,7 @@ var claudeAllowedBetaTokens = func() map[string]struct{} {
 		"thinking-token-count-2026-05-13",
 		"task-budgets-2026-03-13",
 		"cache-diagnosis-2026-04-07",
-		"mid-conversation-system-2026-04-07",
+		claudeCodeMidConversationSystemBeta,
 	}
 	allowed := make(map[string]struct{}, len(claudeCodeDefaultBetaTokens)+len(optional))
 	for _, beta := range claudeCodeDefaultBetaTokens {
@@ -1391,9 +1393,37 @@ func ginHeadersFromContext(ctx context.Context) http.Header {
 	return nil
 }
 
-func buildClaudeBetaHeader(ginHeaders http.Header, extraBetas []string) string {
-	baseBetas := ""
+func claudeCodeDefaultBetaTokensForModel(model string) []string {
+	if !claudeModelUsesMidConversationSystemBeta(model) {
+		return append([]string(nil), claudeCodeDefaultBetaTokens...)
+	}
+	betas := make([]string, 0, len(claudeCodeDefaultBetaTokens)+1)
 	for _, beta := range claudeCodeDefaultBetaTokens {
+		if beta == "effort-2025-11-24" {
+			betas = append(betas, claudeCodeMidConversationSystemBeta)
+		}
+		betas = append(betas, beta)
+	}
+	return betas
+}
+
+func claudeModelUsesMidConversationSystemBeta(model string) bool {
+	model = strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
+	if model == "" {
+		return false
+	}
+	model = strings.ToLower(model)
+	model = strings.TrimSuffix(model, "-thinking")
+	return model == "claude-opus-4-8" || strings.HasPrefix(model, "claude-opus-4-8-")
+}
+
+func buildClaudeBetaHeader(ginHeaders http.Header, extraBetas []string, model ...string) string {
+	baseBetas := ""
+	modelName := ""
+	if len(model) > 0 {
+		modelName = model[0]
+	}
+	for _, beta := range claudeCodeDefaultBetaTokensForModel(modelName) {
 		baseBetas = appendClaudeBeta(baseBetas, beta)
 	}
 	for _, beta := range strings.Split(filterClaudeBetaHeader(ginHeaders.Get("Anthropic-Beta")), ",") {
@@ -1405,7 +1435,7 @@ func buildClaudeBetaHeader(ginHeaders http.Header, extraBetas []string) string {
 	return filterClaudeBetaHeader(baseBetas)
 }
 
-func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config) {
+func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config, model ...string) {
 	hdrDefault := func(cfgVal, fallback string) string {
 		if cfgVal != "" {
 			return cfgVal
@@ -1462,7 +1492,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	r.Header.Set("Anthropic-Dangerous-Direct-Browser-Access", "true")
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Anthropic-Version", "2023-06-01")
-	r.Header.Set("Anthropic-Beta", buildClaudeBetaHeader(ginHeaders, extraBetas))
+	r.Header.Set("Anthropic-Beta", buildClaudeBetaHeader(ginHeaders, extraBetas, model...))
 	r.Header.Set("X-App", "cli")
 	r.Header.Set("X-Stainless-Retry-Count", "0")
 	r.Header.Set("X-Stainless-Runtime", "node")
@@ -2414,10 +2444,8 @@ func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 //
 //	system[0]: billing header (no cache_control)
 //	system[1]: agent identifier (cache_control ephemeral, scope=org)
-//	system[2]: core intro prompt (cache_control ephemeral, scope=global)
-//	system[3]: system instructions (no cache_control)
-//	system[4]: doing tasks (no cache_control)
-//	system[5]: user system messages moved to first user message
+//	system[2]: runtime context prompt (cache_control ephemeral, scope=global)
+//	system[3]: user system messages moved to first user message
 func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, experimentalCCHSigning bool, oauthMode bool, version, entrypoint, workload string) []byte {
 	return checkSystemInstructionsWithSigningModeForced(payload, strictMode, experimentalCCHSigning, oauthMode, version, entrypoint, workload, false)
 }
@@ -2441,9 +2469,9 @@ func checkSystemInstructionsWithSigningModeForced(payload []byte, strictMode boo
 	// Build system blocks matching the current Claude Code Agent SDK shape.
 	cacheControl := map[string]string{"type": "ephemeral"}
 	agentBlock := buildTextBlock(helps.ClaudeCodeAgentIdentity, cacheControl)
-	staticBlock := buildTextBlock(helps.ClaudeCodeHarnessPrompt, cacheControl)
+	runtimeContextBlock := buildTextBlock(helps.ClaudeCodeRuntimeContextPrompt(time.Now().Format("2006-01-02")), cacheControl)
 
-	systemResult := "[" + billingBlock + "," + agentBlock + "," + staticBlock + "]"
+	systemResult := "[" + billingBlock + "," + agentBlock + "," + runtimeContextBlock + "]"
 	payload, _ = sjson.SetRawBytes(payload, "system", []byte(systemResult))
 
 	// Collect user system instructions and prepend to first user message
@@ -2492,6 +2520,9 @@ func shouldForwardOriginalSystemText(text string, forceBilling bool) bool {
 		return false
 	}
 	if strings.Contains(text, helps.ClaudeCodeHarnessPrompt) {
+		return false
+	}
+	if helps.IsClaudeCodeRuntimeContextPrompt(text) {
 		return false
 	}
 	return true
@@ -3175,16 +3206,24 @@ func ensureModelMaxTokens(body []byte, modelID string) []byte {
 		return body
 	}
 
-	for _, provider := range registry.GetGlobalRegistry().GetModelProviders(strings.TrimSpace(modelID)) {
+	modelID = strings.TrimSpace(modelID)
+	for _, provider := range registry.GetGlobalRegistry().GetModelProviders(modelID) {
 		if strings.EqualFold(provider, "claude") {
-			maxTokens := defaultModelMaxTokens
-			if info := registry.GetGlobalRegistry().GetModelInfo(strings.TrimSpace(modelID), "claude"); info != nil && info.MaxCompletionTokens > 0 {
-				maxTokens = info.MaxCompletionTokens
-			}
-			body, _ = sjson.SetBytes(body, "max_tokens", maxTokens)
-			return body
+			return setClaudeModelMaxTokens(body, registry.GetGlobalRegistry().GetModelInfo(modelID, "claude"))
 		}
 	}
+	if info := registry.LookupModelInfo(modelID, "claude"); info != nil && strings.EqualFold(info.Type, "claude") {
+		return setClaudeModelMaxTokens(body, info)
+	}
 
+	return body
+}
+
+func setClaudeModelMaxTokens(body []byte, info *registry.ModelInfo) []byte {
+	maxTokens := defaultModelMaxTokens
+	if info != nil && info.MaxCompletionTokens > 0 {
+		maxTokens = info.MaxCompletionTokens
+	}
+	body, _ = sjson.SetBytes(body, "max_tokens", maxTokens)
 	return body
 }

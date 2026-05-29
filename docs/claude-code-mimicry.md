@@ -16,7 +16,7 @@
 当前代码默认值位于 `internal/runtime/executor/helps/claude_device_profile.go`：
 
 ```text
-User-Agent: claude-cli/2.1.152 (external, sdk-cli)
+User-Agent: claude-cli/2.1.154 (external, sdk-cli)
 X-Stainless-Package-Version: 0.94.0
 X-Stainless-Runtime-Version: v24.3.0
 X-Stainless-Os: Windows
@@ -25,8 +25,8 @@ X-Stainless-Arch: x64
 
 验证来源：
 
-- `2.1.152` 来自 2026-05-27 本机 `claude --version`。
-- `sdk-cli`、`0.94.0`、`v24.3.0`、`Windows/x64` 来自 2026-05-27 本机 Claude Code `2.1.152` 对本地 `ANTHROPIC_BASE_URL` 捕获的真实请求头。
+- `2.1.154` 来自 2026-05-29 本机 `claude --version` 和真实 Opus 4.8 OAuth 请求抓包。
+- `sdk-cli`、`0.94.0`、`v24.3.0`、`Windows/x64` 来自 2026-05-29 本机 Claude Code `2.1.154` 通过本地代理捕获的真实请求头。
 
 这些是当前仓库默认基线，不等于“永远正确的最新版真实 Claude Code 指纹”。完整 HTTPS 抓包仍然是最强校准方式；如后续 Claude Code 更新导致 package/runtime、beta 或 system prompt 有差异，应按抓包结果更新。
 
@@ -140,6 +140,15 @@ interleaved-thinking-2025-05-14
 effort-2025-11-24
 ```
 
+`claude-opus-4-8` 会使用模型特定 beta 顺序：
+
+```text
+claude-code-20250219
+interleaved-thinking-2025-05-14
+mid-conversation-system-2026-04-07
+effort-2025-11-24
+```
+
 当前允许但不默认注入的 beta tokens：
 
 ```text
@@ -178,12 +187,13 @@ context-1m-2025-08-07
 - `internal/runtime/executor/helps/claude_system_prompt.go`
 - `internal/runtime/executor/claude_executor.go`
 
-当前 system prompt 静态块按 2026-05-27 本机 Claude Code `v2.1.152` 捕获结果校准：
+当前 system prompt 形态按 2026-05-29 本机 Claude Code `v2.1.154` Opus 4.8 OAuth 抓包校准：
 
 - 身份块：`You are a Claude agent, built on Anthropic's Claude Agent SDK.`
-- 静态提示块：以 `You are an interactive agent that helps users according to your "Output Style" below...` 开头，并包含 `# Harness`。
-- 身份块和静态提示块都会带 `cache_control: {"type":"ephemeral"}`。
-- OAuth/订阅桥接路径仍在最前方保留 `x-anthropic-billing-header`，并对最终 body 做 CCH signing。
+- runtime context 块：以 `CWD:`、`Date:`、`gitStatus:` 开头，匹配官方 `2.1.154` bare/OAuth 请求形态。
+- 身份块和 runtime context 块都会带 `cache_control: {"type":"ephemeral"}`。
+- CPA OAuth/订阅桥接路径仍在最前方保留 `x-anthropic-billing-header`，并对最终 body 做 CCH signing。
+- 真实官方 `ANTHROPIC_AUTH_TOKEN` bearer-token 抓包没有 `x-anthropic-billing-header`；mimicry audit 将其记录为可识别的官方 bearer-token 形态，但 guard 在需要签名 CCH 的代理路径仍会要求 `Signed=true`。
 
 相关策略：
 

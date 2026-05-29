@@ -186,7 +186,7 @@ var (
 	}{
 		{"billing_header", ""},
 		{"identity", helps.ClaudeCodeAgentIdentity},
-		{"core_prompt", helps.ClaudeCodeHarnessPrompt},
+		{"runtime_context", ""},
 	}
 )
 
@@ -218,13 +218,14 @@ func BuildClaudeMimicryBaseline(model string, cfg *config.Config) ClaudeMimicryB
 	if model == "" {
 		model = "claude-sonnet-4-6"
 	}
+	expectedBetas := claudeCodeDefaultBetaTokensForModel(model)
 	baseline := ClaudeMimicryBaseline{
 		Model:                 model,
 		Family:                claudeMimicryFamily(model),
 		ClaudeVersion:         helps.DefaultClaudeVersion(cfg),
 		CCHSeed:               fmt.Sprintf("0x%016x", claudeCCHSeed),
-		ExpectedBetaCount:     len(claudeCodeDefaultBetaTokens),
-		ExpectedBetas:         append([]string(nil), claudeCodeDefaultBetaTokens...),
+		ExpectedBetaCount:     len(expectedBetas),
+		ExpectedBetas:         expectedBetas,
 		ExpectedSystemHashes:  expectedClaudeSystemHashes(),
 		ExpectedTopFields:     []string{"thinking", "output_config"},
 		ExpectedEfforts:       []string{"high", "xhigh", "max"},
@@ -425,7 +426,7 @@ func AuditClaudeMimicryRequest(model string, requestPath string, body []byte, he
 		Baseline:    baseline,
 		System:      auditClaudeMimicrySystem(body),
 		CCH:         auditClaudeMimicryCCH(body),
-		Betas:       auditClaudeMimicryBetas(headers),
+		Betas:       auditClaudeMimicryBetas(headers, baseline),
 		Thinking:    auditClaudeMimicryThinking(body, baseline),
 		Tools:       auditClaudeMimicryTools(body),
 		Headers:     auditClaudeMimicryHeaders(headers),
@@ -466,7 +467,27 @@ func auditClaudeMimicrySystem(body []byte) ClaudeMimicrySystemAudit {
 			}},
 		}
 	}
-	for index, expected := range claudeMimicryExpectedSystem {
+	offset := 0
+	firstText := gjson.GetBytes(body, "system.0.text").String()
+	if strings.HasPrefix(firstText, "x-anthropic-billing-header:") {
+		block := ClaudeMimicrySystemBlock{
+			Index:  0,
+			Label:  "billing_header",
+			Status: ClaudeMimicryStatusAligned,
+			Hash:   shortSHA256(firstText),
+			Length: len(firstText),
+		}
+		if !claudeBillingHeaderCCHPattern.MatchString(firstText) {
+			block.Status = ClaudeMimicryStatusFailed
+			block.Detail = "missing Claude Code billing header with cch"
+			audit.Status = ClaudeMimicryStatusFailed
+		}
+		audit.Blocks = append(audit.Blocks, block)
+		offset = 1
+	}
+
+	for relativeIndex, expected := range claudeMimicryExpectedSystem[1:] {
+		index := offset + relativeIndex
 		text := gjson.GetBytes(body, fmt.Sprintf("system.%d.text", index)).String()
 		block := ClaudeMimicrySystemBlock{
 			Index:  index,
@@ -475,17 +496,17 @@ func auditClaudeMimicrySystem(body []byte) ClaudeMimicrySystemAudit {
 			Hash:   shortSHA256(text),
 			Length: len(text),
 		}
-		if index == 0 {
-			if !strings.HasPrefix(text, "x-anthropic-billing-header:") || !claudeBillingHeaderCCHPattern.MatchString(text) {
-				block.Status = ClaudeMimicryStatusFailed
-				block.Detail = "missing Claude Code billing header with cch"
-				audit.Status = ClaudeMimicryStatusFailed
-			}
-		} else {
+		if expected.label == "identity" {
 			block.ExpectedHash = shortSHA256(expected.text)
 			if text != expected.text {
 				block.Status = ClaudeMimicryStatusFailed
 				block.Detail = "system block hash mismatch"
+				audit.Status = ClaudeMimicryStatusFailed
+			}
+		} else if expected.label == "runtime_context" {
+			if !helps.IsClaudeCodeRuntimeContextPrompt(text) {
+				block.Status = ClaudeMimicryStatusFailed
+				block.Detail = "runtime context block does not match Claude Code 2.1.154 shape"
 				audit.Status = ClaudeMimicryStatusFailed
 			}
 		}
@@ -498,6 +519,15 @@ func auditClaudeMimicryCCH(body []byte) ClaudeMimicryCCHAudit {
 	seed := fmt.Sprintf("0x%016x", claudeCCHSeed)
 	billingHeader := gjson.GetBytes(body, "system.0.text").String()
 	if !strings.HasPrefix(billingHeader, "x-anthropic-billing-header:") {
+		if gjson.GetBytes(body, "system.0.text").String() == helps.ClaudeCodeAgentIdentity &&
+			helps.IsClaudeCodeRuntimeContextPrompt(gjson.GetBytes(body, "system.1.text").String()) {
+			return ClaudeMimicryCCHAudit{
+				Status: ClaudeMimicryStatusWarning,
+				Signed: false,
+				Seed:   seed,
+				Detail: "official bearer-token shape omits billing header",
+			}
+		}
 		return ClaudeMimicryCCHAudit{Status: ClaudeMimicryStatusFailed, Seed: seed, Detail: "missing billing header"}
 	}
 	matches := claudeBillingHeaderCCHPattern.FindStringSubmatch(billingHeader)
@@ -526,9 +556,9 @@ func auditClaudeMimicryCCH(body []byte) ClaudeMimicryCCHAudit {
 	}
 }
 
-func auditClaudeMimicryBetas(headers http.Header) ClaudeMimicryBetaAudit {
+func auditClaudeMimicryBetas(headers http.Header, baseline ClaudeMimicryBaseline) ClaudeMimicryBetaAudit {
 	tokens := splitHeaderTokens(headers.Get("Anthropic-Beta"))
-	expected := append([]string(nil), claudeCodeDefaultBetaTokens...)
+	expected := append([]string(nil), baseline.ExpectedBetas...)
 	missing := missingStrings(expected, tokens)
 	unexpected := unexpectedStrings(tokens, claudeAllowedBetaTokens)
 	status := ClaudeMimicryStatusAligned
@@ -703,6 +733,9 @@ func auditClaudeMimicryHeaders(headers http.Header) ClaudeMimicryHeaderAudit {
 func expectedClaudeSystemHashes() []string {
 	hashes := make([]string, 0, len(claudeMimicryExpectedSystem)-1)
 	for _, block := range claudeMimicryExpectedSystem[1:] {
+		if block.text == "" {
+			continue
+		}
 		hashes = append(hashes, shortSHA256(block.text))
 	}
 	return hashes
@@ -765,24 +798,41 @@ func presentClaudeTopFields(body []byte) []string {
 
 func knownClaudeUpstreamToolNames() map[string]bool {
 	known := map[string]bool{
-		"Bash":         true,
-		"BashSession":  true,
-		"Read":         true,
-		"Write":        true,
-		"Edit":         true,
-		"MultiEdit":    true,
-		"Glob":         true,
-		"Grep":         true,
-		"Task":         true,
-		"Agent":        true,
-		"WebFetch":     true,
-		"WebSearch":    true,
-		"TodoWrite":    true,
-		"TodoRead":     true,
-		"NotebookEdit": true,
-		"Question":     true,
-		"Skill":        true,
-		"LS":           true,
+		"Bash":            true,
+		"BashSession":     true,
+		"Read":            true,
+		"Write":           true,
+		"Edit":            true,
+		"MultiEdit":       true,
+		"Glob":            true,
+		"Grep":            true,
+		"Task":            true,
+		"Agent":           true,
+		"WebFetch":        true,
+		"WebSearch":       true,
+		"TodoWrite":       true,
+		"TodoRead":        true,
+		"NotebookEdit":    true,
+		"Question":        true,
+		"Skill":           true,
+		"LS":              true,
+		"AskUserQuestion": true,
+		"CronCreate":      true,
+		"CronDelete":      true,
+		"CronList":        true,
+		"EnterPlanMode":   true,
+		"EnterWorktree":   true,
+		"ExitPlanMode":    true,
+		"ExitWorktree":    true,
+		"LSP":             true,
+		"ScheduleWakeup":  true,
+		"TaskGet":         true,
+		"TaskOutput":      true,
+		"TaskStop":        true,
+		"TaskUpdate":      true,
+		"TeamCreate":      true,
+		"TeamDelete":      true,
+		"Workflow":        true,
 	}
 	for _, upstream := range oauthToolRenameMap {
 		known[upstream] = true
@@ -836,7 +886,7 @@ func hardClaudeMimicryFailures(audit ClaudeMimicryAuditSnapshot, policy ClaudeMi
 	if policy.RequireSystemBlocks && audit.System.Status == ClaudeMimicryStatusFailed {
 		reasons = append(reasons, "system blocks mismatch")
 	}
-	if policy.RequireSignedCCH && audit.CCH.Status == ClaudeMimicryStatusFailed {
+	if policy.RequireSignedCCH && !audit.CCH.Signed {
 		reasons = append(reasons, "cch signature mismatch")
 	}
 	if audit.Betas.Status == ClaudeMimicryStatusFailed {
