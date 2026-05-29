@@ -57,11 +57,11 @@ Traefik 动态路由：
 
 ## 当前部署版本
 
-- 后端提交：`21c88d4e`
-- 前端提交：`78d54e1`
-- 最近一次按本文档部署时间：`2026-05-29T11:52:45+00:00`
-- 最近一次账号备份：`/opt/cpa-claude-proxy-backups/auths-20260529-115241.tgz`
-- 最近一次后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-21c88d4e-20260529-115242.bak`
+- 后端提交：`0cbfea52`
+- 前端提交：`919c982`
+- 最近一次按本文档部署时间：`2026-05-29T17:36:45+00:00`
+- 最近一次账号备份：`/opt/cpa-claude-proxy-backups/auths-20260529-173644.tgz`
+- 最近一次后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-0cbfea52-20260529-173644.bak`
 - 最近一次网络入口收口：`2026-05-28T11:32:01+00:00`
 - 最近一次网络入口收口备份：`/root/openstaryu-hardening-20260528-113201`
 - 初始迁移来源：旧服务器 `38.76.196.12:/opt/cpa-claude-proxy`

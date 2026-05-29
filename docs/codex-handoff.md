@@ -27,9 +27,9 @@
 - CPA 管理入口：`https://admin.openstaryu.com/management.html`
 - CPA 本机健康检查：`http://127.0.0.1:8318/healthz`
 - SSH：`root@23.153.36.248:41629`
-- 后端部署提交：`21c88d4e`
-- 前端部署提交：`78d54e1`
-- 最近一次账号备份：`/opt/cpa-claude-proxy-backups/auths-20260529-115241.tgz`
+- 后端部署提交：`0cbfea52`
+- 前端部署提交：`919c982`
+- 最近一次账号备份：`/opt/cpa-claude-proxy-backups/auths-20260529-173644.tgz`
 - 最近一次网络入口收口备份：`/root/openstaryu-hardening-20260528-113201`
 
 当前端口策略：
@@ -92,6 +92,11 @@ cat /opt/cpa-claude-proxy/DEPLOYED_COMMITS
   - 生产账号均为 Claude OAuth 形态，因此对显式带合法 `cache_control: {"type":"ephemeral"}` 的 system 文本跳过 OAuth sanitize，保留长前缀用于 prompt cache；无 cache_control 的普通 system 仍保持原 sanitize 策略。
   - 已用 `https://api.openstaryu.com` 客户入口验证：第一次请求返回 `cache_creation_input_tokens=16065`，第二次同前缀返回 `cache_read_input_tokens=16065`。
   - 已部署到生产服务器，服务器 `DEPLOYED_COMMITS` 显示 `backend=21c88d4e`、`frontend=78d54e1`。
+- `0cbfea52 fix: add API connection kill switch` + 前端 `919c982 feat: expose API connection switch`
+  - 新增后端强制的 `disable-api-connections` 总闸；关闭时 `/v1/*`、`/v1beta/*`、`/backend-api/codex/*`、`/api/provider/*`、`/v1internal:*` 和 `/v1/*` websocket 在触达账号池前返回 503，管理页、健康检查和 OAuth callback 保持可用。
+  - 管理端新增 API 连接开关；可视化配置保存 YAML 后会直接触发运行时热更新，不再只依赖文件 watcher，因此账号切换策略保存后会立即应用到 selector。
+  - 未触碰 Claude token/cache 透传路径；部署前跑过 cache/usage 回归与前端静态敏感词扫描。
+  - 已部署到生产服务器，服务器 `DEPLOYED_COMMITS` 显示 `backend=0cbfea52`、`frontend=919c982`。
 
 ## 最近关键运维改动
 
