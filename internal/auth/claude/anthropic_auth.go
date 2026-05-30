@@ -33,11 +33,13 @@ const (
 
 	PlatformRedirectURI = "https://platform.claude.com/oauth/code/callback"
 
-	claudeRefreshMinBackoff = 5 * time.Second
-	claudeRefreshMaxBackoff = 5 * time.Minute
-	claudeOAuthScopeBrowser = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
-	claudeCookieScopeAPI    = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
-	claudeAIBrowserUA       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+	claudeRefreshMinBackoff   = 5 * time.Second
+	claudeRefreshMaxBackoff   = 5 * time.Minute
+	claudeOAuthScopeBrowser   = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
+	claudeCookieScopeAPI      = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
+	claudeSetupTokenScope     = "user:inference"
+	claudeSetupTokenExpiresIn = 365 * 24 * 60 * 60
+	claudeAIBrowserUA         = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 
 var (
@@ -55,6 +57,15 @@ type RefreshTokenOptions struct {
 	TokenEndpoint         string
 	AuthSource            string
 	AllowEndpointFallback bool
+}
+
+type CookieAuthOptions struct {
+	PreferSetupToken bool
+}
+
+type platformTokenExchangeOptions struct {
+	authSource string
+	expiresIn  int
 }
 
 type refreshHTTPError struct {
@@ -765,6 +776,11 @@ func parseCookieAuthorizationCode(redirectURI, state string) (string, error) {
 
 // CookieAuth completes Claude OAuth using a claude.ai sessionKey cookie.
 func (o *ClaudeAuth) CookieAuth(ctx context.Context, sessionKey string) (*ClaudeAuthBundle, error) {
+	return o.CookieAuthWithOptions(ctx, sessionKey, CookieAuthOptions{PreferSetupToken: true})
+}
+
+// CookieAuthWithOptions completes Claude OAuth using a claude.ai sessionKey cookie.
+func (o *ClaudeAuth) CookieAuthWithOptions(ctx context.Context, sessionKey string, options CookieAuthOptions) (*ClaudeAuthBundle, error) {
 	sessionKey = strings.TrimSpace(sessionKey)
 	if sessionKey == "" {
 		return nil, fmt.Errorf("sessionKey is required")
@@ -783,6 +799,14 @@ func (o *ClaudeAuth) CookieAuth(ctx context.Context, sessionKey string) (*Claude
 		if orgUUID == "" {
 			continue
 		}
+		if options.PreferSetupToken {
+			bundle, err := o.cookieSetupTokenAuthForOrganization(ctx, sessionKey, orgUUID)
+			if err == nil {
+				return bundle, nil
+			}
+			log.WithError(err).WithField("organization_uuid", orgUUID).Warn("claude cookie auth: setup-token organization failed, falling back")
+			attemptErrors = append(attemptErrors, fmt.Sprintf("%s setup-token: %v", orgUUID, err))
+		}
 		bundle, err := o.cookieAuthForOrganization(ctx, sessionKey, orgUUID)
 		if err == nil {
 			return bundle, nil
@@ -794,6 +818,30 @@ func (o *ClaudeAuth) CookieAuth(ctx context.Context, sessionKey string) (*Claude
 		return nil, fmt.Errorf("failed to authenticate with any organization")
 	}
 	return nil, fmt.Errorf("failed to authenticate with any organization: %s", strings.Join(attemptErrors, "; "))
+}
+
+func (o *ClaudeAuth) cookieSetupTokenAuthForOrganization(ctx context.Context, sessionKey, orgUUID string) (*ClaudeAuthBundle, error) {
+	pkceCodes, err := GeneratePKCECodes()
+	if err != nil {
+		return nil, err
+	}
+	state, err := generateClaudeOAuthState()
+	if err != nil {
+		return nil, err
+	}
+
+	code, err := o.getCookieAuthorizationCode(ctx, sessionKey, orgUUID, claudeSetupTokenScope, pkceCodes.CodeChallenge, state, PlatformRedirectURI)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get setup-token authorization code: %w", err)
+	}
+	bundle, err := o.ExchangePlatformCodeForSetupToken(ctx, code, state, pkceCodes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to exchange setup-token code: %w", err)
+	}
+	if bundle.TokenData.OrganizationUUID == "" {
+		bundle.TokenData.OrganizationUUID = orgUUID
+	}
+	return bundle, nil
 }
 
 func (o *ClaudeAuth) cookieAuthForOrganization(ctx context.Context, sessionKey, orgUUID string) (*ClaudeAuthBundle, error) {
@@ -975,8 +1023,26 @@ func (o *ClaudeAuth) getCookieAuthorizationCode(ctx context.Context, sessionKey,
 // ExchangePlatformCodeForTokens exchanges a Claude platform OAuth callback code
 // for refresh/access tokens using the same endpoint and redirect_uri as sub2api.
 func (o *ClaudeAuth) ExchangePlatformCodeForTokens(ctx context.Context, code, state string, pkceCodes *PKCECodes) (*ClaudeAuthBundle, error) {
+	return o.exchangePlatformCodeForTokens(ctx, code, state, pkceCodes, platformTokenExchangeOptions{
+		authSource: AuthSourceClaudePlatform,
+	})
+}
+
+// ExchangePlatformCodeForSetupToken exchanges a setup-token platform OAuth code.
+func (o *ClaudeAuth) ExchangePlatformCodeForSetupToken(ctx context.Context, code, state string, pkceCodes *PKCECodes) (*ClaudeAuthBundle, error) {
+	return o.exchangePlatformCodeForTokens(ctx, code, state, pkceCodes, platformTokenExchangeOptions{
+		authSource: AuthSourceClaudeSetupToken,
+		expiresIn:  claudeSetupTokenExpiresIn,
+	})
+}
+
+func (o *ClaudeAuth) exchangePlatformCodeForTokens(ctx context.Context, code, state string, pkceCodes *PKCECodes, options platformTokenExchangeOptions) (*ClaudeAuthBundle, error) {
 	if pkceCodes == nil {
 		return nil, fmt.Errorf("PKCE codes are required for token exchange")
+	}
+	authSource := strings.TrimSpace(options.authSource)
+	if authSource == "" {
+		authSource = AuthSourceClaudePlatform
 	}
 	newCode, newState := o.parseCodeAndState(code)
 	reqBody := map[string]any{
@@ -990,6 +1056,9 @@ func (o *ClaudeAuth) ExchangePlatformCodeForTokens(ctx context.Context, code, st
 		reqBody["state"] = newState
 	} else if strings.TrimSpace(state) != "" {
 		reqBody["state"] = state
+	}
+	if options.expiresIn > 0 {
+		reqBody["expires_in"] = options.expiresIn
 	}
 
 	if client, err := o.newCookieOAuthClient(); err != nil {
@@ -1012,8 +1081,11 @@ func (o *ClaudeAuth) ExchangePlatformCodeForTokens(ctx context.Context, code, st
 		if err = decodeClaudeAIJSONResponse("token exchange", resp.Response, resp.Bytes(), &tokenResp); err != nil {
 			return nil, err
 		}
+		if tokenResp.ExpiresIn <= 0 && options.expiresIn > 0 {
+			tokenResp.ExpiresIn = options.expiresIn
+		}
 		return &ClaudeAuthBundle{
-			TokenData:   tokenDataFromResponseForFlow(tokenResp, AuthSourceClaudePlatform, claudePlatformTokenURL, PlatformRedirectURI),
+			TokenData:   tokenDataFromResponseForFlow(tokenResp, authSource, claudePlatformTokenURL, PlatformRedirectURI),
 			LastRefresh: time.Now().Format(time.RFC3339),
 		}, nil
 	}
@@ -1048,9 +1120,12 @@ func (o *ClaudeAuth) ExchangePlatformCodeForTokens(ctx context.Context, code, st
 	if err = json.Unmarshal(body, &tokenResp); err != nil {
 		return nil, fmt.Errorf("failed to parse token response: %w", err)
 	}
+	if tokenResp.ExpiresIn <= 0 && options.expiresIn > 0 {
+		tokenResp.ExpiresIn = options.expiresIn
+	}
 
 	return &ClaudeAuthBundle{
-		TokenData:   tokenDataFromResponseForFlow(tokenResp, AuthSourceClaudePlatform, claudePlatformTokenURL, PlatformRedirectURI),
+		TokenData:   tokenDataFromResponseForFlow(tokenResp, authSource, claudePlatformTokenURL, PlatformRedirectURI),
 		LastRefresh: time.Now().Format(time.RFC3339),
 	}, nil
 }

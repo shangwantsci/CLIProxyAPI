@@ -89,7 +89,9 @@ func TestCookieAuthPrefersClaudeCodeCLIOAuth(t *testing.T) {
 			return req.C().SetCookieJar(nil), nil
 		},
 	}
-	bundle, err := auth.CookieAuth(context.Background(), "session-value")
+	bundle, err := auth.CookieAuthWithOptions(context.Background(), "session-value", CookieAuthOptions{
+		PreferSetupToken: false,
+	})
 	if err != nil {
 		t.Fatalf("CookieAuth returned error: %v", err)
 	}
@@ -140,6 +142,197 @@ func TestCookieAuthPrefersClaudeCodeCLIOAuth(t *testing.T) {
 	}
 	if !strings.HasPrefix(bundle.TokenData.Expire, "20") {
 		t.Fatalf("expired timestamp = %q, want RFC3339-like future timestamp", bundle.TokenData.Expire)
+	}
+}
+
+func TestCookieAuthPrefersSetupTokenOAuth(t *testing.T) {
+	var authorizeScope string
+	var authorizeRedirectURI string
+	var tokenRedirectURI string
+	var tokenExpiresIn any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/organizations":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[
+				{"uuid":"personal-org","name":"Personal","raven_type":null},
+				{"uuid":"team-org","name":"Team","raven_type":"team"}
+			]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/oauth/team-org/authorize":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode authorize body: %v", err)
+			}
+			authorizeScope, _ = body["scope"].(string)
+			authorizeRedirectURI, _ = body["redirect_uri"].(string)
+			if authorizeRedirectURI != PlatformRedirectURI {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":"setup token must use platform callback"}`))
+				return
+			}
+			state, _ := body["state"].(string)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"redirect_uri":"https://platform.claude.com/oauth/code/callback?code=setup-code&state=` + state + `"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/oauth/token":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode token body: %v", err)
+			}
+			tokenRedirectURI, _ = body["redirect_uri"].(string)
+			tokenExpiresIn = body["expires_in"]
+			if body["code"] != "setup-code" {
+				t.Fatalf("token code = %v, want setup-code", body["code"])
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"access_token":"setup-access",
+				"token_type":"Bearer",
+				"expires_in":31536000,
+				"scope":"user:inference",
+				"organization":{"uuid":"team-org","name":"Team"},
+				"account":{"uuid":"account-uuid","email_address":"user@example.com"}
+			}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	oldClaudeAIBaseURL := claudeAIBaseURL
+	oldAPITokenURL := claudeAPITokenURL
+	oldClaudePlatformTokenURL := claudePlatformTokenURL
+	defer func() {
+		claudeAIBaseURL = oldClaudeAIBaseURL
+		claudeAPITokenURL = oldAPITokenURL
+		claudePlatformTokenURL = oldClaudePlatformTokenURL
+	}()
+	claudeAIBaseURL = server.URL
+	claudeAPITokenURL = server.URL + "/api/oauth/token"
+	claudePlatformTokenURL = server.URL + "/v1/oauth/token"
+
+	auth := &ClaudeAuth{
+		httpClient: server.Client(),
+		claudeAIClientFactory: func(proxyURL string) (*req.Client, error) {
+			return req.C().SetCookieJar(nil), nil
+		},
+	}
+	bundle, err := auth.CookieAuth(context.Background(), "session-value")
+	if err != nil {
+		t.Fatalf("CookieAuth returned error: %v", err)
+	}
+	if authorizeScope != claudeSetupTokenScope {
+		t.Fatalf("authorize scope = %q, want %q", authorizeScope, claudeSetupTokenScope)
+	}
+	if tokenRedirectURI != PlatformRedirectURI {
+		t.Fatalf("token redirect_uri = %q, want %q", tokenRedirectURI, PlatformRedirectURI)
+	}
+	if tokenExpiresIn != float64(claudeSetupTokenExpiresIn) {
+		t.Fatalf("token expires_in = %#v, want %d", tokenExpiresIn, claudeSetupTokenExpiresIn)
+	}
+	if bundle.TokenData.AuthSource != AuthSourceClaudeSetupToken {
+		t.Fatalf("auth source = %q, want %q", bundle.TokenData.AuthSource, AuthSourceClaudeSetupToken)
+	}
+	if bundle.TokenData.RefreshToken != "" {
+		t.Fatalf("refresh token = %q, want empty setup-token refresh token", bundle.TokenData.RefreshToken)
+	}
+	if bundle.TokenData.ExpiresIn != claudeSetupTokenExpiresIn {
+		t.Fatalf("expires_in = %d, want %d", bundle.TokenData.ExpiresIn, claudeSetupTokenExpiresIn)
+	}
+	if bundle.TokenData.Scope != "user:inference" {
+		t.Fatalf("scope = %q, want user:inference", bundle.TokenData.Scope)
+	}
+	if bundle.TokenData.OrganizationUUID != "team-org" {
+		t.Fatalf("organization uuid = %q, want team-org", bundle.TokenData.OrganizationUUID)
+	}
+}
+
+func TestCookieAuthFallsBackToFullOAuthWhenSetupTokenFails(t *testing.T) {
+	var authorizeRedirects []string
+	var tokenPaths []string
+	var tokenRedirectURI string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/organizations":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"uuid":"team-org","name":"Team","raven_type":"team"}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/oauth/team-org/authorize":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode authorize body: %v", err)
+			}
+			redirectURI, _ := body["redirect_uri"].(string)
+			authorizeRedirects = append(authorizeRedirects, redirectURI)
+			if redirectURI == PlatformRedirectURI && body["scope"] == claudeSetupTokenScope {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":"setup_token_unavailable"}`))
+				return
+			}
+			state, _ := body["state"].(string)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"redirect_uri":"http://localhost:54545/callback?code=full-code&state=` + state + `"}`))
+		case r.Method == http.MethodPost && (r.URL.Path == "/api/oauth/token" || r.URL.Path == "/v1/oauth/token"):
+			tokenPaths = append(tokenPaths, r.URL.Path)
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode token body: %v", err)
+			}
+			tokenRedirectURI, _ = body["redirect_uri"].(string)
+			if body["code"] != "full-code" {
+				t.Fatalf("token code = %v, want full-code", body["code"])
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"access_token":"full-access",
+				"refresh_token":"full-refresh",
+				"token_type":"Bearer",
+				"expires_in":3600,
+				"organization":{"uuid":"team-org","name":"Team"},
+				"account":{"uuid":"account-uuid","email_address":"user@example.com"}
+			}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	oldClaudeAIBaseURL := claudeAIBaseURL
+	oldAPITokenURL := claudeAPITokenURL
+	oldClaudePlatformTokenURL := claudePlatformTokenURL
+	defer func() {
+		claudeAIBaseURL = oldClaudeAIBaseURL
+		claudeAPITokenURL = oldAPITokenURL
+		claudePlatformTokenURL = oldClaudePlatformTokenURL
+	}()
+	claudeAIBaseURL = server.URL
+	claudeAPITokenURL = server.URL + "/api/oauth/token"
+	claudePlatformTokenURL = server.URL + "/v1/oauth/token"
+
+	auth := &ClaudeAuth{
+		httpClient: server.Client(),
+		claudeAIClientFactory: func(proxyURL string) (*req.Client, error) {
+			return req.C().SetCookieJar(nil), nil
+		},
+	}
+	bundle, err := auth.CookieAuth(context.Background(), "session-value")
+	if err != nil {
+		t.Fatalf("CookieAuth returned error: %v", err)
+	}
+	if got, want := strings.Join(authorizeRedirects, ","), PlatformRedirectURI+","+RedirectURI; got != want {
+		t.Fatalf("authorize redirect sequence = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(tokenPaths, ","), "/api/oauth/token"; got != want {
+		t.Fatalf("token path sequence = %q, want %q", got, want)
+	}
+	if tokenRedirectURI != RedirectURI {
+		t.Fatalf("token redirect_uri = %q, want %q", tokenRedirectURI, RedirectURI)
+	}
+	if bundle.TokenData.AuthSource != AuthSourceClaudeCodeCLI {
+		t.Fatalf("auth source = %q, want %q", bundle.TokenData.AuthSource, AuthSourceClaudeCodeCLI)
+	}
+	if bundle.TokenData.RefreshToken != "full-refresh" {
+		t.Fatalf("refresh token = %q, want full-refresh", bundle.TokenData.RefreshToken)
 	}
 }
 
@@ -209,7 +402,9 @@ func TestCookieAuthFallsBackToPlatformOAuth(t *testing.T) {
 			return req.C().SetCookieJar(nil), nil
 		},
 	}
-	bundle, err := auth.CookieAuth(context.Background(), "session-value")
+	bundle, err := auth.CookieAuthWithOptions(context.Background(), "session-value", CookieAuthOptions{
+		PreferSetupToken: false,
+	})
 	if err != nil {
 		t.Fatalf("CookieAuth returned error: %v", err)
 	}
@@ -300,7 +495,9 @@ func TestCookieAuthTriesNextPaidOrganizationWhenFirstIsCanceled(t *testing.T) {
 			return req.C().SetCookieJar(nil), nil
 		},
 	}
-	bundle, err := auth.CookieAuth(context.Background(), "session-value")
+	bundle, err := auth.CookieAuthWithOptions(context.Background(), "session-value", CookieAuthOptions{
+		PreferSetupToken: false,
+	})
 	if err != nil {
 		t.Fatalf("CookieAuth returned error: %v", err)
 	}

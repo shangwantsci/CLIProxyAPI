@@ -574,6 +574,8 @@ func claudeAuthMethodLabel(authSource string) string {
 		return "Claude Code CLI OAuth"
 	case claude.AuthSourceClaudePlatform:
 		return "Platform OAuth"
+	case claude.AuthSourceClaudeSetupToken:
+		return "Setup Token OAuth"
 	default:
 		return "未知认证来源"
 	}
@@ -2116,6 +2118,9 @@ func applyClaudeTokenStorageMetadata(metadata map[string]any, tokenStorage *clau
 	}
 	if tokenStorage.AuthSource != "" {
 		metadata["auth_source"] = tokenStorage.AuthSource
+		if tokenStorage.AuthSource == claude.AuthSourceClaudeSetupToken {
+			metadata["auth_kind"] = "setup_token"
+		}
 	}
 	if tokenStorage.TokenEndpoint != "" {
 		metadata["token_endpoint"] = tokenStorage.TokenEndpoint
@@ -2161,6 +2166,9 @@ func applyClaudeTokenDataMetadata(metadata map[string]any, tokenData *claude.Cla
 	}
 	if tokenData.AuthSource != "" {
 		metadata["auth_source"] = tokenData.AuthSource
+		if tokenData.AuthSource == claude.AuthSourceClaudeSetupToken {
+			metadata["auth_kind"] = "setup_token"
+		}
 	}
 	if tokenData.TokenEndpoint != "" {
 		metadata["token_endpoint"] = tokenData.TokenEndpoint

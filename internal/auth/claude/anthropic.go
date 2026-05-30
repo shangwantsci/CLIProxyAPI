@@ -1,8 +1,9 @@
 package claude
 
 const (
-	AuthSourceClaudeCodeCLI  = "claude_code_cli"
-	AuthSourceClaudePlatform = "claude_platform"
+	AuthSourceClaudeCodeCLI    = "claude_code_cli"
+	AuthSourceClaudePlatform   = "claude_platform"
+	AuthSourceClaudeSetupToken = "claude_setup_token"
 )
 
 // PKCECodes holds PKCE verification codes for OAuth2 PKCE flow

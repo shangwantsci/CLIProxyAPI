@@ -37,30 +37,34 @@ const (
 )
 
 type claudeSessionImportStartRequest struct {
-	SourceURL      string `json:"source_url"`
-	APIPath        string `json:"api_path"`
-	ProxyURL       string `json:"proxy_url"`
-	Prefix         string `json:"prefix"`
-	Note           string `json:"note"`
-	Concurrency    int    `json:"concurrency"`
-	TimeoutSeconds int    `json:"timeout_seconds"`
-	DelayMinMS     int    `json:"delay_min_ms"`
-	DelayMaxMS     int    `json:"delay_max_ms"`
+	SourceURL      string   `json:"source_url"`
+	APIPath        string   `json:"api_path"`
+	SessionKeys    []string `json:"session_keys"`
+	ProxyURL       string   `json:"proxy_url"`
+	Prefix         string   `json:"prefix"`
+	Note           string   `json:"note"`
+	Concurrency    int      `json:"concurrency"`
+	TimeoutSeconds int      `json:"timeout_seconds"`
+	DelayMinMS     int      `json:"delay_min_ms"`
+	DelayMaxMS     int      `json:"delay_max_ms"`
 }
 
 type normalizedClaudeSessionImportRequest struct {
-	SourceURL          string
-	APIEndpoint        string
-	DisplaySourceURL   string
-	DisplayAPIEndpoint string
-	ProxyURL           string
-	ProxyCandidates    []string
-	Prefix             string
-	Note               string
-	Concurrency        int
-	Timeout            time.Duration
-	DelayMin           time.Duration
-	DelayMax           time.Duration
+	SourceURL            string
+	APIEndpoint          string
+	DisplaySourceURL     string
+	DisplayAPIEndpoint   string
+	SessionKeys          []string
+	SessionKeyDuplicates int
+	ProxyURL             string
+	ProxyCandidates      []string
+	ImportSource         string
+	Prefix               string
+	Note                 string
+	Concurrency          int
+	Timeout              time.Duration
+	DelayMin             time.Duration
+	DelayMax             time.Duration
 }
 
 type claudeSessionImportAuthRequest struct {
@@ -233,43 +237,6 @@ func (j *claudeSessionImportJob) update(fn func(*claudeSessionImportJobSnapshot)
 }
 
 func (h *Handler) normalizeClaudeSessionImportRequest(req claudeSessionImportStartRequest) (normalizedClaudeSessionImportRequest, error) {
-	sourceURL := strings.TrimSpace(req.SourceURL)
-	if sourceURL == "" {
-		sourceURL = defaultClaudeSessionImportSourceURL
-	}
-	source, err := url.Parse(sourceURL)
-	if err != nil || source.Scheme == "" || source.Host == "" {
-		return normalizedClaudeSessionImportRequest{}, fmt.Errorf("invalid source_url")
-	}
-	if err := h.validateClaudeSessionImportURL(source); err != nil {
-		return normalizedClaudeSessionImportRequest{}, err
-	}
-
-	apiPath := strings.TrimSpace(req.APIPath)
-	if apiPath == "" {
-		apiPath = defaultClaudeSessionImportAPIPath
-	}
-	apiRef, err := url.Parse(apiPath)
-	if err != nil || apiRef.IsAbs() || !strings.HasPrefix(apiRef.Path, "/") {
-		return normalizedClaudeSessionImportRequest{}, fmt.Errorf("api_path must be an absolute path on the source host")
-	}
-	endpoint := *source
-	endpoint.Path = apiRef.Path
-	endpoint.RawQuery = apiRef.RawQuery
-	endpoint.Fragment = ""
-	if endpoint.Host != source.Host {
-		return normalizedClaudeSessionImportRequest{}, fmt.Errorf("api_path must stay on the source host")
-	}
-	if err := h.validateClaudeSessionImportURL(&endpoint); err != nil {
-		return normalizedClaudeSessionImportRequest{}, err
-	}
-	displaySourceURL := source.String()
-	displayAPIEndpoint := endpoint.String()
-	if shouldHideClaudeSessionImportSource(source.Hostname()) {
-		displaySourceURL = ""
-		displayAPIEndpoint = ""
-	}
-
 	concurrency := req.Concurrency
 	if concurrency <= 0 {
 		concurrency = 10
@@ -296,18 +263,74 @@ func (h *Handler) normalizeClaudeSessionImportRequest(req claudeSessionImportSta
 		delayMax = delayMin
 	}
 
+	sessionKeys, sessionKeyDuplicates := normalizeClaudeSessionImportKeys(req.SessionKeys)
+	isManualSessionKeyImport := len(req.SessionKeys) > 0
+	if isManualSessionKeyImport && len(sessionKeys) == 0 {
+		return normalizedClaudeSessionImportRequest{}, fmt.Errorf("session_keys must contain at least one session key")
+	}
+
+	sourceURL := ""
+	apiEndpoint := ""
+	displaySourceURL := ""
+	displayAPIEndpoint := ""
+	importSource := ""
+	if !isManualSessionKeyImport {
+		sourceURL = strings.TrimSpace(req.SourceURL)
+		if sourceURL == "" {
+			sourceURL = defaultClaudeSessionImportSourceURL
+		}
+		source, err := url.Parse(sourceURL)
+		if err != nil || source.Scheme == "" || source.Host == "" {
+			return normalizedClaudeSessionImportRequest{}, fmt.Errorf("invalid source_url")
+		}
+		if err := h.validateClaudeSessionImportURL(source); err != nil {
+			return normalizedClaudeSessionImportRequest{}, err
+		}
+
+		apiPath := strings.TrimSpace(req.APIPath)
+		if apiPath == "" {
+			apiPath = defaultClaudeSessionImportAPIPath
+		}
+		apiRef, err := url.Parse(apiPath)
+		if err != nil || apiRef.IsAbs() || !strings.HasPrefix(apiRef.Path, "/") {
+			return normalizedClaudeSessionImportRequest{}, fmt.Errorf("api_path must be an absolute path on the source host")
+		}
+		endpoint := *source
+		endpoint.Path = apiRef.Path
+		endpoint.RawQuery = apiRef.RawQuery
+		endpoint.Fragment = ""
+		if endpoint.Host != source.Host {
+			return normalizedClaudeSessionImportRequest{}, fmt.Errorf("api_path must stay on the source host")
+		}
+		if err := h.validateClaudeSessionImportURL(&endpoint); err != nil {
+			return normalizedClaudeSessionImportRequest{}, err
+		}
+		sourceURL = source.String()
+		apiEndpoint = endpoint.String()
+		displaySourceURL = source.String()
+		displayAPIEndpoint = endpoint.String()
+		if shouldHideClaudeSessionImportSource(source.Hostname()) {
+			displaySourceURL = ""
+			displayAPIEndpoint = ""
+		}
+		importSource = claudeImportSourceBulkSessionImport
+	}
+
 	return normalizedClaudeSessionImportRequest{
-		SourceURL:          source.String(),
-		APIEndpoint:        endpoint.String(),
-		DisplaySourceURL:   displaySourceURL,
-		DisplayAPIEndpoint: displayAPIEndpoint,
-		ProxyURL:           strings.TrimSpace(req.ProxyURL),
-		Prefix:             strings.TrimSpace(req.Prefix),
-		Note:               strings.TrimSpace(req.Note),
-		Concurrency:        concurrency,
-		Timeout:            time.Duration(timeoutSeconds) * time.Second,
-		DelayMin:           delayMin,
-		DelayMax:           delayMax,
+		SourceURL:            sourceURL,
+		APIEndpoint:          apiEndpoint,
+		DisplaySourceURL:     displaySourceURL,
+		DisplayAPIEndpoint:   displayAPIEndpoint,
+		SessionKeys:          sessionKeys,
+		SessionKeyDuplicates: sessionKeyDuplicates,
+		ProxyURL:             strings.TrimSpace(req.ProxyURL),
+		ImportSource:         importSource,
+		Prefix:               strings.TrimSpace(req.Prefix),
+		Note:                 strings.TrimSpace(req.Note),
+		Concurrency:          concurrency,
+		Timeout:              time.Duration(timeoutSeconds) * time.Second,
+		DelayMin:             delayMin,
+		DelayMax:             delayMax,
 	}, nil
 }
 
@@ -332,7 +355,7 @@ func (h *Handler) validateClaudeSessionImportURL(parsed *url.URL) error {
 }
 
 func (h *Handler) runClaudeSessionImportJob(ctx context.Context, job *claudeSessionImportJob, req normalizedClaudeSessionImportRequest) {
-	keys, duplicates, err := h.fetchClaudeSessionKeys(ctx, req)
+	keys, duplicates, err := h.sessionKeysForClaudeSessionImport(ctx, req)
 	if err != nil {
 		finished := time.Now().UTC()
 		job.update(func(snapshot *claudeSessionImportJobSnapshot) {
@@ -402,6 +425,13 @@ sendLoop:
 		}
 		snapshot.FinishedAt = &finished
 	})
+}
+
+func (h *Handler) sessionKeysForClaudeSessionImport(ctx context.Context, req normalizedClaudeSessionImportRequest) ([]string, int, error) {
+	if len(req.SessionKeys) > 0 {
+		return append([]string(nil), req.SessionKeys...), req.SessionKeyDuplicates, nil
+	}
+	return h.fetchClaudeSessionKeys(ctx, req)
 }
 
 func (h *Handler) fetchClaudeSessionKeys(ctx context.Context, req normalizedClaudeSessionImportRequest) ([]string, int, error) {
@@ -479,6 +509,25 @@ func (h *Handler) fetchClaudeSessionKeys(ctx context.Context, req normalizedClau
 	return keys, duplicates, nil
 }
 
+func normalizeClaudeSessionImportKeys(input []string) ([]string, int) {
+	seen := make(map[string]struct{}, len(input))
+	keys := make([]string, 0, len(input))
+	duplicates := 0
+	for _, raw := range input {
+		key := strings.TrimSpace(raw)
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			duplicates++
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	return keys, duplicates
+}
+
 func (h *Handler) processClaudeSessionImportKey(ctx context.Context, sessionKey string, req normalizedClaudeSessionImportRequest) claudeSessionImportResult {
 	result := claudeSessionImportResult{
 		SessionKeyHash: shortSessionKeyHash(sessionKey),
@@ -493,7 +542,7 @@ func (h *Handler) processClaudeSessionImportKey(ctx context.Context, sessionKey 
 		ProxyURL:     proxyURL,
 		Prefix:       req.Prefix,
 		Note:         req.Note,
-		ImportSource: claudeImportSourceBulkSessionImport,
+		ImportSource: req.ImportSource,
 	})
 	if err != nil {
 		result.Reason = classifyClaudeSessionImportError(err)
