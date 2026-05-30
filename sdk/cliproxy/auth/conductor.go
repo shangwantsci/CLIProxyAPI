@@ -3166,6 +3166,11 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 const (
 	claudeWindow5hPrefix = "anthropic-ratelimit-unified-5h-"
 	claudeWindow7dPrefix = "anthropic-ratelimit-unified-7d-"
+	// Unified (window-agnostic) headers. "status" is the overall allow/limit state and
+	// "representative-claim" names the window Anthropic currently treats as authoritative
+	// (e.g. "five_hour" / "seven_day").
+	claudeUnifiedStatusHeader = "anthropic-ratelimit-unified-status"
+	claudeUnifiedClaimHeader  = "anthropic-ratelimit-unified-representative-claim"
 )
 
 func isClaudeAuthResult(auth *Auth, provider string) bool {
@@ -3187,7 +3192,9 @@ func updateClaudePassiveQuotaFromHeaders(auth *Auth, headers http.Header, now ti
 	util5h, hasUtil5h := parseClaudeRateLimitFloat(headers.Get(claudeWindow5hPrefix + "utilization"))
 	reset7d, hasReset7d := parseClaudeRateLimitResetTime(headers.Get(claudeWindow7dPrefix+"reset"), now)
 	util7d, hasUtil7d := parseClaudeRateLimitFloat(headers.Get(claudeWindow7dPrefix + "utilization"))
-	if status == "" && !hasReset5h && !hasUtil5h && !hasReset7d && !hasUtil7d {
+	unifiedStatus := strings.TrimSpace(headers.Get(claudeUnifiedStatusHeader))
+	representativeClaim := strings.TrimSpace(headers.Get(claudeUnifiedClaimHeader))
+	if status == "" && !hasReset5h && !hasUtil5h && !hasReset7d && !hasUtil7d && unifiedStatus == "" && representativeClaim == "" {
 		return false
 	}
 
@@ -3233,6 +3240,12 @@ func updateClaudePassiveQuotaFromHeaders(auth *Auth, headers http.Header, now ti
 	}
 	if hasReset7d {
 		changed = setAuthMetadata(auth.Metadata, "passive_usage_7d_reset", reset7d.Unix()) || changed
+	}
+	if unifiedStatus != "" {
+		changed = setAuthMetadata(auth.Metadata, "unified_status", unifiedStatus) || changed
+	}
+	if representativeClaim != "" {
+		changed = setAuthMetadata(auth.Metadata, "unified_representative_claim", representativeClaim) || changed
 	}
 	changed = setAuthMetadata(auth.Metadata, "passive_usage_sampled_at", now.UTC().Format(time.RFC3339)) || changed
 	return changed
@@ -3302,6 +3315,8 @@ func (m *Manager) claudePassiveQuotaState(auth *Auth, now time.Time) (claudePass
 	limited := make([]string, 0, 2)
 	recoverAt := time.Time{}
 	seenWindow := false
+	representativeClaim, _ := auth.Metadata["unified_representative_claim"].(string)
+	representativeClaim = strings.ToLower(strings.TrimSpace(representativeClaim))
 
 	if util, ok := metadataQuotaFloat(auth.Metadata["session_window_utilization"]); ok {
 		seenWindow = true
@@ -3334,7 +3349,12 @@ func (m *Manager) claudePassiveQuotaState(auth *Auth, now time.Time) (claudePass
 				resetAt = now
 			}
 			limited = append(limited, claudePassiveQuotaWindowReason("seven_day", remaining, threshold))
-			if recoverAt.IsZero() || resetAt.Before(recoverAt) {
+			// When Anthropic reports the 7-day window as the authoritative (representative)
+			// limit, prefer its reset time even if the 5h window resets sooner; otherwise the
+			// account would be returned to rotation early and immediately hit the weekly cap.
+			if representativeClaim == "seven_day" {
+				recoverAt = resetAt
+			} else if recoverAt.IsZero() || resetAt.Before(recoverAt) {
 				recoverAt = resetAt
 			}
 		}

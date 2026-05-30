@@ -587,6 +587,10 @@ func (h *Handler) saveClaudeSessionKeyAuth(ctx context.Context, req claudeSessio
 
 	metadata := defaultClaudeAuthMetadata(tokenStorage.Email)
 	applyClaudeTokenStorageMetadata(metadata, tokenStorage)
+	// Prefer the OAuth profile endpoint for subscription/plan classification so cookie
+	// imports match the interactive OAuth path (max/pro/team via has_claude_max/has_claude_pro).
+	// Failures degrade silently and keep the cookie-derived plan_type as fallback.
+	h.applyClaudeOAuthProfileSubscriptionMetadata(ctx, metadata, tokenStorage, proxyURL)
 	if proxyURL != "" {
 		metadata["proxy_url"] = proxyURL
 	}

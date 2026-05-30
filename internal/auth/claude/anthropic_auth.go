@@ -210,7 +210,12 @@ func cookieOrganizationPlanType(org claudeOrganization) string {
 			return plan
 		}
 	}
-	if hasNonFreeCookieSignal(cookieOrganizationString(org.RateLimitTier)) {
+	if signal := cookieOrganizationString(org.RateLimitTier); hasNonFreeCookieSignal(signal) {
+		// The rate_limit_tier itself often encodes the tier (e.g. "default_claude_max_...").
+		// Prefer the precise plan when recognizable, only falling back to "pro" otherwise.
+		if plan := normalizeCookieOrganizationPlanType(signal); plan != "" && plan != "free" {
+			return plan
+		}
 		return "pro"
 	}
 	for _, capability := range org.Capabilities {
@@ -238,7 +243,9 @@ func normalizeCookieOrganizationPlanType(raw string) string {
 	if strings.Contains(value, "free") || strings.Contains(value, "personal") {
 		return "free"
 	}
-	return strings.TrimSpace(raw)
+	// Unrecognized values (e.g. capability tokens like "chat") are not plan names; drop them
+	// instead of echoing the raw string back as a bogus plan_type.
+	return ""
 }
 
 type cookieAuthorizeResponse struct {

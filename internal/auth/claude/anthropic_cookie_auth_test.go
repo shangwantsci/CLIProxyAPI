@@ -518,6 +518,53 @@ func TestCookieAuthTriesNextPaidOrganizationWhenFirstIsCanceled(t *testing.T) {
 	}
 }
 
+func TestCookieOrganizationPlanType(t *testing.T) {
+	ptr := func(s string) *string { return &s }
+	tests := []struct {
+		name string
+		org  claudeOrganization
+		want string
+	}{
+		{
+			name: "explicit pro plan_type",
+			org:  claudeOrganization{PlanType: ptr("pro")},
+			want: "pro",
+		},
+		{
+			name: "max via plan_type",
+			org:  claudeOrganization{PlanType: ptr("max")},
+			want: "max",
+		},
+		{
+			name: "max preserved from rate_limit_tier",
+			org:  claudeOrganization{RateLimitTier: ptr("default_claude_max_20250101")},
+			want: "max",
+		},
+		{
+			name: "raven rate_limit_tier resolves to team",
+			org:  claudeOrganization{RateLimitTier: ptr("default_raven")},
+			want: "team",
+		},
+		{
+			name: "chat capability is not a plan name",
+			org:  claudeOrganization{Capabilities: []string{"chat"}},
+			want: "",
+		},
+		{
+			name: "free personal org",
+			org:  claudeOrganization{RateLimitTier: ptr("default_claude_ai"), Capabilities: []string{"chat"}},
+			want: "",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cookieOrganizationPlanType(tc.org); got != tc.want {
+				t.Fatalf("cookieOrganizationPlanType = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSelectCookieOrganizationUUIDPrefersNonFreePlan(t *testing.T) {
 	free := "free"
 	freePlan := "free_plan"

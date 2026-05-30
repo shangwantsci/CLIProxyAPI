@@ -209,6 +209,87 @@ func TestManagerMarkResultAppliesClaudePassiveWeeklyQuotaProtection(t *testing.T
 	}
 }
 
+func TestManagerMarkResultStoresClaudeUnifiedStatusAndClaim(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	reset5h := time.Now().UTC().Truncate(time.Second).Add(3 * time.Hour)
+	auth := &Auth{
+		ID:       "claude-unified-headers",
+		Provider: "claude",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"auth_source": "claude_setup_token",
+			"scope":       "user:inference",
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	headers := http.Header{}
+	headers.Set("anthropic-ratelimit-unified-status", "allowed")
+	headers.Set("anthropic-ratelimit-unified-representative-claim", "five_hour")
+	headers.Set("anthropic-ratelimit-unified-5h-reset", strconv.FormatInt(reset5h.Unix(), 10))
+	headers.Set("anthropic-ratelimit-unified-5h-utilization", "0.20")
+	ctx := logging.WithResponseHeadersHolder(context.Background())
+	logging.SetResponseHeaders(ctx, headers)
+
+	manager.MarkResult(ctx, Result{AuthID: auth.ID, Provider: "claude", Model: "claude-sonnet-4-5", Success: true})
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("auth not found")
+	}
+	if got := updated.Metadata["unified_status"]; got != "allowed" {
+		t.Fatalf("unified_status = %v, want allowed", got)
+	}
+	if got := updated.Metadata["unified_representative_claim"]; got != "five_hour" {
+		t.Fatalf("unified_representative_claim = %v, want five_hour", got)
+	}
+}
+
+func TestManagerMarkResultUsesSevenDayResetWhenClaimIsWeekly(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{
+		ClaudeQuotaCoolingThresholds: internalconfig.ClaudeQuotaCoolingThresholds{
+			FiveHourRemainingPercent: 20,
+			WeeklyRemainingPercent:   10,
+		},
+	})
+	// Both windows are over threshold; the 5h window resets sooner, but Anthropic reports the
+	// weekly window as the representative (authoritative) claim, so cooldown must follow 7d.
+	reset5h := time.Now().UTC().Truncate(time.Second).Add(1 * time.Hour)
+	reset7d := time.Now().UTC().Truncate(time.Second).Add(72 * time.Hour)
+	auth := &Auth{
+		ID:       "claude-claim-weekly",
+		Provider: "claude",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"auth_source": "claude_setup_token",
+			"scope":       "user:inference",
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	headers := http.Header{}
+	headers.Set("anthropic-ratelimit-unified-representative-claim", "seven_day")
+	headers.Set("anthropic-ratelimit-unified-5h-reset", strconv.FormatInt(reset5h.Unix(), 10))
+	headers.Set("anthropic-ratelimit-unified-5h-utilization", "0.95")
+	headers.Set("anthropic-ratelimit-unified-7d-reset", strconv.FormatInt(reset7d.Unix(), 10))
+	headers.Set("anthropic-ratelimit-unified-7d-utilization", "0.95")
+	ctx := logging.WithResponseHeadersHolder(context.Background())
+	logging.SetResponseHeaders(ctx, headers)
+
+	manager.MarkResult(ctx, Result{AuthID: auth.ID, Provider: "claude", Model: "claude-sonnet-4-5", Success: true})
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("auth not found")
+	}
+	assertTimeNear(t, updated.NextRetryAfter, reset7d)
+}
+
 func metadataFloat(value any) float64 {
 	switch v := value.(type) {
 	case float64:
