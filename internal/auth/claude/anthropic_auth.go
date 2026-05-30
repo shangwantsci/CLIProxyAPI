@@ -160,9 +160,12 @@ type tokenResponse struct {
 }
 
 type claudeOrganization struct {
-	UUID      string  `json:"uuid"`
-	Name      string  `json:"name"`
-	RavenType *string `json:"raven_type"`
+	UUID             string  `json:"uuid"`
+	Name             string  `json:"name"`
+	RavenType        *string `json:"raven_type"`
+	Plan             *string `json:"plan"`
+	PlanType         *string `json:"plan_type"`
+	SubscriptionTier *string `json:"subscription_tier"`
 }
 
 type cookieAuthorizeResponse struct {
@@ -657,7 +660,7 @@ func selectCookieOrganizationUUID(orgs []claudeOrganization) (string, error) {
 		return "", fmt.Errorf("no organizations found")
 	}
 	for _, org := range orgs {
-		if org.RavenType != nil && *org.RavenType == "team" && strings.TrimSpace(org.UUID) != "" {
+		if isNonFreeCookieOrganization(org) && strings.TrimSpace(org.UUID) != "" {
 			return org.UUID, nil
 		}
 	}
@@ -665,6 +668,29 @@ func selectCookieOrganizationUUID(orgs []claudeOrganization) (string, error) {
 		return "", fmt.Errorf("organization uuid is empty")
 	}
 	return orgs[0].UUID, nil
+}
+
+func isNonFreeCookieOrganization(org claudeOrganization) bool {
+	for _, raw := range []string{
+		cookieOrganizationString(org.RavenType),
+		cookieOrganizationString(org.PlanType),
+		cookieOrganizationString(org.Plan),
+		cookieOrganizationString(org.SubscriptionTier),
+	} {
+		value := strings.ToLower(strings.TrimSpace(raw))
+		if value == "" || strings.Contains(value, "free") || strings.Contains(value, "personal") {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func cookieOrganizationString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(*value)
 }
 
 func parseCookieAuthorizationCode(redirectURI, state string) (string, error) {

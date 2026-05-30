@@ -227,6 +227,57 @@ func TestCookieAuthFallsBackToPlatformOAuth(t *testing.T) {
 	}
 }
 
+func TestSelectCookieOrganizationUUIDPrefersNonFreePlan(t *testing.T) {
+	free := "free"
+	freePlan := "free_plan"
+	pro := "pro"
+	max := "max"
+	team := "team"
+
+	tests := []struct {
+		name string
+		orgs []claudeOrganization
+		want string
+	}{
+		{
+			name: "skips explicit free before pro",
+			orgs: []claudeOrganization{
+				{UUID: "free-org", Name: "Free", RavenType: &free},
+				{UUID: "pro-org", Name: "Pro", RavenType: &pro},
+			},
+			want: "pro-org",
+		},
+		{
+			name: "skips default personal before max",
+			orgs: []claudeOrganization{
+				{UUID: "personal-org", Name: "Personal"},
+				{UUID: "max-org", Name: "Max", RavenType: &max},
+			},
+			want: "max-org",
+		},
+		{
+			name: "skips free plan alias before team",
+			orgs: []claudeOrganization{
+				{UUID: "free-org", Name: "Free", RavenType: &freePlan},
+				{UUID: "team-org", Name: "Team", RavenType: &team},
+			},
+			want: "team-org",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := selectCookieOrganizationUUID(tc.orgs)
+			if err != nil {
+				t.Fatalf("selectCookieOrganizationUUID returned error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("organization uuid = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCookieOrganizationUUIDReportsHTMLResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/api/organizations" {

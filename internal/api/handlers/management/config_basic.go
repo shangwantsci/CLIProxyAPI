@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -108,6 +107,10 @@ func WriteConfig(path string, data []byte) error {
 	return f.Close()
 }
 
+func createConfigValidationTempFile(_ string) (*os.File, error) {
+	return os.CreateTemp("", "config-validate-*.yaml")
+}
+
 func cloneConfig(src *config.Config) *config.Config {
 	if src == nil {
 		return &config.Config{}
@@ -136,9 +139,10 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_yaml", "message": err.Error()})
 		return
 	}
-	// Validate config using LoadConfigOptional with optional=false to enforce parsing
-	tmpDir := filepath.Dir(h.configFilePath)
-	tmpFile, err := os.CreateTemp(tmpDir, "config-validate-*.yaml")
+	// Validate config using LoadConfigOptional with optional=false to enforce parsing.
+	// The temp file must not be created next to config.yaml because production can
+	// bind-mount only the config file while keeping its parent directory read-only.
+	tmpFile, err := createConfigValidationTempFile(h.configFilePath)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": err.Error()})
 		return
@@ -164,9 +168,10 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 		return
 	}
 	h.mu.Lock()
-	if WriteConfig(h.configFilePath, body) != nil {
+	if errWriteConfig := WriteConfig(h.configFilePath, body); errWriteConfig != nil {
 		h.mu.Unlock()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": "failed to write config"})
+		log.WithError(errWriteConfig).WithField("path", h.configFilePath).Error("failed to write config.yaml")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": errWriteConfig.Error()})
 		return
 	}
 	// Reload into handler to keep memory in sync

@@ -126,6 +126,33 @@ func TestPostClaudeSessionImportJobFetchesAndImportsSessionKeys(t *testing.T) {
 	}
 }
 
+func TestProcessClaudeSessionImportKeyMarksBulkImportSource(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
+	var capturedImportSource string
+	h.sessionImportAuthenticate = func(ctx context.Context, req claudeSessionImportAuthRequest) (claudeSessionImportAuthResult, error) {
+		capturedImportSource = req.ImportSource
+		return claudeSessionImportAuthResult{
+			AuthFile:        "claude-sk-one.json",
+			Email:           "sk-one@example.test",
+			AuthSource:      "claude_code_cli",
+			AuthMethodLabel: "Claude Code CLI OAuth",
+		}, nil
+	}
+
+	result := h.processClaudeSessionImportKey(context.Background(), "sk-one", normalizedClaudeSessionImportRequest{
+		ProxyURL: "direct",
+	})
+
+	if result.Status != "imported" {
+		t.Fatalf("status = %q, want imported; result=%#v", result.Status, result)
+	}
+	if capturedImportSource != claudeImportSourceBulkSessionImport {
+		t.Fatalf("import source = %q, want %q", capturedImportSource, claudeImportSourceBulkSessionImport)
+	}
+}
+
 func TestNormalizeClaudeSessionImportRequestHidesDefaultSourceDisplay(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 

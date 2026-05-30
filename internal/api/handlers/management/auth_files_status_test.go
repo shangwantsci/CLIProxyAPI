@@ -124,6 +124,45 @@ func TestPatchAuthFileStatus_EnablePreservesPermanentAuthError(t *testing.T) {
 	}
 }
 
+func TestBuildAuthFileEntryDefaultsMissingImportSourceToManual(t *testing.T) {
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
+
+	entry := h.buildAuthFileEntry(&coreauth.Auth{
+		ID:       "claude-manual.json",
+		FileName: "claude-manual.json",
+		Provider: "claude",
+		Attributes: map[string]string{
+			"runtime_only": "true",
+		},
+		Metadata: map[string]any{"type": "claude"},
+	})
+
+	if got, _ := entry["import_source"].(string); got != claudeImportSourceManual {
+		t.Fatalf("import_source = %q, want %q", got, claudeImportSourceManual)
+	}
+}
+
+func TestBuildAuthFileEntryExposesBulkImportSource(t *testing.T) {
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
+
+	entry := h.buildAuthFileEntry(&coreauth.Auth{
+		ID:       "claude-bulk.json",
+		FileName: "claude-bulk.json",
+		Provider: "claude",
+		Attributes: map[string]string{
+			"runtime_only": "true",
+		},
+		Metadata: map[string]any{
+			"type":          "claude",
+			"import_source": claudeImportSourceBulkSessionImport,
+		},
+	})
+
+	if got, _ := entry["import_source"].(string); got != claudeImportSourceBulkSessionImport {
+		t.Fatalf("import_source = %q, want %q", got, claudeImportSourceBulkSessionImport)
+	}
+}
+
 func TestClaudeAuthHealthClassifiesOAuthNotAllowedForOrganization(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)

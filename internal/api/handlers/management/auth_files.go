@@ -51,6 +51,11 @@ const (
 	geminiCLIVersion      = "v1internal"
 )
 
+const (
+	claudeImportSourceManual            = "manual"
+	claudeImportSourceBulkSessionImport = "bulk_session_import"
+)
+
 var refreshClaudeTokenForManagement = func(ctx context.Context, cfg *config.Config, proxyURL, refreshToken string, opts claude.RefreshTokenOptions) (*claude.ClaudeTokenData, error) {
 	svc := claude.NewClaudeAuthWithProxyURL(cfg, proxyURL)
 	return svc.RefreshTokensWithRetryOptions(ctx, refreshToken, 3, opts)
@@ -533,6 +538,7 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		}
 	}
 	if strings.EqualFold(strings.TrimSpace(auth.Provider), "claude") {
+		entry["import_source"] = claudeAuthImportSource(auth)
 		entry["cloak_mode"] = authCloakMode(auth)
 		entry["cloak_strict_mode"] = authBoolSetting(auth, "cloak_strict_mode", false)
 		entry["cloak_cache_user_id"] = authBoolSetting(auth, "cloak_cache_user_id", true)
@@ -570,6 +576,19 @@ func claudeAuthMethodLabel(authSource string) string {
 		return "Platform OAuth"
 	default:
 		return "未知认证来源"
+	}
+}
+
+func claudeAuthImportSource(auth *coreauth.Auth) string {
+	return normalizeClaudeImportSource(authStringSetting(auth, "import_source"))
+}
+
+func normalizeClaudeImportSource(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case claudeImportSourceBulkSessionImport, "bulk", "batch", "session_import", "bulk_import":
+		return claudeImportSourceBulkSessionImport
+	default:
+		return claudeImportSourceManual
 	}
 }
 

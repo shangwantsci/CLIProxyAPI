@@ -64,10 +64,11 @@ type normalizedClaudeSessionImportRequest struct {
 }
 
 type claudeSessionImportAuthRequest struct {
-	SessionKey string
-	ProxyURL   string
-	Prefix     string
-	Note       string
+	SessionKey   string
+	ProxyURL     string
+	Prefix       string
+	Note         string
+	ImportSource string
 }
 
 type claudeSessionImportAuthResult struct {
@@ -488,10 +489,11 @@ func (h *Handler) processClaudeSessionImportKey(ctx context.Context, sessionKey 
 		proxyURL = randomClaudeSessionImportProxy(req.ProxyCandidates)
 	}
 	authResult, err := h.authenticateClaudeSessionKey(ctx, claudeSessionImportAuthRequest{
-		SessionKey: sessionKey,
-		ProxyURL:   proxyURL,
-		Prefix:     req.Prefix,
-		Note:       req.Note,
+		SessionKey:   sessionKey,
+		ProxyURL:     proxyURL,
+		Prefix:       req.Prefix,
+		Note:         req.Note,
+		ImportSource: claudeImportSourceBulkSessionImport,
 	})
 	if err != nil {
 		result.Reason = classifyClaudeSessionImportError(err)
@@ -544,6 +546,9 @@ func (h *Handler) saveClaudeSessionKeyAuth(ctx context.Context, req claudeSessio
 	}
 	if note := strings.TrimSpace(req.Note); note != "" {
 		metadata["note"] = note
+	}
+	if importSource := normalizeClaudeImportSource(req.ImportSource); importSource == claudeImportSourceBulkSessionImport {
+		metadata["import_source"] = importSource
 	}
 
 	record := &coreauth.Auth{
