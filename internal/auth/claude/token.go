@@ -40,8 +40,20 @@ type ClaudeTokenStorage struct {
 	// OrganizationUUID is the Claude organization selected during OAuth.
 	OrganizationUUID string `json:"organization_uuid,omitempty"`
 
+	// OrganizationName is the selected Claude organization display name.
+	OrganizationName string `json:"organization_name,omitempty"`
+
 	// AccountUUID is the Claude account UUID returned during OAuth.
 	AccountUUID string `json:"account_uuid,omitempty"`
+
+	// PlanType records the selected Claude subscription plan, when known.
+	PlanType string `json:"plan_type,omitempty"`
+
+	// SubscriptionTier records the upstream subscription tier, when known.
+	SubscriptionTier string `json:"subscription_tier,omitempty"`
+
+	// SubscriptionStatus records active/canceled state from profile, when known.
+	SubscriptionStatus string `json:"subscription_status,omitempty"`
 
 	// Scope is the granted OAuth scope.
 	Scope string `json:"scope,omitempty"`

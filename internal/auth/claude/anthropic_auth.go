@@ -181,6 +181,66 @@ type claudeOrganization struct {
 	Capabilities     []string `json:"capabilities"`
 }
 
+func applyCookieOrganizationTokenMetadata(tokenData *ClaudeTokenData, org claudeOrganization) {
+	if tokenData == nil {
+		return
+	}
+	if value := strings.TrimSpace(org.UUID); value != "" && tokenData.OrganizationUUID == "" {
+		tokenData.OrganizationUUID = value
+	}
+	if value := strings.TrimSpace(org.Name); value != "" {
+		tokenData.OrganizationName = value
+	}
+	if value := cookieOrganizationPlanType(org); value != "" {
+		tokenData.PlanType = value
+	}
+	if value := cookieOrganizationString(org.SubscriptionTier); value != "" {
+		tokenData.SubscriptionTier = value
+	}
+}
+
+func cookieOrganizationPlanType(org claudeOrganization) string {
+	for _, raw := range []string{
+		cookieOrganizationString(org.RavenType),
+		cookieOrganizationString(org.PlanType),
+		cookieOrganizationString(org.Plan),
+		cookieOrganizationString(org.SubscriptionTier),
+	} {
+		if plan := normalizeCookieOrganizationPlanType(raw); plan != "" {
+			return plan
+		}
+	}
+	if hasNonFreeCookieSignal(cookieOrganizationString(org.RateLimitTier)) {
+		return "pro"
+	}
+	for _, capability := range org.Capabilities {
+		if plan := normalizeCookieOrganizationPlanType(capability); plan != "" {
+			return plan
+		}
+	}
+	return ""
+}
+
+func normalizeCookieOrganizationPlanType(raw string) string {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	if value == "" {
+		return ""
+	}
+	if strings.Contains(value, "max") {
+		return "max"
+	}
+	if strings.Contains(value, "team") || strings.Contains(value, "business") || strings.Contains(value, "raven") {
+		return "team"
+	}
+	if strings.Contains(value, "pro") || strings.Contains(value, "paid") || strings.Contains(value, "claude_code") {
+		return "pro"
+	}
+	if strings.Contains(value, "free") || strings.Contains(value, "personal") {
+		return "free"
+	}
+	return strings.TrimSpace(raw)
+}
+
 type cookieAuthorizeResponse struct {
 	RedirectURI string `json:"redirect_uri"`
 }
@@ -198,6 +258,7 @@ func tokenDataFromResponseForFlow(tokenResp tokenResponse, authSource, tokenEndp
 		ExpiresIn:        tokenResp.ExpiresIn,
 		Email:            tokenResp.Account.EmailAddress,
 		OrganizationUUID: tokenResp.Organization.UUID,
+		OrganizationName: tokenResp.Organization.Name,
 		AccountUUID:      tokenResp.Account.UUID,
 		Scope:            tokenResp.Scope,
 		Expire:           expiresAt.Format(time.RFC3339),
@@ -802,6 +863,7 @@ func (o *ClaudeAuth) CookieAuthWithOptions(ctx context.Context, sessionKey strin
 		if options.PreferSetupToken {
 			bundle, err := o.cookieSetupTokenAuthForOrganization(ctx, sessionKey, orgUUID)
 			if err == nil {
+				applyCookieOrganizationTokenMetadata(&bundle.TokenData, org)
 				return bundle, nil
 			}
 			log.WithError(err).WithField("organization_uuid", orgUUID).Warn("claude cookie auth: setup-token organization failed, falling back")
@@ -809,6 +871,7 @@ func (o *ClaudeAuth) CookieAuthWithOptions(ctx context.Context, sessionKey strin
 		}
 		bundle, err := o.cookieAuthForOrganization(ctx, sessionKey, orgUUID)
 		if err == nil {
+			applyCookieOrganizationTokenMetadata(&bundle.TokenData, org)
 			return bundle, nil
 		}
 		log.WithError(err).WithField("organization_uuid", orgUUID).Warn("claude cookie auth: organization failed")
@@ -1141,19 +1204,23 @@ func (o *ClaudeAuth) exchangePlatformCodeForTokens(ctx context.Context, code, st
 //   - *ClaudeTokenStorage: A new token storage instance
 func (o *ClaudeAuth) CreateTokenStorage(bundle *ClaudeAuthBundle) *ClaudeTokenStorage {
 	storage := &ClaudeTokenStorage{
-		AccessToken:      bundle.TokenData.AccessToken,
-		RefreshToken:     bundle.TokenData.RefreshToken,
-		TokenType:        bundle.TokenData.TokenType,
-		ExpiresIn:        bundle.TokenData.ExpiresIn,
-		LastRefresh:      bundle.LastRefresh,
-		Email:            bundle.TokenData.Email,
-		OrganizationUUID: bundle.TokenData.OrganizationUUID,
-		AccountUUID:      bundle.TokenData.AccountUUID,
-		Scope:            bundle.TokenData.Scope,
-		AuthSource:       bundle.TokenData.AuthSource,
-		TokenEndpoint:    bundle.TokenData.TokenEndpoint,
-		RedirectURI:      bundle.TokenData.RedirectURI,
-		Expire:           bundle.TokenData.Expire,
+		AccessToken:        bundle.TokenData.AccessToken,
+		RefreshToken:       bundle.TokenData.RefreshToken,
+		TokenType:          bundle.TokenData.TokenType,
+		ExpiresIn:          bundle.TokenData.ExpiresIn,
+		LastRefresh:        bundle.LastRefresh,
+		Email:              bundle.TokenData.Email,
+		OrganizationUUID:   bundle.TokenData.OrganizationUUID,
+		OrganizationName:   bundle.TokenData.OrganizationName,
+		AccountUUID:        bundle.TokenData.AccountUUID,
+		PlanType:           bundle.TokenData.PlanType,
+		SubscriptionTier:   bundle.TokenData.SubscriptionTier,
+		SubscriptionStatus: bundle.TokenData.SubscriptionStatus,
+		Scope:              bundle.TokenData.Scope,
+		AuthSource:         bundle.TokenData.AuthSource,
+		TokenEndpoint:      bundle.TokenData.TokenEndpoint,
+		RedirectURI:        bundle.TokenData.RedirectURI,
+		Expire:             bundle.TokenData.Expire,
 	}
 
 	return storage
@@ -1229,8 +1296,20 @@ func (o *ClaudeAuth) UpdateTokenStorage(storage *ClaudeTokenStorage, tokenData *
 	if tokenData.OrganizationUUID != "" {
 		storage.OrganizationUUID = tokenData.OrganizationUUID
 	}
+	if tokenData.OrganizationName != "" {
+		storage.OrganizationName = tokenData.OrganizationName
+	}
 	if tokenData.AccountUUID != "" {
 		storage.AccountUUID = tokenData.AccountUUID
+	}
+	if tokenData.PlanType != "" {
+		storage.PlanType = tokenData.PlanType
+	}
+	if tokenData.SubscriptionTier != "" {
+		storage.SubscriptionTier = tokenData.SubscriptionTier
+	}
+	if tokenData.SubscriptionStatus != "" {
+		storage.SubscriptionStatus = tokenData.SubscriptionStatus
 	}
 	if tokenData.Scope != "" {
 		storage.Scope = tokenData.Scope

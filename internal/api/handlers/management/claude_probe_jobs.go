@@ -305,6 +305,12 @@ func (h *Handler) runClaudeProbeForAuth(parent context.Context, auth *coreauth.A
 		h.recordClaudeOAuthProbeTokenError(context.Background(), auth, errToken)
 		return h.finalizeClaudeProbeResult(auth, result)
 	}
+	if isClaudeSetupTokenAuth(auth) {
+		if updated, ok := h.authManager.GetByID(auth.ID); ok && !isClaudeOAuthQuotaCooldown(updated) {
+			h.markClaudeProbeHealthy(context.Background(), updated)
+		}
+		return h.finalizeClaudeProbeResult(auth, result)
+	}
 
 	profileURL, errParseProfile := url.Parse(claudeOAuthProfileURL)
 	if errParseProfile != nil {
@@ -473,6 +479,9 @@ func (h *Handler) recordClaudeOAuthProbeHTTPFallback(ctx context.Context, auth *
 		return
 	}
 	code, message := claudeOAuthProbeError(statusCode, body)
+	if isClaudeSetupTokenScopeRequirementError(auth, statusCode, code, message, body) {
+		return
+	}
 	if isClaudePermanentAccountError(code, message) {
 		return
 	}

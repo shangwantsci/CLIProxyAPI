@@ -407,6 +407,154 @@ func TestAPICallRecordsClaudeOAuthUsageNotAllowedForOrganization(t *testing.T) {
 	}
 }
 
+func TestAPICallIgnoresSetupTokenScopeRequirementForUsageProbe(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"permission_error","message":"OAuth token does not meet scope requirement any_of(user:profile, user:office)"}}`))
+	}))
+	defer upstream.Close()
+
+	manager := coreauth.NewManager(&memoryAuthStore{}, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "claude-setup-token",
+		FileName: "claude-setup-token.json",
+		Provider: "claude",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{
+			"type":         "claude",
+			"access_token": "setup-access-token",
+			"auth_source":  "claude_setup_token",
+			"auth_kind":    "setup_token",
+			"scope":        "user:inference",
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	authIndex := auth.EnsureIndex()
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	body := fmt.Sprintf(`{"auth_index":%q,"method":"GET","url":%q,"header":{"Authorization":"Bearer $TOKEN$"}}`, authIndex, upstream.URL+"/api/oauth/usage")
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/api-call", strings.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	h.APICall(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	updated := h.authByIndex(authIndex)
+	if updated == nil {
+		t.Fatal("updated auth not found")
+	}
+	if updated.Disabled || updated.Status != coreauth.StatusActive || updated.Unavailable {
+		t.Fatalf("state = disabled=%v status=%s unavailable=%v, want active and available", updated.Disabled, updated.Status, updated.Unavailable)
+	}
+	if updated.LastError != nil {
+		t.Fatalf("LastError = %#v, want nil for setup-token scope mismatch", updated.LastError)
+	}
+}
+
+func TestBuildAuthFileEntryRepairsSetupTokenScopeRequirementState(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	manager := coreauth.NewManager(&memoryAuthStore{}, nil, nil)
+	auth := &coreauth.Auth{
+		ID:            "claude-setup-token-stale",
+		FileName:      "claude-setup-token-stale.json",
+		Provider:      "claude",
+		Status:        coreauth.StatusError,
+		StatusMessage: "OAuth token does not meet scope requirement any_of(user:profile, user:office)",
+		Unavailable:   true,
+		Attributes: map[string]string{
+			"path": "claude-setup-token-stale.json",
+		},
+		Metadata: map[string]any{
+			"type":         "claude",
+			"access_token": "setup-access-token",
+			"auth_source":  "claude_setup_token",
+			"scope":        "user:inference",
+		},
+		LastError: &coreauth.Error{
+			Code:       "forbidden",
+			Message:    "OAuth token does not meet scope requirement any_of(user:profile, user:office)",
+			HTTPStatus: http.StatusForbidden,
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	entry := h.buildAuthFileEntry(auth)
+	if entry == nil {
+		t.Fatal("entry is nil")
+	}
+	if got := entry["status"]; got != coreauth.StatusActive {
+		t.Fatalf("entry status = %v, want active", got)
+	}
+	if got := entry["unavailable"]; got != false {
+		t.Fatalf("entry unavailable = %v, want false", got)
+	}
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("updated auth not found")
+	}
+	if updated.Status != coreauth.StatusActive || updated.Unavailable || updated.LastError != nil {
+		t.Fatalf("updated state = status=%s unavailable=%v lastError=%#v, want repaired", updated.Status, updated.Unavailable, updated.LastError)
+	}
+}
+
+func TestBuildAuthFileEntryExposesClaudePassiveQuotaState(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	reset5h := time.Now().UTC().Truncate(time.Second).Add(4 * time.Hour)
+	reset7d := time.Now().UTC().Truncate(time.Second).Add(72 * time.Hour)
+	auth := &coreauth.Auth{
+		ID:       "claude-setup-token-passive-quota",
+		FileName: "claude-setup-token-passive-quota.json",
+		Provider: "claude",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"runtime_only": "true",
+		},
+		Metadata: map[string]any{
+			"type":                         "claude",
+			"auth_source":                  "claude_setup_token",
+			"scope":                        "user:inference",
+			"session_window_start":         reset5h.Add(-5 * time.Hour).Format(time.RFC3339),
+			"session_window_end":           reset5h.Format(time.RFC3339),
+			"session_window_status":        "allowed_warning",
+			"session_window_utilization":   0.82,
+			"passive_usage_7d_utilization": 0.44,
+			"passive_usage_7d_reset":       reset7d.Unix(),
+			"passive_usage_sampled_at":     time.Now().UTC().Format(time.RFC3339),
+		},
+	}
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, coreauth.NewManager(&memoryAuthStore{}, nil, nil))
+
+	entry := h.buildAuthFileEntry(auth)
+	if entry == nil {
+		t.Fatal("entry is nil")
+	}
+	if got := entry["session_window_status"]; got != "allowed_warning" {
+		t.Fatalf("session_window_status = %v, want allowed_warning", got)
+	}
+	if got := entry["session_window_utilization"]; got != 0.82 {
+		t.Fatalf("session_window_utilization = %v, want 0.82", got)
+	}
+	if got := entry["passive_usage_7d_utilization"]; got != 0.44 {
+		t.Fatalf("passive_usage_7d_utilization = %v, want 0.44", got)
+	}
+	if got := entry["passive_usage_7d_reset"]; got != reset7d.Unix() {
+		t.Fatalf("passive_usage_7d_reset = %v, want %v", got, reset7d.Unix())
+	}
+}
+
 func TestAPICallRecordsClaudeOAuthSubscriptionForbiddenAsRepairRequired(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

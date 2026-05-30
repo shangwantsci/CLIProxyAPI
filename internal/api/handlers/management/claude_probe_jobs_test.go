@@ -232,6 +232,93 @@ func TestClaudeProbeJobDetectsUsageOAuthNotAllowedForOrganization(t *testing.T) 
 	}
 }
 
+func TestClaudeProbeJobTreatsSetupTokenScopeRequirementAsHealthy(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"permission_error","message":"OAuth token does not meet scope requirement any_of(user:profile, user:office)"}}`))
+	}))
+	defer upstream.Close()
+
+	originalProfileURL := claudeOAuthProfileURL
+	originalUsageURL := claudeOAuthUsageURL
+	claudeOAuthProfileURL = upstream.URL + "/api/oauth/profile"
+	claudeOAuthUsageURL = upstream.URL + "/api/oauth/usage"
+	t.Cleanup(func() {
+		claudeOAuthProfileURL = originalProfileURL
+		claudeOAuthUsageURL = originalUsageURL
+	})
+
+	manager := coreauth.NewManager(&memoryAuthStore{}, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:            "claude-setup-token",
+		FileName:      "claude-setup-token.json",
+		Provider:      "claude",
+		Status:        coreauth.StatusError,
+		StatusMessage: "OAuth token does not meet scope requirement any_of(user:profile, user:office)",
+		Unavailable:   true,
+		Attributes: map[string]string{
+			"path": "claude-setup-token.json",
+		},
+		Metadata: map[string]any{
+			"type":         "claude",
+			"email":        "setup@example.test",
+			"access_token": "setup-token",
+			"auth_source":  "claude_setup_token",
+			"auth_kind":    "setup_token",
+			"scope":        "user:inference",
+		},
+		LastError: &coreauth.Error{
+			Code:       "forbidden",
+			Message:    "OAuth token does not meet scope requirement any_of(user:profile, user:office)",
+			HTTPStatus: http.StatusForbidden,
+		},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/auth-files/claude-probe-jobs", strings.NewReader(`{"names":["claude-setup-token.json"]}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	h.PostClaudeProbeJob(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("start status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var started struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &started); err != nil {
+		t.Fatalf("decode start response: %v", err)
+	}
+
+	job := waitForClaudeProbeJob(t, h, started.ID)
+	if job.Completed != 1 || job.OK != 1 || job.Failed != 0 || job.Disabled != 0 {
+		t.Fatalf("job summary = completed=%d ok=%d failed=%d disabled=%d", job.Completed, job.OK, job.Failed, job.Disabled)
+	}
+	result := job.Results[0]
+	if result.Status != "ok" || result.Reason != "healthy" {
+		t.Fatalf("result = %#v, want healthy setup-token probe", result)
+	}
+
+	updated, ok := manager.GetByID("claude-setup-token")
+	if !ok {
+		t.Fatal("updated auth not found")
+	}
+	if updated.Disabled || updated.Status != coreauth.StatusActive || updated.Unavailable {
+		t.Fatalf("state = disabled=%v status=%s unavailable=%v, want active and available", updated.Disabled, updated.Status, updated.Unavailable)
+	}
+	if updated.LastError != nil {
+		t.Fatalf("LastError = %#v, want nil", updated.LastError)
+	}
+}
+
 func TestClaudeProbeTargetsSkipHiddenRemovedAuths(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)

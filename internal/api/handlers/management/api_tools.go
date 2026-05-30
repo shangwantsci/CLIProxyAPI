@@ -239,6 +239,9 @@ func (h *Handler) recordClaudeOAuthProbeResult(ctx context.Context, auth *coreau
 
 	code, message := claudeOAuthProbeError(statusCode, body)
 	permanentAccountError := isClaudePermanentAccountError(code, message)
+	if isClaudeSetupTokenScopeRequirementError(auth, statusCode, code, message, body) {
+		return
+	}
 	if statusCode == http.StatusBadRequest && !permanentAccountError {
 		return
 	}
@@ -308,6 +311,82 @@ func isClaudeOAuthUsageURL(parsedURL *url.URL) bool {
 	}
 	path := strings.TrimRight(strings.ToLower(strings.TrimSpace(parsedURL.Path)), "/")
 	return path == "/api/oauth/usage"
+}
+
+func isClaudeSetupTokenScopeRequirementError(auth *coreauth.Auth, statusCode int, code, message string, body []byte) bool {
+	if statusCode != http.StatusForbidden || !isClaudeSetupTokenAuth(auth) {
+		return false
+	}
+	raw := strings.ToLower(strings.TrimSpace(strings.Join([]string{
+		code,
+		message,
+		string(body),
+	}, " ")))
+	return strings.Contains(raw, "scope requirement") ||
+		strings.Contains(raw, "does not meet scope") ||
+		strings.Contains(raw, "any_of(user:profile") ||
+		strings.Contains(raw, "user:office")
+}
+
+func isClaudeSetupTokenScopeRequirementState(auth *coreauth.Auth) bool {
+	if auth == nil || !isClaudeSetupTokenAuth(auth) {
+		return false
+	}
+	if auth.LastError != nil {
+		statusCode := auth.LastError.HTTPStatus
+		if statusCode == 0 {
+			statusCode = http.StatusForbidden
+		}
+		if isClaudeSetupTokenScopeRequirementError(auth, statusCode, auth.LastError.Code, auth.LastError.Message, nil) {
+			return true
+		}
+	}
+	return isClaudeSetupTokenScopeRequirementError(auth, http.StatusForbidden, "", auth.StatusMessage, nil)
+}
+
+func (h *Handler) repairClaudeSetupTokenScopeRequirementState(ctx context.Context, auth *coreauth.Auth) *coreauth.Auth {
+	if h == nil || h.authManager == nil || auth == nil || auth.Disabled || auth.Status == coreauth.StatusDisabled {
+		return auth
+	}
+	if !isClaudeSetupTokenScopeRequirementState(auth) {
+		return auth
+	}
+
+	updated := auth.Clone()
+	updated.Status = coreauth.StatusActive
+	updated.StatusMessage = ""
+	updated.Unavailable = false
+	updated.NextRetryAfter = time.Time{}
+	updated.LastError = nil
+	updated.UpdatedAt = time.Now()
+	if _, err := h.authManager.Update(ctx, updated); err == nil {
+		return updated
+	}
+	return auth
+}
+
+func isClaudeSetupTokenAuth(auth *coreauth.Auth) bool {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "claude") {
+		return false
+	}
+	source := strings.ToLower(stringValue(auth.Metadata, "auth_source"))
+	kind := strings.ToLower(stringValue(auth.Metadata, "auth_kind"))
+	if source == "claude_setup_token" || kind == "setup_token" {
+		return true
+	}
+	scope := strings.ToLower(stringValue(auth.Metadata, "scope"))
+	return claudeScopeContains(scope, "user:inference") &&
+		!claudeScopeContains(scope, "user:profile") &&
+		!claudeScopeContains(scope, "user:office")
+}
+
+func claudeScopeContains(scope, want string) bool {
+	for _, part := range strings.Fields(strings.ToLower(strings.TrimSpace(scope))) {
+		if part == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Handler) recordClaudeOAuthUsageSuccess(ctx context.Context, auth *coreauth.Auth, body []byte, now time.Time) {

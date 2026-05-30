@@ -510,6 +510,12 @@ func TestCookieAuthTriesNextPaidOrganizationWhenFirstIsCanceled(t *testing.T) {
 	if tokenRedirectURI != RedirectURI {
 		t.Fatalf("token redirect_uri = %q, want %q", tokenRedirectURI, RedirectURI)
 	}
+	if got := bundle.TokenData.PlanType; got != "pro" {
+		t.Fatalf("plan type = %q, want pro", got)
+	}
+	if got := bundle.TokenData.OrganizationName; got != "Active Pro" {
+		t.Fatalf("organization name = %q, want Active Pro", got)
+	}
 }
 
 func TestSelectCookieOrganizationUUIDPrefersNonFreePlan(t *testing.T) {

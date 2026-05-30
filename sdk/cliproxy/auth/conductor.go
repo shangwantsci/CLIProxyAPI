@@ -2284,7 +2284,17 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
 		now := time.Now()
-		if !result.Success && isClientRequestResultError(result.Error) {
+		clientRequestError := !result.Success && isClientRequestResultError(result.Error)
+		responseHeaders := logging.GetResponseHeaders(ctx)
+		claudeAuthResult := isClaudeAuthResult(auth, result.Provider)
+		passiveClaudeQuotaHeaders := claudeAuthResult && claudePassiveQuotaHeadersPresent(responseHeaders)
+		if !clientRequestError && claudeAuthResult {
+			updateClaudePassiveQuotaFromHeaders(auth, responseHeaders, now)
+			if result.RetryAfter == nil && statusCodeFromResult(result.Error) == http.StatusTooManyRequests {
+				result.RetryAfter = claudeRetryAfterFromRateLimitHeaders(responseHeaders, now)
+			}
+		}
+		if clientRequestError {
 			if ClearClientRequestErrorState(auth, now) {
 				_ = m.persist(ctx, auth)
 				authSnapshot = auth.Clone()
@@ -2419,6 +2429,18 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				}
 			} else {
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
+			}
+		}
+		if result.Success && passiveClaudeQuotaHeaders {
+			if quotaState, ok := m.claudePassiveQuotaState(auth, now); ok && quotaState.exceeded {
+				applyClaudePassiveQuotaCooldown(auth, result.Model, quotaState, now)
+				if result.Model != "" {
+					shouldResumeModel = false
+					clearModelQuota = false
+					shouldSuspendModel = true
+					setModelQuota = true
+					suspendReason = "quota"
+				}
 			}
 		}
 
@@ -3139,6 +3161,441 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.StatusMessage = "request failed"
 		}
 	}
+}
+
+const (
+	claudeWindow5hPrefix = "anthropic-ratelimit-unified-5h-"
+	claudeWindow7dPrefix = "anthropic-ratelimit-unified-7d-"
+)
+
+func isClaudeAuthResult(auth *Auth, provider string) bool {
+	if strings.EqualFold(strings.TrimSpace(provider), "claude") {
+		return true
+	}
+	return auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "claude")
+}
+
+func updateClaudePassiveQuotaFromHeaders(auth *Auth, headers http.Header, now time.Time) bool {
+	if auth == nil || len(headers) == 0 || !isClaudeAuthResult(auth, "") {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	status := strings.TrimSpace(headers.Get(claudeWindow5hPrefix + "status"))
+	reset5h, hasReset5h := parseClaudeRateLimitResetTime(headers.Get(claudeWindow5hPrefix+"reset"), now)
+	util5h, hasUtil5h := parseClaudeRateLimitFloat(headers.Get(claudeWindow5hPrefix + "utilization"))
+	reset7d, hasReset7d := parseClaudeRateLimitResetTime(headers.Get(claudeWindow7dPrefix+"reset"), now)
+	util7d, hasUtil7d := parseClaudeRateLimitFloat(headers.Get(claudeWindow7dPrefix + "utilization"))
+	if status == "" && !hasReset5h && !hasUtil5h && !hasReset7d && !hasUtil7d {
+		return false
+	}
+
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	changed := false
+	existingEnd, hasExistingEnd := metadataTime(auth.Metadata["session_window_end"])
+	needInitWindow := !hasExistingEnd || !now.Before(existingEnd)
+	windowChanged := false
+
+	if status != "" {
+		changed = setAuthMetadata(auth.Metadata, "session_window_status", status) || changed
+	}
+	if hasReset5h && claudeRateLimitResetInRange(reset5h, now) {
+		start := reset5h.Add(-5 * time.Hour)
+		windowChanged = !hasExistingEnd || !reset5h.Equal(existingEnd)
+		changed = setAuthMetadata(auth.Metadata, "session_window_start", start.Format(time.RFC3339)) || changed
+		changed = setAuthMetadata(auth.Metadata, "session_window_end", reset5h.Format(time.RFC3339)) || changed
+	} else if needInitWindow && (status == "allowed" || status == "allowed_warning") {
+		start := time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, now.Location())
+		end := start.Add(5 * time.Hour)
+		windowChanged = true
+		changed = setAuthMetadata(auth.Metadata, "session_window_start", start.UTC().Format(time.RFC3339)) || changed
+		changed = setAuthMetadata(auth.Metadata, "session_window_end", end.UTC().Format(time.RFC3339)) || changed
+	}
+	if windowChanged {
+		if !hasUtil5h {
+			changed = deleteAuthMetadata(auth.Metadata, "session_window_utilization") || changed
+		}
+		if !hasUtil7d {
+			changed = deleteAuthMetadata(auth.Metadata, "passive_usage_7d_utilization") || changed
+		}
+		if !hasReset7d {
+			changed = deleteAuthMetadata(auth.Metadata, "passive_usage_7d_reset") || changed
+		}
+	}
+	if hasUtil5h {
+		changed = setAuthMetadata(auth.Metadata, "session_window_utilization", util5h) || changed
+	}
+	if hasUtil7d {
+		changed = setAuthMetadata(auth.Metadata, "passive_usage_7d_utilization", util7d) || changed
+	}
+	if hasReset7d {
+		changed = setAuthMetadata(auth.Metadata, "passive_usage_7d_reset", reset7d.Unix()) || changed
+	}
+	changed = setAuthMetadata(auth.Metadata, "passive_usage_sampled_at", now.UTC().Format(time.RFC3339)) || changed
+	return changed
+}
+
+func claudePassiveQuotaHeadersPresent(headers http.Header) bool {
+	if len(headers) == 0 {
+		return false
+	}
+	for _, name := range []string{
+		claudeWindow5hPrefix + "status",
+		claudeWindow5hPrefix + "reset",
+		claudeWindow5hPrefix + "utilization",
+		claudeWindow7dPrefix + "reset",
+		claudeWindow7dPrefix + "utilization",
+	} {
+		if strings.TrimSpace(headers.Get(name)) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+type claudePassiveQuotaProbeState struct {
+	exceeded  bool
+	reason    string
+	recoverAt time.Time
+}
+
+type claudePassiveQuotaThresholds struct {
+	fiveHourRemaining float64
+	weeklyRemaining   float64
+}
+
+func (m *Manager) claudePassiveQuotaThresholds() claudePassiveQuotaThresholds {
+	if m == nil {
+		return claudePassiveQuotaThresholds{}
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		return claudePassiveQuotaThresholds{}
+	}
+	return claudePassiveQuotaThresholds{
+		fiveHourRemaining: float64(clampClaudeQuotaPercent(cfg.ClaudeQuotaCoolingThresholds.FiveHourRemainingPercent)),
+		weeklyRemaining:   float64(clampClaudeQuotaPercent(cfg.ClaudeQuotaCoolingThresholds.WeeklyRemainingPercent)),
+	}
+}
+
+func clampClaudeQuotaPercent(value int) int {
+	if value < 0 {
+		return 0
+	}
+	if value > 100 {
+		return 100
+	}
+	return value
+}
+
+func (m *Manager) claudePassiveQuotaState(auth *Auth, now time.Time) (claudePassiveQuotaProbeState, bool) {
+	if auth == nil || len(auth.Metadata) == 0 {
+		return claudePassiveQuotaProbeState{}, false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	thresholds := m.claudePassiveQuotaThresholds()
+	limited := make([]string, 0, 2)
+	recoverAt := time.Time{}
+	seenWindow := false
+
+	if util, ok := metadataQuotaFloat(auth.Metadata["session_window_utilization"]); ok {
+		seenWindow = true
+		remaining := claudePassiveQuotaRemainingPercent(util)
+		threshold := thresholds.fiveHourRemaining
+		if claudePassiveQuotaWindowShouldCool(remaining, threshold) {
+			resetAt, _ := metadataTime(auth.Metadata["session_window_end"])
+			if resetAt.IsZero() {
+				resetAt = now.Add(30 * time.Minute)
+			}
+			if resetAt.Before(now) {
+				resetAt = now
+			}
+			limited = append(limited, claudePassiveQuotaWindowReason("five_hour", remaining, threshold))
+			if recoverAt.IsZero() || resetAt.Before(recoverAt) {
+				recoverAt = resetAt
+			}
+		}
+	}
+	if util, ok := metadataQuotaFloat(auth.Metadata["passive_usage_7d_utilization"]); ok {
+		seenWindow = true
+		remaining := claudePassiveQuotaRemainingPercent(util)
+		threshold := thresholds.weeklyRemaining
+		if claudePassiveQuotaWindowShouldCool(remaining, threshold) {
+			resetAt, _ := metadataTime(auth.Metadata["passive_usage_7d_reset"])
+			if resetAt.IsZero() {
+				resetAt = now.Add(30 * time.Minute)
+			}
+			if resetAt.Before(now) {
+				resetAt = now
+			}
+			limited = append(limited, claudePassiveQuotaWindowReason("seven_day", remaining, threshold))
+			if recoverAt.IsZero() || resetAt.Before(recoverAt) {
+				recoverAt = resetAt
+			}
+		}
+	}
+	if !seenWindow {
+		return claudePassiveQuotaProbeState{}, false
+	}
+	if len(limited) == 0 {
+		return claudePassiveQuotaProbeState{}, true
+	}
+	return claudePassiveQuotaProbeState{
+		exceeded:  true,
+		reason:    "Claude quota cooldown: " + strings.Join(limited, ", "),
+		recoverAt: recoverAt,
+	}, true
+}
+
+func metadataQuotaFloat(value any) (float64, bool) {
+	switch v := value.(type) {
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case string:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		return parsed, err == nil
+	}
+	return 0, false
+}
+
+func claudePassiveQuotaRemainingPercent(utilization float64) float64 {
+	used := utilization
+	if used <= 1 {
+		used *= 100
+	}
+	if used < 0 {
+		used = 0
+	} else if used > 100 {
+		used = 100
+	}
+	return 100 - used
+}
+
+func claudePassiveQuotaWindowShouldCool(remaining, threshold float64) bool {
+	if threshold <= 0 {
+		return remaining <= 0.001
+	}
+	return remaining <= threshold
+}
+
+func claudePassiveQuotaWindowReason(key string, remaining, threshold float64) string {
+	if threshold <= 0 {
+		return key
+	}
+	return fmt.Sprintf("%s remaining %.0f%% <= %.0f%%", key, remaining, threshold)
+}
+
+func applyClaudePassiveQuotaCooldown(auth *Auth, model string, quotaState claudePassiveQuotaProbeState, now time.Time) {
+	if auth == nil || !quotaState.exceeded {
+		return
+	}
+	if quotaState.recoverAt.IsZero() {
+		quotaState.recoverAt = now.Add(30 * time.Minute)
+	}
+	if quotaState.recoverAt.Before(now) {
+		quotaState.recoverAt = now
+	}
+	lastError := &Error{
+		Code:       "quota_exhausted",
+		Message:    quotaState.reason,
+		Retryable:  true,
+		HTTPStatus: http.StatusOK,
+	}
+	if model != "" {
+		state := ensureModelState(auth, model)
+		state.Unavailable = true
+		state.Status = StatusError
+		state.StatusMessage = quotaState.reason
+		state.NextRetryAfter = quotaState.recoverAt
+		state.LastError = cloneError(lastError)
+		state.Quota = QuotaState{
+			Exceeded:      true,
+			Reason:        quotaState.reason,
+			NextRecoverAt: quotaState.recoverAt,
+		}
+		state.UpdatedAt = now
+		auth.LastError = cloneError(lastError)
+		auth.Status = StatusError
+		auth.StatusMessage = quotaState.reason
+		auth.UpdatedAt = now
+		updateAggregatedAvailability(auth, now)
+		return
+	}
+	auth.Unavailable = true
+	auth.Status = StatusError
+	auth.StatusMessage = quotaState.reason
+	auth.NextRetryAfter = quotaState.recoverAt
+	auth.Quota = QuotaState{
+		Exceeded:      true,
+		Reason:        quotaState.reason,
+		NextRecoverAt: quotaState.recoverAt,
+	}
+	auth.LastError = lastError
+	auth.UpdatedAt = now
+}
+
+func claudeRetryAfterFromRateLimitHeaders(headers http.Header, now time.Time) *time.Duration {
+	if len(headers) == 0 {
+		return nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	reset5h, hasReset5h := parseClaudeRateLimitResetTime(headers.Get(claudeWindow5hPrefix+"reset"), now)
+	reset7d, hasReset7d := parseClaudeRateLimitResetTime(headers.Get(claudeWindow7dPrefix+"reset"), now)
+	exceeded5h := claudeRateLimitWindowExceeded(headers, "5h")
+	exceeded7d := claudeRateLimitWindowExceeded(headers, "7d")
+
+	var chosen time.Time
+	switch {
+	case exceeded5h && exceeded7d && hasReset7d:
+		chosen = reset7d
+	case exceeded5h && hasReset5h:
+		chosen = reset5h
+	case exceeded7d && hasReset7d:
+		chosen = reset7d
+	case hasReset5h && hasReset7d:
+		if reset5h.Before(reset7d) {
+			chosen = reset5h
+		} else {
+			chosen = reset7d
+		}
+	case hasReset5h:
+		chosen = reset5h
+	case hasReset7d:
+		chosen = reset7d
+	}
+	if chosen.IsZero() {
+		for _, name := range []string{
+			"anthropic-ratelimit-unified-reset",
+			"anthropic-ratelimit-requests-reset",
+			"anthropic-ratelimit-tokens-reset",
+			"anthropic-ratelimit-input-tokens-reset",
+			"anthropic-ratelimit-output-tokens-reset",
+		} {
+			if reset, ok := parseClaudeRateLimitResetTime(headers.Get(name), now); ok && reset.After(now) {
+				if chosen.IsZero() || reset.Before(chosen) {
+					chosen = reset
+				}
+			}
+		}
+	}
+	if chosen.IsZero() || !chosen.After(now) {
+		return nil
+	}
+	d := chosen.Sub(now)
+	return &d
+}
+
+func claudeRateLimitWindowExceeded(headers http.Header, window string) bool {
+	prefix := "anthropic-ratelimit-unified-" + strings.TrimSpace(window) + "-"
+	if strings.EqualFold(strings.TrimSpace(headers.Get(prefix+"surpassed-threshold")), "true") {
+		return true
+	}
+	if util, ok := parseClaudeRateLimitFloat(headers.Get(prefix + "utilization")); ok && util >= 1.0-1e-9 {
+		return true
+	}
+	return false
+}
+
+func parseClaudeRateLimitResetTime(raw string, now time.Time) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	if unixSeconds, err := strconv.ParseInt(raw, 10, 64); err == nil && unixSeconds > 0 {
+		if unixSeconds > 1e11 {
+			unixSeconds = unixSeconds / 1000
+		}
+		return time.Unix(unixSeconds, 0).UTC(), true
+	}
+	if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+		return parsed.UTC(), true
+	}
+	if parsed, err := http.ParseTime(raw); err == nil {
+		return parsed.UTC(), true
+	}
+	return time.Time{}, false
+}
+
+func claudeRateLimitResetInRange(reset, now time.Time) bool {
+	if reset.IsZero() {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	return !reset.Before(now.Add(-5*time.Hour)) && !reset.After(now.Add(7*24*time.Hour))
+}
+
+func parseClaudeRateLimitFloat(raw string) (float64, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, false
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil || value < 0 {
+		return 0, false
+	}
+	return value, true
+}
+
+func metadataTime(value any) (time.Time, bool) {
+	switch v := value.(type) {
+	case time.Time:
+		return v.UTC(), !v.IsZero()
+	case string:
+		t, err := time.Parse(time.RFC3339, strings.TrimSpace(v))
+		if err == nil {
+			return t.UTC(), true
+		}
+	case int64:
+		if v > 0 {
+			return time.Unix(v, 0).UTC(), true
+		}
+	case int:
+		if v > 0 {
+			return time.Unix(int64(v), 0).UTC(), true
+		}
+	case float64:
+		if v > 0 {
+			return time.Unix(int64(v), 0).UTC(), true
+		}
+	}
+	return time.Time{}, false
+}
+
+func setAuthMetadata(meta map[string]any, key string, value any) bool {
+	if meta == nil {
+		return false
+	}
+	if reflect.DeepEqual(meta[key], value) {
+		return false
+	}
+	meta[key] = value
+	return true
+}
+
+func deleteAuthMetadata(meta map[string]any, key string) bool {
+	if meta == nil {
+		return false
+	}
+	if _, ok := meta[key]; !ok {
+		return false
+	}
+	delete(meta, key)
+	return true
 }
 
 // nextQuotaCooldown returns the next cooldown duration and updated backoff level for repeated quota errors.

@@ -219,8 +219,20 @@ waitForCallback:
 	if tokenStorage.OrganizationUUID != "" {
 		metadata["organization_uuid"] = tokenStorage.OrganizationUUID
 	}
+	if tokenStorage.OrganizationName != "" {
+		metadata["organization_name"] = tokenStorage.OrganizationName
+	}
 	if tokenStorage.AccountUUID != "" {
 		metadata["account_uuid"] = tokenStorage.AccountUUID
+	}
+	if tokenStorage.PlanType != "" {
+		metadata["plan_type"] = tokenStorage.PlanType
+	}
+	if tokenStorage.SubscriptionTier != "" {
+		metadata["subscription_tier"] = tokenStorage.SubscriptionTier
+	}
+	if tokenStorage.SubscriptionStatus != "" {
+		metadata["subscription_status"] = tokenStorage.SubscriptionStatus
 	}
 	if tokenStorage.Scope != "" {
 		metadata["scope"] = tokenStorage.Scope

@@ -379,6 +379,11 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 				if projectID := strings.TrimSpace(gjson.GetBytes(data, "project_id").String()); projectID != "" {
 					fileData["project_id"] = projectID
 				}
+				for _, key := range []string{"plan_type", "subscription_tier", "subscription_status", "organization_name"} {
+					if value := strings.TrimSpace(gjson.GetBytes(data, key).String()); value != "" {
+						fileData[key] = value
+					}
+				}
 				if pv := gjson.GetBytes(data, "priority"); pv.Exists() {
 					switch pv.Type {
 					case gjson.Number:
@@ -406,6 +411,7 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if auth == nil {
 		return nil
 	}
+	auth = h.repairClaudeSetupTokenScopeRequirementState(context.Background(), auth)
 	auth.EnsureIndex()
 	runtimeOnly := isRuntimeOnlyAuth(auth)
 	if runtimeOnly && (auth.Disabled || auth.Status == coreauth.StatusDisabled) {
@@ -544,6 +550,7 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		entry["cloak_cache_user_id"] = authBoolSetting(auth, "cloak_cache_user_id", true)
 		entry["cloak_sensitive_words"] = authStringListSetting(auth, "cloak_sensitive_words")
 		addClaudeAuthMethodFields(entry, auth)
+		addClaudeSubscriptionFields(entry, auth)
 		addClaudeAuthHealthFields(entry, auth, time.Now())
 	}
 	return entry
@@ -565,6 +572,17 @@ func addClaudeAuthMethodFields(entry gin.H, auth *coreauth.Auth) {
 	}
 	if redirectURI != "" {
 		entry["redirect_uri"] = redirectURI
+	}
+}
+
+func addClaudeSubscriptionFields(entry gin.H, auth *coreauth.Auth) {
+	if entry == nil || auth == nil {
+		return
+	}
+	for _, key := range []string{"plan_type", "subscription_tier", "subscription_status", "organization_name"} {
+		if value := strings.TrimSpace(authStringSetting(auth, key)); value != "" {
+			entry[key] = value
+		}
 	}
 }
 
@@ -657,6 +675,7 @@ func addClaudeAuthHealthFields(entry gin.H, auth *coreauth.Auth, now time.Time) 
 		entry["last_error"] = lastError
 	}
 	if auth.Metadata != nil {
+		addClaudePassiveQuotaFields(entry, auth)
 		if profile, ok := auth.Metadata["claude_device_profile"]; ok && profile != nil {
 			entry["claude_device_profile"] = profile
 			entry["has_device_profile"] = true
@@ -691,6 +710,25 @@ func addClaudeAuthHealthFields(entry gin.H, auth *coreauth.Auth, now time.Time) 
 			models[model] = item
 		}
 		entry["model_states"] = models
+	}
+}
+
+func addClaudePassiveQuotaFields(entry gin.H, auth *coreauth.Auth) {
+	if entry == nil || auth == nil || auth.Metadata == nil {
+		return
+	}
+	for _, key := range []string{
+		"session_window_start",
+		"session_window_end",
+		"session_window_status",
+		"session_window_utilization",
+		"passive_usage_7d_utilization",
+		"passive_usage_7d_reset",
+		"passive_usage_sampled_at",
+	} {
+		if value, ok := auth.Metadata[key]; ok && value != nil {
+			entry[key] = value
+		}
 	}
 }
 
@@ -2110,8 +2148,20 @@ func applyClaudeTokenStorageMetadata(metadata map[string]any, tokenStorage *clau
 	if tokenStorage.OrganizationUUID != "" {
 		metadata["organization_uuid"] = tokenStorage.OrganizationUUID
 	}
+	if tokenStorage.OrganizationName != "" {
+		metadata["organization_name"] = tokenStorage.OrganizationName
+	}
 	if tokenStorage.AccountUUID != "" {
 		metadata["account_uuid"] = tokenStorage.AccountUUID
+	}
+	if tokenStorage.PlanType != "" {
+		metadata["plan_type"] = tokenStorage.PlanType
+	}
+	if tokenStorage.SubscriptionTier != "" {
+		metadata["subscription_tier"] = tokenStorage.SubscriptionTier
+	}
+	if tokenStorage.SubscriptionStatus != "" {
+		metadata["subscription_status"] = tokenStorage.SubscriptionStatus
 	}
 	if tokenStorage.Scope != "" {
 		metadata["scope"] = tokenStorage.Scope
@@ -2158,8 +2208,20 @@ func applyClaudeTokenDataMetadata(metadata map[string]any, tokenData *claude.Cla
 	if tokenData.OrganizationUUID != "" {
 		metadata["organization_uuid"] = tokenData.OrganizationUUID
 	}
+	if tokenData.OrganizationName != "" {
+		metadata["organization_name"] = tokenData.OrganizationName
+	}
 	if tokenData.AccountUUID != "" {
 		metadata["account_uuid"] = tokenData.AccountUUID
+	}
+	if tokenData.PlanType != "" {
+		metadata["plan_type"] = tokenData.PlanType
+	}
+	if tokenData.SubscriptionTier != "" {
+		metadata["subscription_tier"] = tokenData.SubscriptionTier
+	}
+	if tokenData.SubscriptionStatus != "" {
+		metadata["subscription_status"] = tokenData.SubscriptionStatus
 	}
 	if tokenData.Scope != "" {
 		metadata["scope"] = tokenData.Scope
@@ -2180,6 +2242,102 @@ func applyClaudeTokenDataMetadata(metadata map[string]any, tokenData *claude.Cla
 		metadata["expired"] = tokenData.Expire
 	}
 	metadata["last_refresh"] = time.Now().UTC().Format(time.RFC3339)
+}
+
+func (h *Handler) applyClaudeOAuthProfileSubscriptionMetadata(ctx context.Context, metadata map[string]any, tokenStorage *claude.ClaudeTokenStorage, proxyURL string) {
+	if h == nil || metadata == nil || tokenStorage == nil {
+		return
+	}
+	if strings.TrimSpace(tokenStorage.AccessToken) == "" {
+		return
+	}
+	scope := strings.TrimSpace(tokenStorage.Scope)
+	if scope != "" && !claudeScopeContains(scope, "user:profile") && !claudeScopeContains(scope, "user:office") {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, claudeProbeAccountTimeout)
+	defer cancel()
+	auth := &coreauth.Auth{
+		ID:       "claude-oauth-profile-import",
+		Provider: "claude",
+		ProxyURL: strings.TrimSpace(proxyURL),
+	}
+	status, _, body, err := h.claudeOAuthProbeGET(probeCtx, auth, claudeOAuthProfileURL, tokenStorage.AccessToken)
+	if err != nil {
+		log.WithError(err).Debug("claude import profile probe failed")
+		return
+	}
+	if status < http.StatusOK || status >= http.StatusMultipleChoices || !gjson.ValidBytes(body) {
+		log.WithField("status", status).Debug("claude import profile probe did not return usable profile")
+		return
+	}
+	applyClaudeProfileSubscriptionMetadata(metadata, body)
+}
+
+func applyClaudeProfileSubscriptionMetadata(metadata map[string]any, body []byte) {
+	if metadata == nil || !gjson.ValidBytes(body) {
+		return
+	}
+	root := gjson.ParseBytes(body)
+	if email := strings.TrimSpace(root.Get("account.email").String()); email != "" {
+		metadata["email"] = email
+	}
+	if orgName := strings.TrimSpace(root.Get("organization.name").String()); orgName != "" {
+		metadata["organization_name"] = orgName
+	}
+	if status := strings.TrimSpace(root.Get("organization.subscription_status").String()); status != "" {
+		metadata["subscription_status"] = status
+	}
+	if plan := claudeProfilePlanType(root); plan != "" {
+		metadata["plan_type"] = plan
+	}
+}
+
+func claudeProfilePlanType(root gjson.Result) string {
+	if root.Get("account.has_claude_max").Bool() {
+		return "max"
+	}
+	if root.Get("account.has_claude_pro").Bool() {
+		return "pro"
+	}
+	if plan := normalizeClaudePlanType(root.Get("organization.plan_type").String()); plan != "" {
+		return plan
+	}
+	if plan := normalizeClaudePlanType(root.Get("organization.subscription_tier").String()); plan != "" {
+		return plan
+	}
+	organizationType := strings.ToLower(strings.TrimSpace(root.Get("organization.organization_type").String()))
+	subscriptionStatus := strings.ToLower(strings.TrimSpace(root.Get("organization.subscription_status").String()))
+	if organizationType == "claude_team" && subscriptionStatus == "active" {
+		return "team"
+	}
+	if root.Get("account.has_claude_max").Exists() || root.Get("account.has_claude_pro").Exists() {
+		return "free"
+	}
+	return ""
+}
+
+func normalizeClaudePlanType(raw string) string {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	if value == "" {
+		return ""
+	}
+	if strings.Contains(value, "max") {
+		return "max"
+	}
+	if strings.Contains(value, "team") || strings.Contains(value, "business") || strings.Contains(value, "raven") {
+		return "team"
+	}
+	if strings.Contains(value, "pro") {
+		return "pro"
+	}
+	if strings.Contains(value, "free") || strings.Contains(value, "personal") {
+		return "free"
+	}
+	return value
 }
 
 func clearClaudeAuthFailureMetadata(metadata map[string]any) {
@@ -2429,6 +2587,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		fileName := fmt.Sprintf("claude-%s.json", accountID)
 		metadata := defaultClaudeAuthMetadata(tokenStorage.Email)
 		applyClaudeTokenStorageMetadata(metadata, tokenStorage)
+		h.applyClaudeOAuthProfileSubscriptionMetadata(ctx, metadata, tokenStorage, proxyURL)
 		if proxyURL != "" {
 			metadata["proxy_url"] = proxyURL
 		}
