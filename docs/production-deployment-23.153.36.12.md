@@ -46,6 +46,7 @@ Docker 固定信息：
 - 容器环境：
   - `MANAGEMENT_STATIC_PATH=/CLIProxyAPI/static`
   - `SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt`
+- 配置挂载必须是读写：`./config.yaml:/CLIProxyAPI/config.yaml`，不能带 `:ro`，否则管理面板保存 YAML 会返回 `write_failed`。
 
 Traefik 动态路由：
 
@@ -345,6 +346,7 @@ docker compose up -d
 - 常规代码更新时只操作 `/opt/cpa-claude-proxy` 和 `/opt/cpa-claude-proxy-backups`。
 - 不要把 CPA 重新改回公网 `0.0.0.0:8318`。
 - 不要把 NewAPI 的 CPA 号池渠道改回公网 IP `:8318`；应保持 `http://cpa-claude-proxy:8318`。
+- 不要把 `/CLIProxyAPI/config.yaml` 改成只读挂载；管理 API 需要写回配置文件并热更新运行时配置。
 - 不要改 `/opt/new-api-production`、`/opt/sub2api-production`、Coolify 目录或相关容器，除非任务明确涉及域名反代、端口收口或对应服务本身。
 - 账号、代理、管理密钥和客户端 API Key 由旧服务器配置/数据迁移而来，后续应通过管理面板维护。
 - 前端源码仓库是 `F:\claude反代\Cli-Proxy-API-Management-Center`，不是后端仓库内的 `static` 目录。

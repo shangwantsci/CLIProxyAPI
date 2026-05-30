@@ -160,12 +160,14 @@ type tokenResponse struct {
 }
 
 type claudeOrganization struct {
-	UUID             string  `json:"uuid"`
-	Name             string  `json:"name"`
-	RavenType        *string `json:"raven_type"`
-	Plan             *string `json:"plan"`
-	PlanType         *string `json:"plan_type"`
-	SubscriptionTier *string `json:"subscription_tier"`
+	UUID             string   `json:"uuid"`
+	Name             string   `json:"name"`
+	RavenType        *string  `json:"raven_type"`
+	Plan             *string  `json:"plan"`
+	PlanType         *string  `json:"plan_type"`
+	SubscriptionTier *string  `json:"subscription_tier"`
+	RateLimitTier    *string  `json:"rate_limit_tier"`
+	Capabilities     []string `json:"capabilities"`
 }
 
 type cookieAuthorizeResponse struct {
@@ -656,18 +658,36 @@ func (o *ClaudeAuth) newCookieOAuthClient() (*req.Client, error) {
 }
 
 func selectCookieOrganizationUUID(orgs []claudeOrganization) (string, error) {
-	if len(orgs) == 0 {
-		return "", fmt.Errorf("no organizations found")
+	candidates, err := selectCookieOrganizations(orgs)
+	if err != nil {
+		return "", err
 	}
+	return candidates[0].UUID, nil
+}
+
+func selectCookieOrganizations(orgs []claudeOrganization) ([]claudeOrganization, error) {
+	if len(orgs) == 0 {
+		return nil, fmt.Errorf("no organizations found")
+	}
+	paid := make([]claudeOrganization, 0, len(orgs))
+	fallback := make([]claudeOrganization, 0, len(orgs))
 	for _, org := range orgs {
-		if isNonFreeCookieOrganization(org) && strings.TrimSpace(org.UUID) != "" {
-			return org.UUID, nil
+		if strings.TrimSpace(org.UUID) == "" {
+			continue
+		}
+		if isNonFreeCookieOrganization(org) {
+			paid = append(paid, org)
+		} else {
+			fallback = append(fallback, org)
 		}
 	}
-	if strings.TrimSpace(orgs[0].UUID) == "" {
-		return "", fmt.Errorf("organization uuid is empty")
+	if len(paid) > 0 {
+		return append(paid, fallback...), nil
 	}
-	return orgs[0].UUID, nil
+	if len(fallback) > 0 {
+		return fallback, nil
+	}
+	return nil, fmt.Errorf("organization uuid is empty")
 }
 
 func isNonFreeCookieOrganization(org claudeOrganization) bool {
@@ -677,13 +697,40 @@ func isNonFreeCookieOrganization(org claudeOrganization) bool {
 		cookieOrganizationString(org.Plan),
 		cookieOrganizationString(org.SubscriptionTier),
 	} {
-		value := strings.ToLower(strings.TrimSpace(raw))
-		if value == "" || strings.Contains(value, "free") || strings.Contains(value, "personal") {
-			continue
+		if isNonFreeCookiePlanValue(raw) {
+			return true
 		}
+	}
+	if hasNonFreeCookieSignal(cookieOrganizationString(org.RateLimitTier)) {
 		return true
 	}
+	for _, capability := range org.Capabilities {
+		if hasNonFreeCookieSignal(capability) {
+			return true
+		}
+	}
 	return false
+}
+
+func isNonFreeCookiePlanValue(raw string) bool {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	if value == "" || strings.Contains(value, "free") || strings.Contains(value, "personal") {
+		return false
+	}
+	return true
+}
+
+func hasNonFreeCookieSignal(raw string) bool {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	if value == "" || strings.Contains(value, "free") || strings.Contains(value, "personal") {
+		return false
+	}
+	return strings.Contains(value, "raven") ||
+		strings.Contains(value, "team") ||
+		strings.Contains(value, "pro") ||
+		strings.Contains(value, "max") ||
+		strings.Contains(value, "paid") ||
+		strings.Contains(value, "claude_code")
 }
 
 func cookieOrganizationString(value *string) string {
@@ -722,6 +769,34 @@ func (o *ClaudeAuth) CookieAuth(ctx context.Context, sessionKey string) (*Claude
 	if sessionKey == "" {
 		return nil, fmt.Errorf("sessionKey is required")
 	}
+	orgs, err := o.getCookieOrganizations(ctx, sessionKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get organization info: %w", err)
+	}
+	candidates, err := selectCookieOrganizations(orgs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get organization info: %w", err)
+	}
+	attemptErrors := make([]string, 0, len(candidates))
+	for _, org := range candidates {
+		orgUUID := strings.TrimSpace(org.UUID)
+		if orgUUID == "" {
+			continue
+		}
+		bundle, err := o.cookieAuthForOrganization(ctx, sessionKey, orgUUID)
+		if err == nil {
+			return bundle, nil
+		}
+		log.WithError(err).WithField("organization_uuid", orgUUID).Warn("claude cookie auth: organization failed")
+		attemptErrors = append(attemptErrors, fmt.Sprintf("%s: %v", orgUUID, err))
+	}
+	if len(attemptErrors) == 0 {
+		return nil, fmt.Errorf("failed to authenticate with any organization")
+	}
+	return nil, fmt.Errorf("failed to authenticate with any organization: %s", strings.Join(attemptErrors, "; "))
+}
+
+func (o *ClaudeAuth) cookieAuthForOrganization(ctx context.Context, sessionKey, orgUUID string) (*ClaudeAuthBundle, error) {
 	pkceCodes, err := GeneratePKCECodes()
 	if err != nil {
 		return nil, err
@@ -731,10 +806,6 @@ func (o *ClaudeAuth) CookieAuth(ctx context.Context, sessionKey string) (*Claude
 		return nil, err
 	}
 
-	orgUUID, err := o.getCookieOrganizationUUID(ctx, sessionKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get organization info: %w", err)
-	}
 	code, err := o.getCookieAuthorizationCode(ctx, sessionKey, orgUUID, claudeCookieScopeAPI, pkceCodes.CodeChallenge, state, RedirectURI)
 	if err == nil {
 		bundle, err := o.ExchangeCodeForTokens(ctx, code, state, pkceCodes)
@@ -770,8 +841,16 @@ func (o *ClaudeAuth) CookieAuth(ctx context.Context, sessionKey string) (*Claude
 }
 
 func (o *ClaudeAuth) getCookieOrganizationUUID(ctx context.Context, sessionKey string) (string, error) {
-	if client, err := o.newCookieOAuthClient(); err != nil {
+	orgs, err := o.getCookieOrganizations(ctx, sessionKey)
+	if err != nil {
 		return "", err
+	}
+	return selectCookieOrganizationUUID(orgs)
+}
+
+func (o *ClaudeAuth) getCookieOrganizations(ctx context.Context, sessionKey string) ([]claudeOrganization, error) {
+	if client, err := o.newCookieOAuthClient(); err != nil {
+		return nil, err
 	} else if client != nil {
 		var orgs []claudeOrganization
 		resp, err := client.R().
@@ -779,43 +858,43 @@ func (o *ClaudeAuth) getCookieOrganizationUUID(ctx context.Context, sessionKey s
 			SetCookies(&http.Cookie{Name: "sessionKey", Value: sessionKey}).
 			Get(strings.TrimRight(claudeAIBaseURL, "/") + "/api/organizations")
 		if err != nil {
-			return "", fmt.Errorf("organizations request failed: %w", err)
+			return nil, fmt.Errorf("organizations request failed: %w", err)
 		}
 		if !resp.IsSuccessState() {
-			return "", fmt.Errorf("failed to get organizations: status %d: %s", resp.StatusCode, resp.String())
+			return nil, fmt.Errorf("failed to get organizations: status %d: %s", resp.StatusCode, resp.String())
 		}
 		if err = decodeClaudeAIJSONResponse("organizations", resp.Response, resp.Bytes(), &orgs); err != nil {
-			return "", err
+			return nil, err
 		}
-		return selectCookieOrganizationUUID(orgs)
+		return orgs, nil
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(claudeAIBaseURL, "/")+"/api/organizations", nil)
 	if err != nil {
-		return "", fmt.Errorf("failed to create organizations request: %w", err)
+		return nil, fmt.Errorf("failed to create organizations request: %w", err)
 	}
 	req.AddCookie(&http.Cookie{Name: "sessionKey", Value: sessionKey})
 	applyClaudeAIBrowserHeaders(req)
 
 	resp, err := o.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("organizations request failed: %w", err)
+		return nil, fmt.Errorf("organizations request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("failed to read organizations response: %w", err)
+		return nil, fmt.Errorf("failed to read organizations response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("failed to get organizations: status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("failed to get organizations: status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var orgs []claudeOrganization
 	if err = decodeClaudeAIJSONResponse("organizations", resp, body, &orgs); err != nil {
-		return "", err
+		return nil, err
 	}
-	return selectCookieOrganizationUUID(orgs)
+	return orgs, nil
 }
 
 func (o *ClaudeAuth) getCookieAuthorizationCode(ctx context.Context, sessionKey, orgUUID, scope, codeChallenge, state, redirectURI string) (string, error) {

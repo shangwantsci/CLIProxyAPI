@@ -227,6 +227,94 @@ func TestCookieAuthFallsBackToPlatformOAuth(t *testing.T) {
 	}
 }
 
+func TestCookieAuthTriesNextPaidOrganizationWhenFirstIsCanceled(t *testing.T) {
+	var authorizeOrgs []string
+	var tokenRedirectURI string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/organizations":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[
+				{"uuid":"personal-org","name":"Personal","raven_type":null,"capabilities":["chat"],"rate_limit_tier":"default_claude_ai"},
+				{"uuid":"canceled-team-org","name":"Canceled Team","raven_type":"team","capabilities":["chat","raven"],"rate_limit_tier":"default_raven"},
+				{"uuid":"active-pro-org","name":"Active Pro","plan_type":"pro","capabilities":["chat","raven"],"rate_limit_tier":"default_raven"}
+			]`))
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/oauth/"):
+			parts := strings.Split(r.URL.Path, "/")
+			orgUUID := parts[len(parts)-2]
+			authorizeOrgs = append(authorizeOrgs, orgUUID)
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode authorize body: %v", err)
+			}
+			if orgUUID == "canceled-team-org" {
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"type":"error","error":{"type":"permission_error","message":"Organization has status: canceled"}}`))
+				return
+			}
+			if orgUUID != "active-pro-org" {
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"type":"error","error":{"type":"permission_error","message":"Claude Code requires a Pro or Max subscription."}}`))
+				return
+			}
+			state, _ := body["state"].(string)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"redirect_uri":"http://localhost:54545/callback?code=auth-code&state=` + state + `"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/oauth/token":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode token body: %v", err)
+			}
+			tokenRedirectURI, _ = body["redirect_uri"].(string)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"access_token":"access",
+				"refresh_token":"refresh",
+				"token_type":"Bearer",
+				"expires_in":3600,
+				"organization":{"uuid":"active-pro-org","name":"Active Pro"},
+				"account":{"uuid":"account-uuid","email_address":"user@example.com"}
+			}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	oldClaudeAIBaseURL := claudeAIBaseURL
+	oldAPITokenURL := claudeAPITokenURL
+	oldClaudePlatformTokenURL := claudePlatformTokenURL
+	defer func() {
+		claudeAIBaseURL = oldClaudeAIBaseURL
+		claudeAPITokenURL = oldAPITokenURL
+		claudePlatformTokenURL = oldClaudePlatformTokenURL
+	}()
+	claudeAIBaseURL = server.URL
+	claudeAPITokenURL = server.URL + "/api/oauth/token"
+	claudePlatformTokenURL = server.URL + "/v1/oauth/token"
+
+	auth := &ClaudeAuth{
+		httpClient: server.Client(),
+		claudeAIClientFactory: func(proxyURL string) (*req.Client, error) {
+			return req.C().SetCookieJar(nil), nil
+		},
+	}
+	bundle, err := auth.CookieAuth(context.Background(), "session-value")
+	if err != nil {
+		t.Fatalf("CookieAuth returned error: %v", err)
+	}
+	if got, want := strings.Join(authorizeOrgs, ","), "canceled-team-org,canceled-team-org,active-pro-org"; got != want {
+		t.Fatalf("authorize orgs = %q, want %q", got, want)
+	}
+	if bundle.TokenData.OrganizationUUID != "active-pro-org" {
+		t.Fatalf("organization uuid = %q, want active-pro-org", bundle.TokenData.OrganizationUUID)
+	}
+	if tokenRedirectURI != RedirectURI {
+		t.Fatalf("token redirect_uri = %q, want %q", tokenRedirectURI, RedirectURI)
+	}
+}
+
 func TestSelectCookieOrganizationUUIDPrefersNonFreePlan(t *testing.T) {
 	free := "free"
 	freePlan := "free_plan"
