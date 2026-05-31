@@ -599,3 +599,52 @@ func TestManagerMarkResultFailurePathPermanentDisableNotOverridden(t *testing.T)
 		t.Fatalf("permanent disable must not be overridden by passive quota, got %#v", state.LastError)
 	}
 }
+
+// 被动配额冷却不得清零已累加的 BackoffLevel(只延长不缩短的延伸:
+// 冷却的所有维度都不该被削弱)。429 无 reset 头时退避把 BackoffLevel 累加到 1,
+// 追加的被动配额冷却必须保留它。
+func TestManagerMarkResultFailurePathPassiveQuotaPreservesBackoffLevel(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{
+		ClaudeQuotaCoolingThresholds: internalconfig.ClaudeQuotaCoolingThresholds{
+			FiveHourRemainingPercent: 20,
+			WeeklyRemainingPercent:   10,
+		},
+	})
+	auth := &Auth{
+		ID:       "claude-fail-backoff",
+		Provider: "claude",
+		Status:   StatusActive,
+		Metadata: map[string]any{"auth_source": "claude_setup_token", "scope": "user:inference"},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	// 429 带超阈 5h util 但不带任何 reset 头:result.RetryAfter 为 nil,
+	// case 429 走 nextQuotaCooldown 指数退避,把 BackoffLevel 累加到 1。
+	// 被动配额随后基于 util 触发冷却(recoverAt 回退 now+30min),必须保留 BackoffLevel=1。
+	headers := http.Header{}
+	headers.Set("anthropic-ratelimit-unified-5h-utilization", "0.85")
+	ctx := logging.WithResponseHeadersHolder(context.Background())
+	logging.SetResponseHeaders(ctx, headers)
+
+	manager.MarkResult(ctx, Result{
+		AuthID:   auth.ID,
+		Provider: "claude",
+		Model:    "claude-sonnet-4-5",
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"},
+	})
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("auth not found")
+	}
+	state := updated.ModelStates["claude-sonnet-4-5"]
+	if state == nil || !state.Quota.Exceeded {
+		t.Fatalf("model quota state = %#v, want quota cooldown", state)
+	}
+	if state.Quota.BackoffLevel < 1 {
+		t.Fatalf("Quota.BackoffLevel = %d, want >= 1 (passive quota must not reset it)", state.Quota.BackoffLevel)
+	}
+}

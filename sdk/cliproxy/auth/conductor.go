@@ -3476,6 +3476,7 @@ func applyClaudePassiveQuotaCooldown(auth *Auth, model string, quotaState claude
 			Exceeded:      true,
 			Reason:        quotaState.reason,
 			NextRecoverAt: laterOf(state.Quota.NextRecoverAt, quotaState.recoverAt),
+			BackoffLevel:  state.Quota.BackoffLevel,
 		}
 		state.UpdatedAt = now
 		auth.LastError = cloneError(lastError)
@@ -3493,6 +3494,7 @@ func applyClaudePassiveQuotaCooldown(auth *Auth, model string, quotaState claude
 		Exceeded:      true,
 		Reason:        quotaState.reason,
 		NextRecoverAt: laterOf(auth.Quota.NextRecoverAt, quotaState.recoverAt),
+		BackoffLevel:  auth.Quota.BackoffLevel,
 	}
 	auth.LastError = lastError
 	auth.UpdatedAt = now
