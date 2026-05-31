@@ -395,3 +395,207 @@ func TestManagerMarkResultFailurePathAppliesPassiveQuotaWhenUtilBelowFull(t *tes
 		t.Fatalf("LastError = %#v, want quota_exhausted", state.LastError)
 	}
 }
+
+// 缝隙b:非 429 失败(503)带超阈 util,现有路径完全不覆盖,被动配额应冷却。
+func TestManagerMarkResultFailurePathAppliesPassiveQuotaOn5xx(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{
+		ClaudeQuotaCoolingThresholds: internalconfig.ClaudeQuotaCoolingThresholds{
+			FiveHourRemainingPercent: 20,
+			WeeklyRemainingPercent:   10,
+		},
+	})
+	reset7d := time.Now().UTC().Truncate(time.Second).Add(2 * time.Hour)
+	auth := &Auth{
+		ID:       "claude-fail-5xx",
+		Provider: "claude",
+		Status:   StatusActive,
+		Metadata: map[string]any{"auth_source": "claude_setup_token", "scope": "user:inference"},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	headers := http.Header{}
+	headers.Set("anthropic-ratelimit-unified-7d-reset", strconv.FormatInt(reset7d.Unix(), 10))
+	headers.Set("anthropic-ratelimit-unified-7d-utilization", "0.95")
+	ctx := logging.WithResponseHeadersHolder(context.Background())
+	logging.SetResponseHeaders(ctx, headers)
+
+	manager.MarkResult(ctx, Result{
+		AuthID:   auth.ID,
+		Provider: "claude",
+		Model:    "claude-sonnet-4-5",
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "upstream 503"},
+	})
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("auth not found")
+	}
+	state := updated.ModelStates["claude-sonnet-4-5"]
+	if state == nil || !state.Quota.Exceeded {
+		t.Fatalf("model quota state = %#v, want passive quota cooldown on 5xx", state)
+	}
+	assertTimeNear(t, state.NextRetryAfter, reset7d)
+}
+
+// 只延长不缩短:429 surpassed-threshold=true 让现有路径算出 7d reset(+5h),
+// 被动配额 5h reset 只有 +30min,最终必须保留 +5h。
+func TestManagerMarkResultFailurePathPassiveQuotaNeverShortens(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{
+		ClaudeQuotaCoolingThresholds: internalconfig.ClaudeQuotaCoolingThresholds{
+			FiveHourRemainingPercent: 20,
+			WeeklyRemainingPercent:   10,
+		},
+	})
+	reset5h := time.Now().UTC().Truncate(time.Second).Add(30 * time.Minute)
+	reset7d := time.Now().UTC().Truncate(time.Second).Add(5 * time.Hour)
+	auth := &Auth{
+		ID:       "claude-fail-noshrink",
+		Provider: "claude",
+		Status:   StatusActive,
+		Metadata: map[string]any{"auth_source": "claude_setup_token", "scope": "user:inference"},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	headers := http.Header{}
+	headers.Set("anthropic-ratelimit-unified-5h-reset", strconv.FormatInt(reset5h.Unix(), 10))
+	headers.Set("anthropic-ratelimit-unified-5h-utilization", "0.85")
+	headers.Set("anthropic-ratelimit-unified-7d-reset", strconv.FormatInt(reset7d.Unix(), 10))
+	headers.Set("anthropic-ratelimit-unified-7d-utilization", "0.95")
+	headers.Set("anthropic-ratelimit-unified-7d-surpassed-threshold", "true")
+	ctx := logging.WithResponseHeadersHolder(context.Background())
+	logging.SetResponseHeaders(ctx, headers)
+
+	manager.MarkResult(ctx, Result{
+		AuthID:   auth.ID,
+		Provider: "claude",
+		Model:    "claude-sonnet-4-5",
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"},
+	})
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("auth not found")
+	}
+	state := updated.ModelStates["claude-sonnet-4-5"]
+	if state == nil {
+		t.Fatal("model state missing")
+	}
+	// 现有 429 路径用 7d reset(+5h);被动配额 5h reset(+30min) 不得缩短它。
+	assertTimeNear(t, state.NextRetryAfter, reset7d)
+}
+
+// disableCooling 守卫:disable_cooling=true 时,被动配额也不得追加冷却。
+func TestManagerMarkResultFailurePathPassiveQuotaRespectsDisableCooling(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{
+		ClaudeQuotaCoolingThresholds: internalconfig.ClaudeQuotaCoolingThresholds{
+			FiveHourRemainingPercent: 20,
+			WeeklyRemainingPercent:   10,
+		},
+	})
+	reset5h := time.Now().UTC().Truncate(time.Second).Add(2 * time.Hour)
+	auth := &Auth{
+		ID:       "claude-fail-nocool",
+		Provider: "claude",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"auth_source":     "claude_setup_token",
+			"scope":           "user:inference",
+			"disable_cooling": true,
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	headers := http.Header{}
+	headers.Set("anthropic-ratelimit-unified-5h-reset", strconv.FormatInt(reset5h.Unix(), 10))
+	headers.Set("anthropic-ratelimit-unified-5h-utilization", "0.85")
+	ctx := logging.WithResponseHeadersHolder(context.Background())
+	logging.SetResponseHeaders(ctx, headers)
+
+	manager.MarkResult(ctx, Result{
+		AuthID:   auth.ID,
+		Provider: "claude",
+		Model:    "claude-sonnet-4-5",
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"},
+	})
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("auth not found")
+	}
+	state := updated.ModelStates["claude-sonnet-4-5"]
+	if state == nil {
+		t.Fatal("model state missing")
+	}
+	// The base 429 failure path always sets Quota.Exceeded=true regardless of disable_cooling
+	// (the disable_cooling guard only zeroes the cooldown duration, not the Exceeded flag).
+	// The discriminating signal that the passive-quota append was correctly skipped is that
+	// NextRetryAfter stays zero: had the passive branch run it would have set NextRetryAfter
+	// to reset5h (+2h) and replaced LastError with a "quota_exhausted" verdict.
+	if !state.NextRetryAfter.IsZero() {
+		t.Fatalf("NextRetryAfter = %v, want zero under disable_cooling", state.NextRetryAfter)
+	}
+	if state.LastError != nil && state.LastError.Code == "quota_exhausted" {
+		t.Fatalf("passive quota must not append when disable_cooling=true, got %#v", state.LastError)
+	}
+}
+
+// 永久禁用不被覆盖:organization_disabled 走永久禁用分支,不进 per-model 追加。
+func TestManagerMarkResultFailurePathPermanentDisableNotOverridden(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{
+		ClaudeQuotaCoolingThresholds: internalconfig.ClaudeQuotaCoolingThresholds{
+			FiveHourRemainingPercent: 20,
+			WeeklyRemainingPercent:   10,
+		},
+	})
+	reset5h := time.Now().UTC().Truncate(time.Second).Add(2 * time.Hour)
+	auth := &Auth{
+		ID:       "claude-fail-perm",
+		Provider: "claude",
+		Status:   StatusActive,
+		Metadata: map[string]any{"auth_source": "claude_setup_token", "scope": "user:inference"},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	headers := http.Header{}
+	headers.Set("anthropic-ratelimit-unified-5h-reset", strconv.FormatInt(reset5h.Unix(), 10))
+	headers.Set("anthropic-ratelimit-unified-5h-utilization", "0.85")
+	ctx := logging.WithResponseHeadersHolder(context.Background())
+	logging.SetResponseHeaders(ctx, headers)
+
+	manager.MarkResult(ctx, Result{
+		AuthID:   auth.ID,
+		Provider: "claude",
+		Model:    "claude-sonnet-4-5",
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusBadRequest, Message: `{"type":"error","error":{"type":"invalid_request_error","message":"This organization has been disabled."}}`},
+	})
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("auth not found")
+	}
+	// The permanent-disable branch must win: the credential is disabled and the model state must
+	// not be overwritten with the passive-quota "quota_exhausted" verdict.
+	if !updated.Disabled || updated.LastError == nil || updated.LastError.Code != "organization_disabled" {
+		t.Fatalf("auth = disabled %v lastError %#v, want organization_disabled permanent disable", updated.Disabled, updated.LastError)
+	}
+	state := updated.ModelStates["claude-sonnet-4-5"]
+	if state != nil && state.LastError != nil && state.LastError.Code == "quota_exhausted" {
+		t.Fatalf("permanent disable must not be overridden by passive quota, got %#v", state.LastError)
+	}
+}
