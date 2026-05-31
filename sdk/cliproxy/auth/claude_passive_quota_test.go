@@ -322,3 +322,26 @@ func assertTimeNear(t *testing.T, got, want time.Time) {
 		t.Fatalf("time = %v, want around %v", got, want)
 	}
 }
+
+func TestLaterOf(t *testing.T) {
+	base := time.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	earlier := base.Add(30 * time.Minute)
+	later := base.Add(2 * time.Hour)
+	zero := time.Time{}
+
+	if got := laterOf(zero, zero); !got.IsZero() {
+		t.Fatalf("laterOf(zero,zero) = %v, want zero", got)
+	}
+	if got := laterOf(zero, later); !got.Equal(later) {
+		t.Fatalf("laterOf(zero,later) = %v, want %v", got, later)
+	}
+	if got := laterOf(later, zero); !got.Equal(later) {
+		t.Fatalf("laterOf(later,zero) = %v, want %v", got, later)
+	}
+	if got := laterOf(earlier, later); !got.Equal(later) {
+		t.Fatalf("laterOf(earlier,later) = %v, want %v", got, later)
+	}
+	if got := laterOf(later, earlier); !got.Equal(later) {
+		t.Fatalf("laterOf(later,earlier) = %v, want %v", got, later)
+	}
+}

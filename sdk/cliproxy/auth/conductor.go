@@ -3416,6 +3416,22 @@ func claudePassiveQuotaWindowReason(key string, remaining, threshold float64) st
 	return fmt.Sprintf("%s remaining %.0f%% <= %.0f%%", key, remaining, threshold)
 }
 
+// laterOf returns the later of two times. A zero time is treated as "no
+// constraint", so the other (non-zero) value wins. This keeps passive-quota
+// cooldown from ever shortening a longer cooldown already set by the 429 backoff.
+func laterOf(a, b time.Time) time.Time {
+	if a.IsZero() {
+		return b
+	}
+	if b.IsZero() {
+		return a
+	}
+	if a.After(b) {
+		return a
+	}
+	return b
+}
+
 func applyClaudePassiveQuotaCooldown(auth *Auth, model string, quotaState claudePassiveQuotaProbeState, now time.Time) {
 	if auth == nil || !quotaState.exceeded {
 		return
