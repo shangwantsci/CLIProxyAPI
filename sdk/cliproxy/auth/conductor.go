@@ -2426,6 +2426,22 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					auth.Status = StatusError
 					auth.UpdatedAt = now
 					updateAggregatedAvailability(auth, now)
+
+					// Failure responses (429 in the threshold..100% band, or 5xx) also carry
+					// unified rate-limit headers that updateClaudePassiveQuotaFromHeaders has
+					// already parsed into metadata above. The existing 429 path only reacts at
+					// util>=1.0 / surpassed-threshold, so consume the passive-quota verdict here
+					// to cool the model when the configured threshold is crossed. laterOf inside
+					// applyClaudePassiveQuotaCooldown guarantees this never shortens the cooldown
+					// the 429 backoff just set.
+					if passiveClaudeQuotaHeaders && !quotaCooldownDisabledForAuth(auth) {
+						if quotaState, okQuota := m.claudePassiveQuotaState(auth, now); okQuota && quotaState.exceeded {
+							applyClaudePassiveQuotaCooldown(auth, result.Model, quotaState, now)
+							shouldSuspendModel = true
+							setModelQuota = true
+							suspendReason = "quota"
+						}
+					}
 				}
 			} else {
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)

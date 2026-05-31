@@ -345,3 +345,53 @@ func TestLaterOf(t *testing.T) {
 		t.Fatalf("laterOf(later,earlier) = %v, want %v", got, later)
 	}
 }
+
+func TestManagerMarkResultFailurePathAppliesPassiveQuotaWhenUtilBelowFull(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{
+		ClaudeQuotaCoolingThresholds: internalconfig.ClaudeQuotaCoolingThresholds{
+			FiveHourRemainingPercent: 20,
+			WeeklyRemainingPercent:   10,
+		},
+	})
+	reset5h := time.Now().UTC().Truncate(time.Second).Add(2 * time.Hour)
+	auth := &Auth{
+		ID:       "claude-fail-5h",
+		Provider: "claude",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"auth_source": "claude_setup_token",
+			"scope":       "user:inference",
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	headers := http.Header{}
+	headers.Set("anthropic-ratelimit-unified-5h-reset", strconv.FormatInt(reset5h.Unix(), 10))
+	headers.Set("anthropic-ratelimit-unified-5h-utilization", "0.85")
+	ctx := logging.WithResponseHeadersHolder(context.Background())
+	logging.SetResponseHeaders(ctx, headers)
+
+	manager.MarkResult(ctx, Result{
+		AuthID:   auth.ID,
+		Provider: "claude",
+		Model:    "claude-sonnet-4-5",
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"},
+	})
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("auth not found")
+	}
+	state := updated.ModelStates["claude-sonnet-4-5"]
+	if state == nil || !state.Unavailable || !state.Quota.Exceeded {
+		t.Fatalf("model quota state = %#v, want passive quota cooldown", state)
+	}
+	assertTimeNear(t, state.NextRetryAfter, reset5h)
+	if state.LastError == nil || state.LastError.Code != "quota_exhausted" {
+		t.Fatalf("LastError = %#v, want quota_exhausted", state.LastError)
+	}
+}
