@@ -3453,12 +3453,12 @@ func applyClaudePassiveQuotaCooldown(auth *Auth, model string, quotaState claude
 		state.Unavailable = true
 		state.Status = StatusError
 		state.StatusMessage = quotaState.reason
-		state.NextRetryAfter = quotaState.recoverAt
+		state.NextRetryAfter = laterOf(state.NextRetryAfter, quotaState.recoverAt)
 		state.LastError = cloneError(lastError)
 		state.Quota = QuotaState{
 			Exceeded:      true,
 			Reason:        quotaState.reason,
-			NextRecoverAt: quotaState.recoverAt,
+			NextRecoverAt: laterOf(state.Quota.NextRecoverAt, quotaState.recoverAt),
 		}
 		state.UpdatedAt = now
 		auth.LastError = cloneError(lastError)
@@ -3471,11 +3471,11 @@ func applyClaudePassiveQuotaCooldown(auth *Auth, model string, quotaState claude
 	auth.Unavailable = true
 	auth.Status = StatusError
 	auth.StatusMessage = quotaState.reason
-	auth.NextRetryAfter = quotaState.recoverAt
+	auth.NextRetryAfter = laterOf(auth.NextRetryAfter, quotaState.recoverAt)
 	auth.Quota = QuotaState{
 		Exceeded:      true,
 		Reason:        quotaState.reason,
-		NextRecoverAt: quotaState.recoverAt,
+		NextRecoverAt: laterOf(auth.Quota.NextRecoverAt, quotaState.recoverAt),
 	}
 	auth.LastError = lastError
 	auth.UpdatedAt = now
