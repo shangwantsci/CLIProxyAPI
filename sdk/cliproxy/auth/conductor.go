@@ -2429,11 +2429,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 					// Failure responses (429 in the threshold..100% band, or 5xx) also carry
 					// unified rate-limit headers that updateClaudePassiveQuotaFromHeaders has
-					// already parsed into metadata above. The existing 429 path only reacts at
-					// util>=1.0 / surpassed-threshold, so consume the passive-quota verdict here
-					// to cool the model when the configured threshold is crossed. laterOf inside
-					// applyClaudePassiveQuotaCooldown guarantees this never shortens the cooldown
-					// the 429 backoff just set.
+					// already parsed into metadata above. The existing 429 path may set a cooldown
+					// from the reset headers, but it does not consume the configured-threshold
+					// verdict (the quota_exhausted classification and threshold-derived recover
+					// time). Consume it here so threshold-band 429s and 5xx failures cool the
+					// model. laterOf inside applyClaudePassiveQuotaCooldown guarantees this never
+					// shortens the cooldown the 429 backoff just set.
 					if passiveClaudeQuotaHeaders && !quotaCooldownDisabledForAuth(auth) {
 						if quotaState, okQuota := m.claudePassiveQuotaState(auth, now); okQuota && quotaState.exceeded {
 							applyClaudePassiveQuotaCooldown(auth, result.Model, quotaState, now)
