@@ -60,6 +60,9 @@ func TestRefreshAuthSessionKeyRetryKeepsSchedulable(t *testing.T) {
 	if cnt := claudeReauthFailureCount(updated.Metadata); cnt != 1 {
 		t.Fatalf("failure count = %d, want 1", cnt)
 	}
+	if !updated.NextRefreshAfter.After(time.Now()) {
+		t.Fatalf("NextRefreshAfter must be in the future, got %v", updated.NextRefreshAfter)
+	}
 }
 
 func TestRefreshAuthSessionKeyExhaustionDisablesAndClearsQuota(t *testing.T) {
@@ -118,5 +121,59 @@ func TestRefreshAuthNoSeedDisablesImmediately(t *testing.T) {
 	updated, _ := manager.GetByID(auth.ID)
 	if !updated.Disabled {
 		t.Fatal("no seed must disable immediately on unauthorized failure")
+	}
+}
+
+func TestRefreshAuthSessionKeyProgressionAcrossTicks(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(sessionKeyReauthFailExecutor{provider: "claude"})
+
+	auth := &Auth{
+		ID:       "claude-progression",
+		Provider: "claude",
+		Metadata: map[string]any{"session_key": "sk-ant-sid01-seed"},
+	}
+	if _, err := manager.Register(ctx, auth); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	// Tick 1: failures 0 -> 1, retry, schedulable, backoff set in the future.
+	manager.refreshAuth(ctx, auth.ID)
+	u1, _ := manager.GetByID(auth.ID)
+	if u1.Disabled {
+		t.Fatal("tick 1 must not disable")
+	}
+	if u1.LastError == nil || u1.LastError.Code != "reauth_pending" {
+		t.Fatalf("tick 1 Code = %v, want reauth_pending", u1.LastError)
+	}
+	if c := claudeReauthFailureCount(u1.Metadata); c != 1 {
+		t.Fatalf("tick 1 count = %d, want 1", c)
+	}
+	if !u1.NextRefreshAfter.After(time.Now()) {
+		t.Fatalf("tick 1 NextRefreshAfter must be in the future, got %v", u1.NextRefreshAfter)
+	}
+
+	// Tick 2: failures 1 -> 2, still retry (not disabled).
+	manager.refreshAuth(ctx, auth.ID)
+	u2, _ := manager.GetByID(auth.ID)
+	if u2.Disabled {
+		t.Fatal("tick 2 must not disable (failures 1->2, still < cap)")
+	}
+	if u2.LastError == nil || u2.LastError.Code != "reauth_pending" {
+		t.Fatalf("tick 2 Code = %v, want reauth_pending", u2.LastError)
+	}
+	if c := claudeReauthFailureCount(u2.Metadata); c != 2 {
+		t.Fatalf("tick 2 count = %d, want 2", c)
+	}
+
+	// Tick 3: failures=2, 2+1 < 3 is false -> permanent disable.
+	manager.refreshAuth(ctx, auth.ID)
+	u3, _ := manager.GetByID(auth.ID)
+	if !u3.Disabled || u3.Status != StatusDisabled {
+		t.Fatalf("tick 3 must permanently disable, got disabled=%v status=%s", u3.Disabled, u3.Status)
+	}
+	if u3.LastError == nil || u3.LastError.Code != "unauthorized" {
+		t.Fatalf("tick 3 Code = %v, want unauthorized", u3.LastError)
 	}
 }

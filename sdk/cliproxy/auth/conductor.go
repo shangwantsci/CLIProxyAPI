@@ -3202,7 +3202,7 @@ func isClaudeAuthResult(auth *Auth, provider string) bool {
 const claudeSessionKeyReauthMaxAttempts = 3
 
 // claudeReauthFailureCount reads the session_key reauth failure counter from auth
-// metadata. JSON round-trips numbers as float64, so all numeric kinds are handled.
+// metadata. JSON round-trips numbers as float64; in-memory writes use int. Both are handled.
 func claudeReauthFailureCount(meta map[string]any) int {
 	if meta == nil {
 		return 0
@@ -5121,11 +5121,12 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 						current.Metadata = make(map[string]any)
 					}
 					setAuthMetadata(current.Metadata, "session_key_reauth_failures", failures)
+					current.Disabled = false
 					current.NextRetryAfter = time.Time{}
 					current.NextRefreshAfter = now.Add(sessionKeyReauthBackoff(failures))
 					current.Unavailable = true
-					// CRITICAL: :5041 already set LastError.Code="unauthorized" via
-					// refreshErrorFromError. Override to a retryable code so
+					// CRITICAL: refreshErrorFromError above already set Code="unauthorized".
+					// Override to a retryable code so
 					// hasUnauthorizedAuthFailure does NOT exclude this account from
 					// refresh scheduling; otherwise the reauth window closes on the
 					// first failure and the fallback never fires. Keep Disabled=false.
