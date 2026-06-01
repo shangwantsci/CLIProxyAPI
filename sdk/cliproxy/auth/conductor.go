@@ -3197,6 +3197,34 @@ func isClaudeAuthResult(auth *Auth, provider string) bool {
 	return auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "claude")
 }
 
+// clearClaudeQuotaAndPassiveUsage wipes quota and passive-usage state from an
+// account that has been permanently disabled for an authentication failure. A
+// dead account must not keep "cooling" quota data, which the management UI would
+// otherwise render as a quota cooldown, masking the real auth-expired status.
+// Credential fields (tokens, session_key) are intentionally preserved.
+func clearClaudeQuotaAndPassiveUsage(auth *Auth) {
+	if auth == nil {
+		return
+	}
+	auth.Quota = QuotaState{}
+	if auth.Metadata == nil {
+		return
+	}
+	for _, k := range []string{
+		"session_window_start",
+		"session_window_end",
+		"session_window_status",
+		"session_window_utilization",
+		"passive_usage_7d_utilization",
+		"passive_usage_7d_reset",
+		"passive_usage_sampled_at",
+		"unified_status",
+		"unified_representative_claim",
+	} {
+		delete(auth.Metadata, k)
+	}
+}
+
 func updateClaudePassiveQuotaFromHeaders(auth *Auth, headers http.Header, now time.Time) bool {
 	if auth == nil || len(headers) == 0 || !isClaudeAuthResult(auth, "") {
 		return false
