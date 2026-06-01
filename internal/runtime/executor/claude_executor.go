@@ -934,7 +934,9 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	if td.RefreshToken != "" {
 		auth.Metadata["refresh_token"] = td.RefreshToken
 	}
-	auth.Metadata["email"] = td.Email
+	if td.Email != "" {
+		auth.Metadata["email"] = td.Email
+	}
 	auth.Metadata["expired"] = td.Expire
 	auth.Metadata["type"] = "claude"
 	if td.AuthSource != "" {

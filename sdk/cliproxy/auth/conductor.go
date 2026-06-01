@@ -3226,7 +3226,7 @@ func sessionKeyReauthBackoff(failures int) time.Duration {
 	if failures < 1 {
 		failures = 1
 	}
-	d := base << uint(failures)
+	d := base * (1 << uint(failures))
 	if d <= 0 || d > maxBackoff {
 		return maxBackoff
 	}
@@ -5121,10 +5121,11 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 						current.Metadata = make(map[string]any)
 					}
 					setAuthMetadata(current.Metadata, "session_key_reauth_failures", failures)
-					current.Disabled = false
-					current.NextRetryAfter = time.Time{}
-					current.NextRefreshAfter = now.Add(sessionKeyReauthBackoff(failures))
+					backoff := now.Add(sessionKeyReauthBackoff(failures))
+					current.NextRetryAfter = backoff
+					current.NextRefreshAfter = backoff
 					current.Unavailable = true
+					current.Disabled = false
 					// CRITICAL: refreshErrorFromError above already set Code="unauthorized".
 					// Override to a retryable code so
 					// hasUnauthorizedAuthFailure does NOT exclude this account from

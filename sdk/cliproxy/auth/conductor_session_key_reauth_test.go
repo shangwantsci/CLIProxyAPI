@@ -63,6 +63,9 @@ func TestRefreshAuthSessionKeyRetryKeepsSchedulable(t *testing.T) {
 	if !updated.NextRefreshAfter.After(time.Now()) {
 		t.Fatalf("NextRefreshAfter must be in the future, got %v", updated.NextRefreshAfter)
 	}
+	if !updated.NextRetryAfter.After(time.Now()) {
+		t.Fatalf("NextRetryAfter must be in the future for reauth_pending (account must leave request-routing pool), got %v", updated.NextRetryAfter)
+	}
 }
 
 func TestRefreshAuthSessionKeyExhaustionDisablesAndClearsQuota(t *testing.T) {
@@ -152,6 +155,9 @@ func TestRefreshAuthSessionKeyProgressionAcrossTicks(t *testing.T) {
 	}
 	if !u1.NextRefreshAfter.After(time.Now()) {
 		t.Fatalf("tick 1 NextRefreshAfter must be in the future, got %v", u1.NextRefreshAfter)
+	}
+	if !u1.NextRetryAfter.After(time.Now()) {
+		t.Fatalf("tick 1 NextRetryAfter must be in the future, got %v", u1.NextRetryAfter)
 	}
 
 	// Tick 2: failures 1 -> 2, still retry (not disabled).
