@@ -3485,3 +3485,19 @@ func TestClaudeExecutorReauthNoSeedReturnsError(t *testing.T) {
 		t.Fatal("expected error when neither refresh_token nor session_key present")
 	}
 }
+
+func TestClaudeExecutorRefreshNoSeedWithRefreshTokenReturnsError(t *testing.T) {
+	exec := &ClaudeExecutor{cfg: &config.Config{}}
+	exec.refreshTokensFn = func(ctx context.Context, refreshToken string) error {
+		return errors.New(`token refresh failed with status 400: {"error":"invalid_grant"}`)
+	}
+	auth := &cliproxyauth.Auth{
+		ID:       "claude-rt-noseed",
+		Provider: "claude",
+		Metadata: map[string]any{"refresh_token": "sk-ant-ort01-broken"}, // refresh_token present, NO session_key
+	}
+	_, err := exec.Refresh(context.Background(), auth)
+	if err == nil {
+		t.Fatal("expected error when refresh fails credential-level and no session_key seed is present")
+	}
+}

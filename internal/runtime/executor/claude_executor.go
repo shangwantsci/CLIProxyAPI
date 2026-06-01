@@ -926,6 +926,7 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	}
 
 	// Real path: rewrite metadata from the returned token data.
+	// NOTE: keep these metadata writes in sync with reauthViaSessionKey.
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
 	}
@@ -991,6 +992,7 @@ func (e *ClaudeExecutor) reauthViaSessionKey(ctx context.Context, auth *cliproxy
 		return nil, fmt.Errorf("claude executor: session_key reauth failed for %s: %w", auth.ID, err)
 	}
 
+	// NOTE: keep these metadata writes in sync with the refresh_token success path in Refresh.
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
 	}
