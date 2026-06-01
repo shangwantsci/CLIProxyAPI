@@ -3197,6 +3197,42 @@ func isClaudeAuthResult(auth *Auth, provider string) bool {
 	return auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "claude")
 }
 
+// claudeSessionKeyReauthMaxAttempts bounds how many times a credential-level auth
+// failure is retried via session_key before the account is permanently disabled.
+const claudeSessionKeyReauthMaxAttempts = 3
+
+// claudeReauthFailureCount reads the session_key reauth failure counter from auth
+// metadata. JSON round-trips numbers as float64, so all numeric kinds are handled.
+func claudeReauthFailureCount(meta map[string]any) int {
+	if meta == nil {
+		return 0
+	}
+	switch v := meta["session_key_reauth_failures"].(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	}
+	return 0
+}
+
+// sessionKeyReauthBackoff returns an exponential backoff for the next reauth retry,
+// capped at one hour. failures is the post-increment count (>=1).
+func sessionKeyReauthBackoff(failures int) time.Duration {
+	const base = 5 * time.Minute
+	const maxBackoff = time.Hour
+	if failures < 1 {
+		failures = 1
+	}
+	d := base << uint(failures)
+	if d <= 0 || d > maxBackoff {
+		return maxBackoff
+	}
+	return d
+}
+
 // clearClaudeQuotaAndPassiveUsage wipes quota and passive-usage state from an
 // account that has been permanently disabled for an authentication failure. A
 // dead account must not keep "cooling" quota data, which the management UI would
@@ -5068,12 +5104,47 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 		if current := m.auths[id]; current != nil {
 			current.LastError = refreshErrorFromError(err)
 			if unauthorized {
-				current.NextRefreshAfter = time.Time{}
-				current.NextRetryAfter = time.Time{}
-				current.Unavailable = true
-				current.Disabled = true
-				current.Status = StatusDisabled
-				current.StatusMessage = "unauthorized"
+				failures := claudeReauthFailureCount(current.Metadata)
+				hasSeed := false
+				if current.Metadata != nil {
+					if v, ok := current.Metadata["session_key"].(string); ok && strings.TrimSpace(v) != "" {
+						hasSeed = true
+					}
+				}
+				if hasSeed && failures+1 < claudeSessionKeyReauthMaxAttempts {
+					// Credential-level failure with a regeneration seed and attempts
+					// remaining: back off and retry instead of permanently disabling,
+					// so the executor's session_key reauth gets another chance on the
+					// next refresh tick.
+					failures++
+					if current.Metadata == nil {
+						current.Metadata = make(map[string]any)
+					}
+					setAuthMetadata(current.Metadata, "session_key_reauth_failures", failures)
+					current.NextRetryAfter = time.Time{}
+					current.NextRefreshAfter = now.Add(sessionKeyReauthBackoff(failures))
+					current.Unavailable = true
+					// CRITICAL: :5041 already set LastError.Code="unauthorized" via
+					// refreshErrorFromError. Override to a retryable code so
+					// hasUnauthorizedAuthFailure does NOT exclude this account from
+					// refresh scheduling; otherwise the reauth window closes on the
+					// first failure and the fallback never fires. Keep Disabled=false.
+					if current.LastError != nil {
+						current.LastError.Code = "reauth_pending"
+						current.LastError.Retryable = true
+					}
+				} else {
+					// No seed, or attempts exhausted: permanent disable (original
+					// behavior) + clear stale quota/passive-usage so the UI no longer
+					// mislabels this dead account as a quota cooldown.
+					current.NextRefreshAfter = time.Time{}
+					current.NextRetryAfter = time.Time{}
+					current.Unavailable = true
+					current.Disabled = true
+					current.Status = StatusDisabled
+					current.StatusMessage = "unauthorized"
+					clearClaudeQuotaAndPassiveUsage(current)
+				}
 			} else {
 				current.NextRefreshAfter = now.Add(refreshFailureBackoff)
 			}
