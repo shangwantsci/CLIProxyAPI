@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
 	xxHash64 "github.com/pierrec/xxHash/xxHash64"
+	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -3404,5 +3406,82 @@ func TestRestoreClaudeOAuthToolNamesFromStreamLine_MixedCaseWithPrefix(t *testin
 	out = restoreClaudeOAuthToolNamesFromStreamLine(globLine, "proxy_", false, reverseMap)
 	if !bytes.Contains(out, []byte(`"name":"glob"`)) {
 		t.Fatalf("Glob should be restored to glob, got: %s", string(out))
+	}
+}
+
+func TestClaudeExecutorRefreshFallsBackToSessionKeyOnInvalidGrant(t *testing.T) {
+	exec := &ClaudeExecutor{
+		cfg: &config.Config{},
+		reauthViaCookieFn: func(ctx context.Context, cfg *config.Config, proxyURL, sessionKey string) (*claudeauth.ClaudeTokenStorage, error) {
+			if sessionKey != "sk-ant-sid01-seed" {
+				t.Fatalf("unexpected session key %q", sessionKey)
+			}
+			return &claudeauth.ClaudeTokenStorage{
+				AccessToken:   "sk-ant-oat01-new",
+				RefreshToken:  "sk-ant-ort01-new",
+				Email:         "user@example.com",
+				Expire:        "2027-06-01T00:00:00Z",
+				AuthSource:    "claude_setup_token",
+				TokenEndpoint: "https://platform.claude.com/v1/oauth/token",
+				RedirectURI:   "https://platform.claude.com/oauth/code/callback",
+			}, nil
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ID:       "claude-fallback",
+		Provider: "claude",
+		Metadata: map[string]any{
+			"refresh_token":               "sk-ant-ort01-broken",
+			"session_key":                 "sk-ant-sid01-seed",
+			"session_key_reauth_failures": float64(1),
+		},
+	}
+	exec.refreshTokensFn = func(ctx context.Context, refreshToken string) error {
+		return errors.New(`token refresh failed with status 400: {"error":"invalid_grant"}`)
+	}
+
+	updated, err := exec.Refresh(context.Background(), auth)
+	if err != nil {
+		t.Fatalf("Refresh returned error, want fallback success: %v", err)
+	}
+	if updated.Metadata["access_token"] != "sk-ant-oat01-new" {
+		t.Fatalf("access_token not rewritten: %v", updated.Metadata["access_token"])
+	}
+	if _, ok := updated.Metadata["session_key_reauth_failures"]; ok {
+		t.Fatal("failure counter must be cleared on successful reauth")
+	}
+	if updated.Metadata["session_key"] != "sk-ant-sid01-seed" {
+		t.Fatal("session_key seed must be preserved")
+	}
+}
+
+func TestClaudeExecutorReauthReturnsErrorWhenCookieAuthFails(t *testing.T) {
+	exec := &ClaudeExecutor{
+		cfg: &config.Config{},
+		reauthViaCookieFn: func(ctx context.Context, cfg *config.Config, proxyURL, sessionKey string) (*claudeauth.ClaudeTokenStorage, error) {
+			return nil, errors.New("cookie auth rejected (account likely banned)")
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ID:       "claude-banned",
+		Provider: "claude",
+		Metadata: map[string]any{"session_key": "sk-ant-sid01-seed"},
+	}
+	_, err := exec.Refresh(context.Background(), auth)
+	if err == nil {
+		t.Fatal("expected error when session_key reauth fails")
+	}
+}
+
+func TestClaudeExecutorReauthNoSeedReturnsError(t *testing.T) {
+	exec := &ClaudeExecutor{cfg: &config.Config{}}
+	auth := &cliproxyauth.Auth{
+		ID:       "claude-noseed",
+		Provider: "claude",
+		Metadata: map[string]any{},
+	}
+	_, err := exec.Refresh(context.Background(), auth)
+	if err == nil {
+		t.Fatal("expected error when neither refresh_token nor session_key present")
 	}
 }

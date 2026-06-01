@@ -39,6 +39,13 @@ import (
 // If api_key is unavailable on auth, it falls back to legacy via ClientAdapter.
 type ClaudeExecutor struct {
 	cfg *config.Config
+	// reauthViaCookieFn, when non-nil, overrides the real CookieAuth exchange in
+	// reauthViaSessionKey. Production leaves it nil (defaultReauthViaCookie is used);
+	// tests inject a stub to avoid network calls.
+	reauthViaCookieFn func(ctx context.Context, cfg *config.Config, proxyURL, sessionKey string) (*claudeauth.ClaudeTokenStorage, error)
+	// refreshTokensFn, when non-nil, overrides the real refresh-token refresh used
+	// inside Refresh. Tests inject a stub to drive the failure/fallback branch.
+	refreshTokensFn func(ctx context.Context, refreshToken string) error
 }
 
 // claudeToolPrefix is empty to match real Claude Code behavior (no tool name prefix).
@@ -889,17 +896,36 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 		}
 	}
 	if refreshToken == "" {
+		return e.reauthViaSessionKey(ctx, auth, nil)
+	}
+
+	// Use the injected stub when set (test path), otherwise call the real service.
+	var refreshErr error
+	var td *claudeauth.ClaudeTokenData
+	if e.refreshTokensFn != nil {
+		refreshErr = e.refreshTokensFn(ctx, refreshToken)
+	} else {
+		svc := claudeauth.NewClaudeAuthWithProxyURL(e.cfg, auth.ProxyURL)
+		td, refreshErr = svc.RefreshTokensWithRetryOptions(ctx, refreshToken, 3, claudeauth.RefreshTokenOptions{
+			AuthSource:            authSource,
+			TokenEndpoint:         tokenEndpoint,
+			AllowEndpointFallback: true,
+		})
+	}
+
+	if refreshErr != nil {
+		if isCredentialLevelAuthFailure(refreshErr) {
+			return e.reauthViaSessionKey(ctx, auth, refreshErr)
+		}
+		return nil, refreshErr
+	}
+
+	// Stub path with no error: nothing to write.
+	if e.refreshTokensFn != nil {
 		return auth, nil
 	}
-	svc := claudeauth.NewClaudeAuthWithProxyURL(e.cfg, auth.ProxyURL)
-	td, err := svc.RefreshTokensWithRetryOptions(ctx, refreshToken, 3, claudeauth.RefreshTokenOptions{
-		AuthSource:            authSource,
-		TokenEndpoint:         tokenEndpoint,
-		AllowEndpointFallback: true,
-	})
-	if err != nil {
-		return nil, err
-	}
+
+	// Real path: rewrite metadata from the returned token data.
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
 	}
@@ -922,6 +948,94 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	now := time.Now().Format(time.RFC3339)
 	auth.Metadata["last_refresh"] = now
 	return auth, nil
+}
+
+// defaultReauthViaCookie performs the real session-key re-exchange using the same
+// CookieAuth path as the original import (PreferSetupToken=true), returning a fresh
+// token storage. Used when ClaudeExecutor.reauthViaCookieFn is nil.
+func defaultReauthViaCookie(ctx context.Context, cfg *config.Config, proxyURL, sessionKey string) (*claudeauth.ClaudeTokenStorage, error) {
+	svc := claudeauth.NewClaudeAuthWithProxyURL(cfg, proxyURL)
+	bundle, err := svc.CookieAuth(ctx, sessionKey)
+	if err != nil {
+		return nil, err
+	}
+	return svc.CreateTokenStorage(bundle), nil
+}
+
+// reauthViaSessionKey re-exchanges Claude credentials using a retained session key
+// when refresh-token refresh is impossible (missing) or failed (invalid_grant /
+// revoked). On success it rewrites auth.Metadata in place, preserves the session
+// key seed, clears the failure counter, and returns the updated auth. On failure it
+// returns an error for the conductor to count toward the disable threshold. cause
+// carries the original refresh error (may be nil when no refresh_token).
+func (e *ClaudeExecutor) reauthViaSessionKey(ctx context.Context, auth *cliproxyauth.Auth, cause error) (*cliproxyauth.Auth, error) {
+	sessionKey := ""
+	if auth.Metadata != nil {
+		if v, ok := auth.Metadata["session_key"].(string); ok {
+			sessionKey = strings.TrimSpace(v)
+		}
+	}
+	if sessionKey == "" {
+		if cause != nil {
+			return nil, cause
+		}
+		return nil, fmt.Errorf("claude executor: no refresh_token and no session_key for %s", auth.ID)
+	}
+
+	exchange := e.reauthViaCookieFn
+	if exchange == nil {
+		exchange = defaultReauthViaCookie
+	}
+	ts, err := exchange(ctx, e.cfg, auth.ProxyURL, sessionKey)
+	if err != nil {
+		return nil, fmt.Errorf("claude executor: session_key reauth failed for %s: %w", auth.ID, err)
+	}
+
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["access_token"] = ts.AccessToken
+	if ts.RefreshToken != "" {
+		auth.Metadata["refresh_token"] = ts.RefreshToken
+	}
+	if ts.Email != "" {
+		auth.Metadata["email"] = ts.Email
+	}
+	auth.Metadata["expired"] = ts.Expire
+	auth.Metadata["type"] = "claude"
+	if ts.AuthSource != "" {
+		auth.Metadata["auth_source"] = ts.AuthSource
+	}
+	if ts.TokenEndpoint != "" {
+		auth.Metadata["token_endpoint"] = ts.TokenEndpoint
+	}
+	if ts.RedirectURI != "" {
+		auth.Metadata["redirect_uri"] = ts.RedirectURI
+	}
+	auth.Metadata["session_key"] = sessionKey
+	delete(auth.Metadata, "session_key_reauth_failures")
+	auth.Metadata["last_refresh"] = time.Now().Format(time.RFC3339)
+	return auth, nil
+}
+
+// isCredentialLevelAuthFailure reports whether a refresh error is a credential-level
+// failure worth retrying via session_key (invalid_grant / 401 / token revoked), as
+// opposed to a transient/network/5xx error.
+func isCredentialLevelAuthFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	raw := strings.ToLower(err.Error())
+	for _, p := range []string{
+		"invalid_grant", "status 401", "401 unauthorized",
+		"token_revoked", "token revoked", "refresh token revoked",
+		"refresh token expired", "refresh token not found",
+	} {
+		if strings.Contains(raw, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func newClaudeStatusErr(statusCode int, body []byte, headers http.Header) statusErr {
