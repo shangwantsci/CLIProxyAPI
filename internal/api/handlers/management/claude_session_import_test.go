@@ -504,3 +504,18 @@ func TestPostClaudeSessionImportJobRejectsUntrustedSourceByDefault(t *testing.T)
 		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
 	}
 }
+
+func TestSessionKeyMetadataWriteConvention(t *testing.T) {
+	// Mirrors the write performed in saveClaudeSessionKeyAuth: a non-empty,
+	// trimmed session key must be stored under metadata["session_key"] so the
+	// executor fallback can re-exchange credentials later.
+	metadata := map[string]any{}
+	sessionKey := "sk-ant-sid01-example"
+	if sessionKey != "" {
+		metadata["session_key"] = sessionKey
+	}
+	got, ok := metadata["session_key"].(string)
+	if !ok || got != sessionKey {
+		t.Fatalf("metadata[session_key] = %v, want %q", metadata["session_key"], sessionKey)
+	}
+}

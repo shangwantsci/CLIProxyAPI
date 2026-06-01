@@ -603,6 +603,14 @@ func (h *Handler) saveClaudeSessionKeyAuth(ctx context.Context, req claudeSessio
 	if importSource := normalizeClaudeImportSource(req.ImportSource); importSource == claudeImportSourceBulkSessionImport {
 		metadata["import_source"] = importSource
 	}
+	// Retain the session key so a credential-level auth failure (e.g. invalid_grant
+	// on refresh) can re-exchange a fresh credential via CookieAuth instead of
+	// permanently disabling the account. Stored alongside the OAuth tokens; existing
+	// log redaction covers it. A banned account (P1) cannot be rescued this way; this
+	// only fixes credential-level failures.
+	if sessionKey != "" {
+		metadata["session_key"] = sessionKey
+	}
 
 	record := &coreauth.Auth{
 		ID:       fileName,
