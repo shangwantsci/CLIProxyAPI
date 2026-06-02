@@ -600,7 +600,9 @@ func (h *Handler) recordClaudeMessagesProbeHTTPFailure(ctx context.Context, auth
 		return
 	}
 	// Transient (429 / 5xx / other non-2xx): mark retryable with a retry window
-	// so the reason resolves to rate_limited (429) or upstream_error/unavailable.
+	// so the reason resolves to rate_limited (429) or unavailable (5xx / other
+	// non-2xx, since Unavailable=true short-circuits before the upstream_error
+	// branch in claudeAuthStatusReason).
 	updated.LastError = &coreauth.Error{
 		Code:       code,
 		Message:    message,
