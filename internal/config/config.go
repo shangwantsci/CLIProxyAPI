@@ -31,6 +31,8 @@ const (
 	DefaultClaudeWeeklyQuotaCoolingRemainingPercent   = 10
 	DefaultClaudeMimicryGuardMode                     = "degrade"
 	DefaultClaudeMimicryGuardEventsLimit              = 500
+
+	defaultClaudeMaxRequestBytes = 30 << 20 // 30 MiB
 )
 
 // Config represents the application's configuration, loaded from a YAML file.
@@ -802,7 +804,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.SanitizeClaudeHeaderDefaults()
 
 	if cfg.ClaudeMaxRequestBytes == 0 {
-		cfg.ClaudeMaxRequestBytes = 30 << 20 // 30 MiB (unset → default; negative means no limit)
+		cfg.ClaudeMaxRequestBytes = defaultClaudeMaxRequestBytes // unset → default; negative means no limit
 	}
 
 	// Sanitize Claude key headers

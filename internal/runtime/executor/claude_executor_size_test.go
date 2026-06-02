@@ -27,6 +27,9 @@ func TestCheckClaudeUpstreamBodySizeAllowsWithinLimit(t *testing.T) {
 	if err := checkClaudeUpstreamBodySize(make([]byte, 50), 100); err != nil {
 		t.Fatalf("expected nil for body within limit, got %v", err)
 	}
+	if err := checkClaudeUpstreamBodySize(make([]byte, 50), 50); err != nil {
+		t.Fatalf("body == limit should be allowed (strict >), got %v", err)
+	}
 }
 
 func TestCheckClaudeUpstreamBodySizeDisabledWhenLimitZeroOrNegative(t *testing.T) {
