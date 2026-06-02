@@ -1,7 +1,9 @@
 package management
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -390,6 +392,60 @@ func (h *Handler) claudeOAuthProbeGET(ctx context.Context, auth *coreauth.Auth, 
 	}()
 
 	body, errRead := io.ReadAll(resp.Body)
+	if errRead != nil {
+		return resp.StatusCode, resp.Header, nil, errRead
+	}
+	return resp.StatusCode, resp.Header, body, nil
+}
+
+// claudeMessagesProbePOST sends one real /v1/messages probe for a setup-token
+// account (which cannot access the OAuth profile/usage endpoints), over the same
+// proxy the account uses for business traffic. Returns the HTTP status, headers,
+// body, and a transport-level error (network/timeout). Status/body interpretation
+// is left to the caller.
+func (h *Handler) claudeMessagesProbePOST(ctx context.Context, auth *coreauth.Auth, token string) (int, http.Header, []byte, error) {
+	return h.claudeMessagesProbePOSTTo(ctx, claudeImportProbeURL, auth, token)
+}
+
+func (h *Handler) claudeMessagesProbePOSTTo(ctx context.Context, endpoint string, auth *coreauth.Auth, token string) (int, http.Header, []byte, error) {
+	reqBody, errMarshal := json.Marshal(map[string]any{
+		"model":      defaultClaudeProbeModel(),
+		"max_tokens": 1,
+		"messages":   []map[string]any{{"role": "user", "content": "."}},
+		"system":     []map[string]any{{"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."}},
+	})
+	if errMarshal != nil {
+		return 0, nil, nil, errMarshal
+	}
+	req, errReq := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(reqBody))
+	if errReq != nil {
+		return 0, nil, nil, errReq
+	}
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
+	req.Header.Set("anthropic-version", "2023-06-01")
+	if h != nil && h.cfg != nil {
+		if ua := strings.TrimSpace(h.cfg.ClaudeHeaderDefaults.UserAgent); ua != "" {
+			req.Header.Set("User-Agent", ua)
+		}
+	}
+
+	client := &http.Client{
+		Timeout:   claudeProbeAccountTimeout,
+		Transport: h.apiCallTransport(auth),
+	}
+	resp, errDo := client.Do(req)
+	if errDo != nil {
+		return 0, nil, nil, errDo
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("response body close error: %v", errClose)
+		}
+	}()
+
+	body, errRead := io.ReadAll(io.LimitReader(resp.Body, claudeImportProbeMaxBody))
 	if errRead != nil {
 		return resp.StatusCode, resp.Header, nil, errRead
 	}
