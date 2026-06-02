@@ -9,11 +9,13 @@ import (
 
 func TestClearClaudeQuotaCooldownStateClearsAccountAndModelQuota(t *testing.T) {
 	future := time.Now().Add(2 * time.Hour)
+	past := time.Now().Add(-2 * time.Hour)
 	auth := &coreauth.Auth{
 		Quota: coreauth.QuotaState{Exceeded: true, Reason: "five_hour remaining 20% <= 20%", NextRecoverAt: future},
 		Metadata: map[string]any{
 			"session_window_start":         "2026-06-02T00:00:00Z",
 			"session_window_end":           "2026-06-02T05:00:00Z",
+			"session_window_status":        "allowed",
 			"session_window_utilization":   0.85,
 			"passive_usage_7d_utilization": 0.5,
 			"passive_usage_7d_reset":       "2026-06-09T00:00:00Z",
@@ -27,6 +29,11 @@ func TestClearClaudeQuotaCooldownStateClearsAccountAndModelQuota(t *testing.T) {
 				Quota:          coreauth.QuotaState{Exceeded: true, NextRecoverAt: future},
 				Unavailable:    true,
 				NextRetryAfter: future,
+			},
+			"claude-opus-4-1": {
+				Quota:          coreauth.QuotaState{Exceeded: true, NextRecoverAt: past},
+				Unavailable:    true,
+				NextRetryAfter: past,
 			},
 		},
 	}
@@ -55,6 +62,14 @@ func TestClearClaudeQuotaCooldownStateClearsAccountAndModelQuota(t *testing.T) {
 	}
 	if !ms.NextRetryAfter.IsZero() {
 		t.Fatalf("per-model future NextRetryAfter should be cleared")
+	}
+
+	msPast := auth.ModelStates["claude-opus-4-1"]
+	if msPast.Quota.Exceeded {
+		t.Fatalf("per-model Quota.Exceeded should be cleared even when NextRetryAfter is in the past")
+	}
+	if !msPast.NextRetryAfter.Equal(past) {
+		t.Fatalf("per-model past NextRetryAfter should be preserved, got %v want %v", msPast.NextRetryAfter, past)
 	}
 }
 
