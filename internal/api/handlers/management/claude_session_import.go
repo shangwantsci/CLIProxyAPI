@@ -435,6 +435,18 @@ func (h *Handler) saveClaudeSessionKeyAuth(ctx context.Context, req claudeSessio
 		metadata["session_key"] = sessionKey
 	}
 
+	// Liveness probe before persisting: a cookie can complete OAuth yet still be
+	// rejected on the first real request (e.g. organization disabled). Send two
+	// minimal /v1/messages probes over the SAME proxy this account will use, and
+	// refuse to persist if either probe returns a permanent account error.
+	probe := h.probeClaudeImportLiveness
+	if h.importLivenessProbe != nil {
+		probe = h.importLivenessProbe
+	}
+	if probeErr := probe(ctx, proxyURL, tokenStorage.AccessToken, defaultClaudeProbeModel()); probeErr != nil {
+		return claudeSessionImportAuthResult{}, probeErr
+	}
+
 	record := &coreauth.Auth{
 		ID:       fileName,
 		Provider: "claude",

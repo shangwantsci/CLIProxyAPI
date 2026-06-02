@@ -56,6 +56,7 @@ type Handler struct {
 	claudeProbeJobs     map[string]*claudeProbeJob
 
 	sessionImportAuthenticate        func(context.Context, claudeSessionImportAuthRequest) (claudeSessionImportAuthResult, error)
+	importLivenessProbe              func(ctx context.Context, proxyURL, token, model string) error
 	sessionImportAllowPrivateSources bool
 }
 
