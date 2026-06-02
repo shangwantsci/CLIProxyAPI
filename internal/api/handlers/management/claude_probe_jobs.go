@@ -563,6 +563,64 @@ func (h *Handler) recordClaudeOAuthProbeHTTPFallback(ctx context.Context, auth *
 	_, _ = h.authManager.Update(ctx, updated)
 }
 
+// recordClaudeMessagesProbeHTTPFailure records a non-2xx /v1/messages probe
+// result onto the auth so finalizeClaudeProbeResult/claudeAuthStatusReason can
+// classify it. Unlike recordClaudeOAuthProbeHTTPFallback (which skips permanent
+// errors assuming they are handled elsewhere), the setup-token liveness probe is
+// the authoritative check, so a permanent account error (organization disabled,
+// banned) MUST be persisted here, otherwise the account would be misread as
+// healthy.
+func (h *Handler) recordClaudeMessagesProbeHTTPFailure(ctx context.Context, auth *coreauth.Auth, statusCode int, body []byte) {
+	if h == nil || h.authManager == nil || auth == nil {
+		return
+	}
+	code, message := claudeOAuthProbeError(statusCode, body)
+	// Preserve the existing scope-requirement false-positive exemption: a
+	// setup-token scope limitation is not an account problem.
+	if isClaudeSetupTokenScopeRequirementError(auth, statusCode, code, message, body) {
+		return
+	}
+	now := time.Now()
+	updated := auth.Clone()
+	if permCode, permMessage, ok := normalizeClaudePermanentAccountError(code, message); ok {
+		// Permanent: disable the account so the reason resolves to a permanent
+		// route state and the UI flags cleanup.
+		updated.LastError = &coreauth.Error{
+			Code:       permCode,
+			Message:    permMessage,
+			Retryable:  false,
+			HTTPStatus: statusCode,
+		}
+		updated.StatusMessage = permMessage
+		updated.Unavailable = true
+		updated.Disabled = true
+		updated.Status = coreauth.StatusDisabled
+		updated.UpdatedAt = now
+		_, _ = h.authManager.Update(ctx, updated)
+		return
+	}
+	// Transient (429 / 5xx / other non-2xx): mark retryable with a retry window
+	// so the reason resolves to rate_limited (429) or upstream_error/unavailable.
+	updated.LastError = &coreauth.Error{
+		Code:       code,
+		Message:    message,
+		Retryable:  statusCode == http.StatusTooManyRequests || statusCode >= 500,
+		HTTPStatus: statusCode,
+	}
+	updated.StatusMessage = message
+	updated.Unavailable = true
+	updated.UpdatedAt = now
+	if !updated.Disabled && updated.Status != coreauth.StatusDisabled {
+		updated.Status = coreauth.StatusError
+		if statusCode == http.StatusTooManyRequests {
+			updated.NextRetryAfter = claudeOAuthRetryAfter(http.Header{}, now)
+		} else {
+			updated.NextRetryAfter = now.Add(30 * time.Minute)
+		}
+	}
+	_, _ = h.authManager.Update(ctx, updated)
+}
+
 func isClaudeProbeAuthExpiredError(message string) bool {
 	raw := strings.ToLower(strings.TrimSpace(message))
 	if raw == "" {
