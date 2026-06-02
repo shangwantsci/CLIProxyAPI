@@ -2370,6 +2370,46 @@ func clearClaudeUnauthorizedModelStates(auth *coreauth.Auth) {
 	}
 }
 
+// clearClaudeQuotaCooldownState clears passive-quota cooldown so a manual reauth
+// (an explicit "bring this account back now" intent) does not leave the account
+// stuck behind a quota cooldown. Mirrors the auth package's
+// clearClaudeQuotaAndPassiveUsage account-level field set, and additionally lifts
+// per-model quota holds (clearClaudeUnauthorizedModelStates only removes
+// unauthorized model states, not quota_exhausted ones). Credential fields
+// (tokens, session_key) are intentionally preserved.
+func clearClaudeQuotaCooldownState(auth *coreauth.Auth) {
+	if auth == nil {
+		return
+	}
+	auth.Quota = coreauth.QuotaState{}
+	now := time.Now()
+	for _, state := range auth.ModelStates {
+		if state == nil {
+			continue
+		}
+		state.Quota = coreauth.QuotaState{}
+		if state.NextRetryAfter.After(now) {
+			state.NextRetryAfter = time.Time{}
+		}
+	}
+	if auth.Metadata == nil {
+		return
+	}
+	for _, key := range []string{
+		"session_window_start",
+		"session_window_end",
+		"session_window_status",
+		"session_window_utilization",
+		"passive_usage_7d_utilization",
+		"passive_usage_7d_reset",
+		"passive_usage_sampled_at",
+		"unified_status",
+		"unified_representative_claim",
+	} {
+		delete(auth.Metadata, key)
+	}
+}
+
 func isClaudeUnauthorizedAuthError(err *coreauth.Error) bool {
 	if err == nil {
 		return false
