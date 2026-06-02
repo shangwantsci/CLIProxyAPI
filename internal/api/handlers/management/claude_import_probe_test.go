@@ -90,6 +90,28 @@ func TestDualProbeAnyPermanentRejects(t *testing.T) {
 	}
 }
 
+// TestDualProbeFirstPermanentRejectsImmediately verifies that probeClaudeImportLivenessTo
+// short-circuits: a permanent error on the first probe rejects immediately without
+// issuing the second request.
+func TestDualProbeFirstPermanentRejectsImmediately(t *testing.T) {
+	var n int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&n, 1)
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":{"type":"forbidden","message":"This organization has been disabled."}}`))
+	}))
+	defer srv.Close()
+
+	h := newProbeTestHandler()
+	err := h.probeClaudeImportLivenessTo(context.Background(), srv.URL, "", "tok", "claude-sonnet-4-5")
+	if err == nil {
+		t.Fatal("expected rejection when first probe is permanent error")
+	}
+	if got := atomic.LoadInt32(&n); got != 1 {
+		t.Fatalf("expected short-circuit after first probe (1 request), got %d requests", got)
+	}
+}
+
 // TestProcessKeyPermanentErrorIsRejected verifies that processClaudeSessionImportKey
 // maps a *claudeImportPermanentError from the authenticate seam to Status="rejected"
 // and Reason=permErr.Code.
@@ -108,14 +130,15 @@ func TestProcessKeyPermanentErrorIsRejected(t *testing.T) {
 }
 
 // TestProcessKeyTransientErrorIsFailed verifies that a transient (non-permanent)
-// error from the authenticate seam results in Status != "rejected".
+// error from the authenticate seam results in Status == "failed" — not rejected,
+// and not silently promoted to imported.
 func TestProcessKeyTransientErrorIsFailed(t *testing.T) {
 	h := newProbeTestHandler()
 	h.sessionImportAuthenticate = func(ctx context.Context, req claudeSessionImportAuthRequest) (claudeSessionImportAuthResult, error) {
 		return claudeSessionImportAuthResult{}, context.DeadlineExceeded
 	}
 	res := h.processClaudeSessionImportKey(context.Background(), "sk-test", normalizedClaudeSessionImportRequest{})
-	if res.Status == "rejected" {
-		t.Fatal("transient error must not be rejected")
+	if res.Status != "failed" {
+		t.Fatalf("status = %q, want failed", res.Status)
 	}
 }
