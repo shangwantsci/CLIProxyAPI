@@ -232,7 +232,7 @@ func TestClaudeProbeJobDetectsUsageOAuthNotAllowedForOrganization(t *testing.T) 
 	}
 }
 
-func TestClaudeProbeJobTreatsSetupTokenScopeRequirementAsHealthy(t *testing.T) {
+func TestClaudeProbeJobTreatsSetupTokenMessagesProbe200AsHealthy(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)
 

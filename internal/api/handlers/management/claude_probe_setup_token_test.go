@@ -138,3 +138,37 @@ func TestRunClaudeProbeForSetupTokenPermanentOn403(t *testing.T) {
 		t.Fatalf("expected permanent_disabled, got %q", res.Status)
 	}
 }
+
+func TestRecordClaudeMessagesProbeHTTPFailureExemptsSetupTokenScope403(t *testing.T) {
+	auth := &coreauth.Auth{
+		ID: "scope1", Provider: "claude", Status: coreauth.StatusActive,
+		Metadata: map[string]any{"auth_source": "claude_setup_token", "access_token": "tok"},
+	}
+	h := newMessagesProbeTestHandler(t, auth)
+	body := []byte(`{"error":{"message":"This credential does not meet scope requirement: any_of(user:profile, user:office)"}}`)
+
+	h.recordClaudeMessagesProbeHTTPFailure(context.Background(), auth, http.StatusForbidden, body)
+
+	updated, ok := h.authManager.GetByID("scope1")
+	if !ok {
+		t.Fatalf("auth missing after update")
+	}
+	if updated.Disabled {
+		t.Fatalf("setup-token scope 403 should be exempt, but account was disabled")
+	}
+	if updated.Status == coreauth.StatusDisabled {
+		t.Fatalf("setup-token scope 403 should be exempt, but status = %s", updated.Status)
+	}
+	// Exemption means the probe failure does not worsen the account state at all:
+	// it stays Active/available with no recorded error. (A non-exempt 403 would set
+	// Unavailable=true, Status=StatusError, and a LastError.)
+	if updated.Status != coreauth.StatusActive {
+		t.Fatalf("setup-token scope 403 should be exempt, but status = %s, want active", updated.Status)
+	}
+	if updated.Unavailable {
+		t.Fatalf("setup-token scope 403 should be exempt, but account marked unavailable")
+	}
+	if updated.LastError != nil {
+		t.Fatalf("setup-token scope 403 should be exempt, but LastError = %#v", updated.LastError)
+	}
+}
