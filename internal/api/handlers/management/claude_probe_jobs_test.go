@@ -236,20 +236,19 @@ func TestClaudeProbeJobTreatsSetupTokenScopeRequirementAsHealthy(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)
 
+	// setup-token accounts use /v1/messages for the probe (not profile/usage).
+	// Serve a successful messages response so the probe succeeds.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusForbidden)
-		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"permission_error","message":"OAuth token does not meet scope requirement any_of(user:profile, user:office)"}}`))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message"}`))
 	}))
 	defer upstream.Close()
 
-	originalProfileURL := claudeOAuthProfileURL
-	originalUsageURL := claudeOAuthUsageURL
-	claudeOAuthProfileURL = upstream.URL + "/api/oauth/profile"
-	claudeOAuthUsageURL = upstream.URL + "/api/oauth/usage"
+	originalImportURL := claudeImportProbeURL
+	claudeImportProbeURL = upstream.URL
 	t.Cleanup(func() {
-		claudeOAuthProfileURL = originalProfileURL
-		claudeOAuthUsageURL = originalUsageURL
+		claudeImportProbeURL = originalImportURL
 	})
 
 	manager := coreauth.NewManager(&memoryAuthStore{}, nil, nil)

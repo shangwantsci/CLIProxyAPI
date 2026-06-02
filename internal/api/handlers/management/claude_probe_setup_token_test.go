@@ -96,3 +96,45 @@ func TestRecordClaudeMessagesProbeHTTPFailureServerErrorSetsUnavailable(t *testi
 		t.Fatalf("expected retryable LastError for 5xx")
 	}
 }
+
+func TestRunClaudeProbeForSetupTokenHealthyOn200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"msg_1"}`))
+	}))
+	defer srv.Close()
+	origURL := claudeImportProbeURL
+	claudeImportProbeURL = srv.URL
+	defer func() { claudeImportProbeURL = origURL }()
+
+	auth := &coreauth.Auth{
+		ID: "st1", Provider: "claude", Status: coreauth.StatusActive,
+		Metadata: map[string]any{"auth_source": "claude_setup_token", "access_token": "tok"},
+	}
+	h := newMessagesProbeTestHandler(t, auth)
+	res := h.runClaudeProbeForAuth(context.Background(), auth)
+	if res.Status != "ok" {
+		t.Fatalf("expected ok, got %q (msg=%s)", res.Status, res.Message)
+	}
+}
+
+func TestRunClaudeProbeForSetupTokenPermanentOn403(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":{"message":"This organization has been disabled."}}`))
+	}))
+	defer srv.Close()
+	origURL := claudeImportProbeURL
+	claudeImportProbeURL = srv.URL
+	defer func() { claudeImportProbeURL = origURL }()
+
+	auth := &coreauth.Auth{
+		ID: "st2", Provider: "claude", Status: coreauth.StatusActive,
+		Metadata: map[string]any{"auth_source": "claude_setup_token", "access_token": "tok"},
+	}
+	h := newMessagesProbeTestHandler(t, auth)
+	res := h.runClaudeProbeForAuth(context.Background(), auth)
+	if res.Status != "permanent_disabled" {
+		t.Fatalf("expected permanent_disabled, got %q", res.Status)
+	}
+}

@@ -308,6 +308,19 @@ func (h *Handler) runClaudeProbeForAuth(parent context.Context, auth *coreauth.A
 		return h.finalizeClaudeProbeResult(auth, result)
 	}
 	if isClaudeSetupTokenAuth(auth) {
+		// setup-token accounts only hold user:inference scope and cannot access the
+		// OAuth profile/usage probe endpoints (403). Validate real connectivity with
+		// a single /v1/messages probe over the same proxy used for business traffic.
+		probeStatus, _, probeBody, errProbe := h.claudeMessagesProbePOST(ctx, auth, token)
+		if errProbe != nil {
+			result.Message = errProbe.Error()
+			h.recordClaudeOAuthTransientProbeError(context.Background(), auth, "messages_probe_failed", errProbe)
+			return h.finalizeClaudeProbeResult(auth, result)
+		}
+		if probeStatus < http.StatusOK || probeStatus >= http.StatusMultipleChoices {
+			h.recordClaudeMessagesProbeHTTPFailure(context.Background(), auth, probeStatus, probeBody)
+			return h.finalizeClaudeProbeResult(auth, result)
+		}
 		if updated, ok := h.authManager.GetByID(auth.ID); ok && !isClaudeOAuthQuotaCooldown(updated) {
 			h.markClaudeProbeHealthy(context.Background(), updated)
 		}

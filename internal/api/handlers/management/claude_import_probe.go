@@ -15,8 +15,9 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+var claudeImportProbeURL = "https://api.anthropic.com/v1/messages?beta=true"
+
 const (
-	claudeImportProbeURL           = "https://api.anthropic.com/v1/messages?beta=true"
 	claudeImportProbeFallbackModel = "claude-sonnet-4-5"
 	claudeImportProbeGap           = 700 * time.Millisecond
 	claudeImportProbeMaxBody       = 1 << 20
