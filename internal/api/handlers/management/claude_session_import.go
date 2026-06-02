@@ -35,7 +35,6 @@ type claudeSessionImportStartRequest struct {
 	Prefix         string   `json:"prefix"`
 	Note           string   `json:"note"`
 	Concurrency    int      `json:"concurrency"`
-	TimeoutSeconds int      `json:"timeout_seconds"`
 	DelayMinMS     int      `json:"delay_min_ms"`
 	DelayMaxMS     int      `json:"delay_max_ms"`
 }
@@ -49,7 +48,6 @@ type normalizedClaudeSessionImportRequest struct {
 	Prefix               string
 	Note                 string
 	Concurrency          int
-	Timeout              time.Duration
 	DelayMin             time.Duration
 	DelayMax             time.Duration
 }
@@ -226,13 +224,6 @@ func (h *Handler) normalizeClaudeSessionImportRequest(req claudeSessionImportSta
 	if concurrency > maxClaudeSessionImportConcurrency {
 		concurrency = maxClaudeSessionImportConcurrency
 	}
-	timeoutSeconds := req.TimeoutSeconds
-	if timeoutSeconds <= 0 {
-		timeoutSeconds = 30
-	}
-	if timeoutSeconds > 120 {
-		timeoutSeconds = 120
-	}
 	delayMin := time.Duration(req.DelayMinMS) * time.Millisecond
 	delayMax := time.Duration(req.DelayMaxMS) * time.Millisecond
 	if delayMin < 0 {
@@ -246,8 +237,8 @@ func (h *Handler) normalizeClaudeSessionImportRequest(req claudeSessionImportSta
 	}
 
 	sessionKeys, sessionKeyDuplicates := normalizeClaudeSessionImportKeys(req.SessionKeys)
-	if len(req.SessionKeys) > 0 && len(sessionKeys) == 0 {
-		return normalizedClaudeSessionImportRequest{}, fmt.Errorf("session_keys must contain at least one session key")
+	if len(sessionKeys) == 0 {
+		return normalizedClaudeSessionImportRequest{}, fmt.Errorf("session_keys is required")
 	}
 
 	return normalizedClaudeSessionImportRequest{
@@ -257,7 +248,6 @@ func (h *Handler) normalizeClaudeSessionImportRequest(req claudeSessionImportSta
 		Prefix:               strings.TrimSpace(req.Prefix),
 		Note:                 strings.TrimSpace(req.Note),
 		Concurrency:          concurrency,
-		Timeout:              time.Duration(timeoutSeconds) * time.Second,
 		DelayMin:             delayMin,
 		DelayMax:             delayMax,
 	}, nil
