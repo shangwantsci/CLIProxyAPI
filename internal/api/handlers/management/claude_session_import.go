@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -92,6 +93,8 @@ type claudeSessionImportJobSnapshot struct {
 	TotalProcessed   int                         `json:"total_processed"`
 	Imported         int                         `json:"imported"`
 	Failed           int                         `json:"failed"`
+	Rejected         int                         `json:"rejected"`
+	RejectedReasons  map[string]int              `json:"rejected_reasons,omitempty"`
 	Duplicate        int                         `json:"duplicate"`
 	Error            string                      `json:"error,omitempty"`
 	FailureReasons   map[string]int              `json:"failure_reasons,omitempty"`
@@ -137,6 +140,7 @@ func (h *Handler) PostClaudeSessionImportJob(c *gin.Context) {
 			StartedAt:        now,
 			UpdatedAt:        now,
 			FailureReasons:   map[string]int{},
+			RejectedReasons:  map[string]int{},
 		},
 	}
 
@@ -201,6 +205,12 @@ func (j *claudeSessionImportJob) snapshot() claudeSessionImportJobSnapshot {
 		out.FailureReasons = make(map[string]int, len(j.data.FailureReasons))
 		for key, value := range j.data.FailureReasons {
 			out.FailureReasons[key] = value
+		}
+	}
+	if j.data.RejectedReasons != nil {
+		out.RejectedReasons = make(map[string]int, len(j.data.RejectedReasons))
+		for key, value := range j.data.RejectedReasons {
+			out.RejectedReasons[key] = value
 		}
 	}
 	if j.data.Results != nil {
@@ -282,9 +292,20 @@ func (h *Handler) runClaudeSessionImportJob(ctx context.Context, job *claudeSess
 				result := h.processClaudeSessionImportKey(ctx, key, req)
 				job.update(func(snapshot *claudeSessionImportJobSnapshot) {
 					snapshot.TotalProcessed++
-					if result.Status == "imported" {
+					switch result.Status {
+					case "imported":
 						snapshot.Imported++
-					} else {
+					case "rejected":
+						snapshot.Rejected++
+						if snapshot.RejectedReasons == nil {
+							snapshot.RejectedReasons = map[string]int{}
+						}
+						reason := result.Reason
+						if reason == "" {
+							reason = "unknown"
+						}
+						snapshot.RejectedReasons[reason]++
+					default:
 						snapshot.Failed++
 						if snapshot.FailureReasons == nil {
 							snapshot.FailureReasons = map[string]int{}
@@ -368,6 +389,12 @@ func (h *Handler) processClaudeSessionImportKey(ctx context.Context, sessionKey 
 		ImportSource: req.ImportSource,
 	})
 	if err != nil {
+		var permErr *claudeImportPermanentError
+		if errors.As(err, &permErr) {
+			result.Status = "rejected"
+			result.Reason = permErr.Code
+			return result
+		}
 		result.Reason = classifyClaudeSessionImportError(err)
 		return result
 	}
