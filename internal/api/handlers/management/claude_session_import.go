@@ -552,13 +552,6 @@ func redactedClaudeSessionImportProxy(req normalizedClaudeSessionImportRequest) 
 	return ""
 }
 
-func sanitizeClaudeSessionImportError(_ normalizedClaudeSessionImportRequest, err error) string {
-	if err == nil {
-		return ""
-	}
-	return err.Error()
-}
-
 func shortSessionKeyHash(sessionKey string) string {
 	sum := sha256.Sum256([]byte(sessionKey))
 	return hex.EncodeToString(sum[:])[:12]
