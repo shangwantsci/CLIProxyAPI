@@ -6,12 +6,8 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -24,11 +20,8 @@ import (
 )
 
 const (
-	defaultClaudeSessionImportSourceURL = "https://sessionkeytest.globalpays.shop/accounts"
-	defaultClaudeSessionImportAPIPath   = "/api/accounts"
-	maxClaudeSessionImportConcurrency   = 20
-	maxClaudeSessionImportResults       = 500
-	maxClaudeSessionImportBodyBytes     = 10 << 20
+	maxClaudeSessionImportConcurrency = 20
+	maxClaudeSessionImportResults     = 500
 
 	claudeSessionImportStatusRunning   = "running"
 	claudeSessionImportStatusCompleted = "completed"
@@ -37,8 +30,6 @@ const (
 )
 
 type claudeSessionImportStartRequest struct {
-	SourceURL      string   `json:"source_url"`
-	APIPath        string   `json:"api_path"`
 	SessionKeys    []string `json:"session_keys"`
 	ProxyURL       string   `json:"proxy_url"`
 	Prefix         string   `json:"prefix"`
@@ -50,10 +41,6 @@ type claudeSessionImportStartRequest struct {
 }
 
 type normalizedClaudeSessionImportRequest struct {
-	SourceURL            string
-	APIEndpoint          string
-	DisplaySourceURL     string
-	DisplayAPIEndpoint   string
 	SessionKeys          []string
 	SessionKeyDuplicates int
 	ProxyURL             string
@@ -98,15 +85,12 @@ type claudeSessionImportResult struct {
 type claudeSessionImportJobSnapshot struct {
 	ID               string                      `json:"id"`
 	Status           string                      `json:"status"`
-	SourceURL        string                      `json:"source_url"`
-	APIEndpoint      string                      `json:"api_endpoint"`
 	ProxyURL         string                      `json:"-"`
 	RedactedProxyURL string                      `json:"redacted_proxy_url,omitempty"`
 	Concurrency      int                         `json:"concurrency"`
 	StartedAt        time.Time                   `json:"started_at"`
 	UpdatedAt        time.Time                   `json:"updated_at"`
 	FinishedAt       *time.Time                  `json:"finished_at,omitempty"`
-	TotalFetched     int                         `json:"total_fetched"`
 	TotalProcessed   int                         `json:"total_processed"`
 	Imported         int                         `json:"imported"`
 	Failed           int                         `json:"failed"`
@@ -149,8 +133,6 @@ func (h *Handler) PostClaudeSessionImportJob(c *gin.Context) {
 		data: claudeSessionImportJobSnapshot{
 			ID:               fmt.Sprintf("claude-session-import-%d", now.UnixNano()),
 			Status:           claudeSessionImportStatusRunning,
-			SourceURL:        normalized.DisplaySourceURL,
-			APIEndpoint:      normalized.DisplayAPIEndpoint,
 			ProxyURL:         normalized.ProxyURL,
 			RedactedProxyURL: redactedClaudeSessionImportProxy(normalized),
 			Concurrency:      normalized.Concurrency,
@@ -264,67 +246,14 @@ func (h *Handler) normalizeClaudeSessionImportRequest(req claudeSessionImportSta
 	}
 
 	sessionKeys, sessionKeyDuplicates := normalizeClaudeSessionImportKeys(req.SessionKeys)
-	isManualSessionKeyImport := len(req.SessionKeys) > 0
-	if isManualSessionKeyImport && len(sessionKeys) == 0 {
+	if len(req.SessionKeys) > 0 && len(sessionKeys) == 0 {
 		return normalizedClaudeSessionImportRequest{}, fmt.Errorf("session_keys must contain at least one session key")
 	}
 
-	sourceURL := ""
-	apiEndpoint := ""
-	displaySourceURL := ""
-	displayAPIEndpoint := ""
-	importSource := ""
-	if !isManualSessionKeyImport {
-		sourceURL = strings.TrimSpace(req.SourceURL)
-		if sourceURL == "" {
-			sourceURL = defaultClaudeSessionImportSourceURL
-		}
-		source, err := url.Parse(sourceURL)
-		if err != nil || source.Scheme == "" || source.Host == "" {
-			return normalizedClaudeSessionImportRequest{}, fmt.Errorf("invalid source_url")
-		}
-		if err := h.validateClaudeSessionImportURL(source); err != nil {
-			return normalizedClaudeSessionImportRequest{}, err
-		}
-
-		apiPath := strings.TrimSpace(req.APIPath)
-		if apiPath == "" {
-			apiPath = defaultClaudeSessionImportAPIPath
-		}
-		apiRef, err := url.Parse(apiPath)
-		if err != nil || apiRef.IsAbs() || !strings.HasPrefix(apiRef.Path, "/") {
-			return normalizedClaudeSessionImportRequest{}, fmt.Errorf("api_path must be an absolute path on the source host")
-		}
-		endpoint := *source
-		endpoint.Path = apiRef.Path
-		endpoint.RawQuery = apiRef.RawQuery
-		endpoint.Fragment = ""
-		if endpoint.Host != source.Host {
-			return normalizedClaudeSessionImportRequest{}, fmt.Errorf("api_path must stay on the source host")
-		}
-		if err := h.validateClaudeSessionImportURL(&endpoint); err != nil {
-			return normalizedClaudeSessionImportRequest{}, err
-		}
-		sourceURL = source.String()
-		apiEndpoint = endpoint.String()
-		displaySourceURL = source.String()
-		displayAPIEndpoint = endpoint.String()
-		if shouldHideClaudeSessionImportSource(source.Hostname()) {
-			displaySourceURL = ""
-			displayAPIEndpoint = ""
-		}
-		importSource = claudeImportSourceBulkSessionImport
-	}
-
 	return normalizedClaudeSessionImportRequest{
-		SourceURL:            sourceURL,
-		APIEndpoint:          apiEndpoint,
-		DisplaySourceURL:     displaySourceURL,
-		DisplayAPIEndpoint:   displayAPIEndpoint,
 		SessionKeys:          sessionKeys,
 		SessionKeyDuplicates: sessionKeyDuplicates,
 		ProxyURL:             strings.TrimSpace(req.ProxyURL),
-		ImportSource:         importSource,
 		Prefix:               strings.TrimSpace(req.Prefix),
 		Note:                 strings.TrimSpace(req.Note),
 		Concurrency:          concurrency,
@@ -334,39 +263,18 @@ func (h *Handler) normalizeClaudeSessionImportRequest(req claudeSessionImportSta
 	}, nil
 }
 
-func (h *Handler) validateClaudeSessionImportURL(parsed *url.URL) error {
-	if parsed == nil || parsed.Host == "" {
-		return fmt.Errorf("invalid source_url")
-	}
-	host := strings.ToLower(parsed.Hostname())
-	if host == "sessionkeytest.globalpays.shop" {
-		if parsed.Scheme != "https" {
-			return fmt.Errorf("source_url for sessionkeytest.globalpays.shop must use https")
-		}
-		return nil
-	}
-	if h != nil && h.sessionImportAllowPrivateSources {
-		return nil
-	}
-	if isPrivateOrLocalHost(host) {
-		return fmt.Errorf("source_url host is not allowed")
-	}
-	return fmt.Errorf("source_url host is not allowed")
-}
-
 func (h *Handler) runClaudeSessionImportJob(ctx context.Context, job *claudeSessionImportJob, req normalizedClaudeSessionImportRequest) {
 	keys, duplicates, err := h.sessionKeysForClaudeSessionImport(ctx, req)
 	if err != nil {
 		finished := time.Now().UTC()
 		job.update(func(snapshot *claudeSessionImportJobSnapshot) {
 			snapshot.Status = claudeSessionImportStatusFailed
-			snapshot.Error = sanitizeClaudeSessionImportError(req, err)
+			snapshot.Error = err.Error()
 			snapshot.FinishedAt = &finished
 		})
 		return
 	}
 	job.update(func(snapshot *claudeSessionImportJobSnapshot) {
-		snapshot.TotalFetched = len(keys)
 		snapshot.Duplicate = duplicates
 	})
 
@@ -427,86 +335,11 @@ sendLoop:
 	})
 }
 
-func (h *Handler) sessionKeysForClaudeSessionImport(ctx context.Context, req normalizedClaudeSessionImportRequest) ([]string, int, error) {
+func (h *Handler) sessionKeysForClaudeSessionImport(_ context.Context, req normalizedClaudeSessionImportRequest) ([]string, int, error) {
 	if len(req.SessionKeys) > 0 {
 		return append([]string(nil), req.SessionKeys...), req.SessionKeyDuplicates, nil
 	}
-	return h.fetchClaudeSessionKeys(ctx, req)
-}
-
-func (h *Handler) fetchClaudeSessionKeys(ctx context.Context, req normalizedClaudeSessionImportRequest) ([]string, int, error) {
-	sourceProxyURL := strings.TrimSpace(req.ProxyURL)
-	if sourceProxyURL == "" {
-		sourceProxyURL = randomClaudeSessionImportProxy(req.ProxyCandidates)
-	}
-
-	client := &http.Client{
-		Timeout: req.Timeout,
-		CheckRedirect: func(next *http.Request, via []*http.Request) error {
-			if len(via) >= 5 {
-				return fmt.Errorf("too many redirects")
-			}
-			return h.validateClaudeSessionImportURL(next.URL)
-		},
-	}
-	if sourceProxyURL != "" {
-		transport, _, errTransport := proxyutil.BuildHTTPTransport(sourceProxyURL)
-		if errTransport != nil {
-			return nil, 0, fmt.Errorf("configure source fetch proxy: %w", errTransport)
-		}
-		if transport != nil {
-			client.Transport = transport
-		}
-	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, req.APIEndpoint, nil)
-	if err != nil {
-		return nil, 0, fmt.Errorf("create source request: %w", err)
-	}
-	httpReq.Header.Set("Accept", "application/json")
-	httpReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return nil, 0, fmt.Errorf("fetch source accounts: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, 0, fmt.Errorf("source accounts returned status %d", resp.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxClaudeSessionImportBodyBytes+1))
-	if err != nil {
-		return nil, 0, fmt.Errorf("read source accounts: %w", err)
-	}
-	if len(body) > maxClaudeSessionImportBodyBytes {
-		return nil, 0, fmt.Errorf("source accounts response is too large")
-	}
-
-	var rows []map[string]any
-	if err := json.Unmarshal(body, &rows); err != nil {
-		return nil, 0, fmt.Errorf("parse source accounts JSON: %w", err)
-	}
-	seen := make(map[string]struct{}, len(rows))
-	keys := make([]string, 0, len(rows))
-	duplicates := 0
-	for _, row := range rows {
-		key := strings.TrimSpace(stringField(row, "session_key"))
-		if key == "" {
-			key = strings.TrimSpace(stringField(row, "sessionKey"))
-		}
-		if key == "" {
-			continue
-		}
-		if _, ok := seen[key]; ok {
-			duplicates++
-			continue
-		}
-		seen[key] = struct{}{}
-		keys = append(keys, key)
-	}
-	if len(keys) == 0 {
-		return nil, duplicates, fmt.Errorf("source accounts did not contain session keys")
-	}
-	return keys, duplicates, nil
+	return nil, 0, fmt.Errorf("session_keys is required")
 }
 
 func normalizeClaudeSessionImportKeys(input []string) ([]string, int) {
@@ -709,10 +542,6 @@ func (h *Handler) enabledClaudeSessionImportProxyURLs(ctx context.Context) ([]st
 	return candidates, nil
 }
 
-func shouldHideClaudeSessionImportSource(host string) bool {
-	return strings.EqualFold(strings.TrimSpace(host), "sessionkeytest.globalpays.shop")
-}
-
 func redactedClaudeSessionImportProxy(req normalizedClaudeSessionImportRequest) string {
 	if strings.TrimSpace(req.ProxyURL) != "" {
 		return proxyutil.Redact(req.ProxyURL)
@@ -723,25 +552,11 @@ func redactedClaudeSessionImportProxy(req normalizedClaudeSessionImportRequest) 
 	return ""
 }
 
-func sanitizeClaudeSessionImportError(req normalizedClaudeSessionImportRequest, err error) string {
+func sanitizeClaudeSessionImportError(_ normalizedClaudeSessionImportRequest, err error) string {
 	if err == nil {
 		return ""
 	}
-	message := err.Error()
-	if req.DisplaySourceURL != "" || req.DisplayAPIEndpoint != "" {
-		return message
-	}
-	replacements := []string{
-		strings.TrimSpace(req.APIEndpoint),
-		strings.TrimSpace(req.SourceURL),
-	}
-	for _, replacement := range replacements {
-		if replacement == "" {
-			continue
-		}
-		message = strings.ReplaceAll(message, replacement, "默认抓取来源")
-	}
-	return message
+	return err.Error()
 }
 
 func shortSessionKeyHash(sessionKey string) string {
@@ -772,25 +587,4 @@ func classifyClaudeSessionImportError(err error) string {
 	default:
 		return "error"
 	}
-}
-
-func stringField(values map[string]any, key string) string {
-	if values == nil {
-		return ""
-	}
-	if raw, ok := values[key].(string); ok {
-		return raw
-	}
-	return ""
-}
-
-func isPrivateOrLocalHost(host string) bool {
-	host = strings.ToLower(strings.TrimSpace(host))
-	if host == "localhost" {
-		return true
-	}
-	if parsed := net.ParseIP(host); parsed != nil {
-		return parsed.IsLoopback() || parsed.IsPrivate() || parsed.IsLinkLocalUnicast() || parsed.IsLinkLocalMulticast()
-	}
-	return false
 }
