@@ -3,6 +3,7 @@ package management
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,6 +20,8 @@ const (
 	claudeImportProbeFallbackModel = "claude-sonnet-4-5"
 	claudeImportProbeGap           = 700 * time.Millisecond
 	claudeImportProbeMaxBody       = 1 << 20
+	claudeImportProbeAttempts      = 2
+	claudeImportProbeTimeout       = 20 * time.Second
 )
 
 // claudeImportPermanentError marks an import liveness probe that hit a permanent
@@ -60,15 +63,17 @@ func (h *Handler) probeClaudeImportLiveness(ctx context.Context, proxyURL, token
 }
 
 func (h *Handler) probeClaudeImportLivenessTo(ctx context.Context, endpoint, proxyURL, token, model string) error {
-	for i := 0; i < 2; i++ {
+	probeCtx, cancel := context.WithTimeout(ctx, claudeImportProbeTimeout)
+	defer cancel()
+	for i := 0; i < claudeImportProbeAttempts; i++ {
 		if i > 0 {
 			select {
-			case <-ctx.Done():
+			case <-probeCtx.Done():
 				return nil // transient: do not reject on cancellation
 			case <-time.After(claudeImportProbeGap):
 			}
 		}
-		if permErr := h.singleClaudeImportProbeTo(ctx, endpoint, proxyURL, token, model); permErr != nil {
+		if permErr := h.singleClaudeImportProbeTo(probeCtx, endpoint, proxyURL, token, model); permErr != nil {
 			return permErr
 		}
 	}
@@ -76,8 +81,16 @@ func (h *Handler) probeClaudeImportLivenessTo(ctx context.Context, endpoint, pro
 }
 
 func (h *Handler) singleClaudeImportProbeTo(ctx context.Context, endpoint, proxyURL, token, model string) error {
-	payload := fmt.Sprintf(`{"model":%q,"max_tokens":1,"messages":[{"role":"user","content":"."}],"system":[{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."}]}`, model)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader([]byte(payload)))
+	reqBody, errMarshal := json.Marshal(map[string]any{
+		"model":      model,
+		"max_tokens": 1,
+		"messages":   []map[string]any{{"role": "user", "content": "."}},
+		"system":     []map[string]any{{"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."}},
+	})
+	if errMarshal != nil {
+		return nil // transient: cannot build probe payload, do not reject
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(reqBody))
 	if err != nil {
 		return nil // transient
 	}
