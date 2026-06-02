@@ -139,6 +139,12 @@ type Config struct {
 	// These are used as fallbacks when the client does not send its own headers.
 	ClaudeHeaderDefaults ClaudeHeaderDefaults `yaml:"claude-header-defaults" json:"claude-header-defaults"`
 
+	// ClaudeMaxRequestBytes caps the size (in bytes) of the request body sent to
+	// the Claude upstream. Requests exceeding this are rejected locally with HTTP
+	// 413 instead of being forwarded (which would return upstream 413 and pollute
+	// account behavior profiles). A value <= 0 disables the check. Default 30 MiB.
+	ClaudeMaxRequestBytes int `yaml:"claude-max-request-bytes" json:"claude-max-request-bytes"`
+
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 
@@ -794,6 +800,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Sanitize Claude header defaults.
 	cfg.SanitizeClaudeHeaderDefaults()
+
+	if cfg.ClaudeMaxRequestBytes == 0 {
+		cfg.ClaudeMaxRequestBytes = 30 << 20 // 30 MiB (unset → default; negative means no limit)
+	}
 
 	// Sanitize Claude key headers
 	cfg.SanitizeClaudeKeys()

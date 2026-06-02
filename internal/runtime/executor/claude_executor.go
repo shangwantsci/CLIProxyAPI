@@ -316,6 +316,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
 	}
 
+	if err = checkClaudeUpstreamBodySize(bodyForUpstream, e.cfg.ClaudeMaxRequestBytes); err != nil {
+		return resp, err
+	}
+
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
 	if err != nil {
@@ -506,6 +510,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// Enable cch signing by default for OAuth tokens (not just experimental flag).
 	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
 		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
+	}
+
+	if err = checkClaudeUpstreamBodySize(bodyForUpstream, e.cfg.ClaudeMaxRequestBytes); err != nil {
+		return nil, err
 	}
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
@@ -784,6 +792,10 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		body = signAnthropicMessagesBody(body)
 	}
 
+	if err := checkClaudeUpstreamBodySize(body, e.cfg.ClaudeMaxRequestBytes); err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+
 	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -1048,6 +1060,24 @@ func newClaudeStatusErr(statusCode int, body []byte, headers http.Header) status
 		err.retryAfter = parseClaudeUpstreamRetryAfter(headers, time.Now())
 	}
 	return err
+}
+
+// checkClaudeUpstreamBodySize rejects request bodies larger than limit (bytes)
+// before they are sent upstream. Anthropic returns HTTP 413 for oversized
+// requests, which lands in the conductor's zero-cooldown default branch and lets
+// the same oversized request hammer the account repeatedly. A limit <= 0 disables
+// the check.
+func checkClaudeUpstreamBodySize(body []byte, limit int) error {
+	if limit <= 0 {
+		return nil
+	}
+	if len(body) > limit {
+		return statusErr{
+			code: http.StatusRequestEntityTooLarge,
+			msg:  fmt.Sprintf("request body (%d bytes) exceeds the maximum size (%d bytes); reduce attachments or shorten the conversation history", len(body), limit),
+		}
+	}
+	return nil
 }
 
 func parseClaudeUpstreamRetryAfter(headers http.Header, now time.Time) *time.Duration {

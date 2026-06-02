@@ -240,6 +240,11 @@ nonstream-keepalive-interval: 0
 #   timeout: "600"
 #   stabilize-device-profile: true   # optional, default true; set false to use runtime-derived OS/arch
 
+# Maximum request body size (bytes) sent to the Claude upstream. Requests larger
+# than this are rejected locally with HTTP 413 instead of being forwarded.
+# Default 31457280 (30 MiB). Set to a negative value to disable the check.
+# claude-max-request-bytes: 31457280
+
 # Default headers for Codex OAuth model requests.
 # These are used only for file-backed/OAuth Codex requests when the client
 # does not send the header. `user-agent` applies to HTTP and websocket requests;
