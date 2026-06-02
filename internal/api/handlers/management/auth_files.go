@@ -1785,6 +1785,7 @@ func (h *Handler) ReauthenticateClaudeAuthFile(c *gin.Context) {
 	targetAuth.LastRefreshedAt = now
 	targetAuth.UpdatedAt = now
 	clearClaudeUnauthorizedModelStates(targetAuth)
+	clearClaudeQuotaCooldownState(targetAuth) // manual reauth = immediate recovery: lift passive-quota cooldown
 
 	if _, err := h.authManager.Update(c.Request.Context(), targetAuth); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
