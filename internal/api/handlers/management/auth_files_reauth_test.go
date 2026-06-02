@@ -35,6 +35,7 @@ func TestReauthenticateClaudeAuthFile_RefreshesAndReenablesDisabledAccount(t *te
 			Message:    "Invalid authentication credentials",
 			HTTPStatus: http.StatusUnauthorized,
 		},
+		Quota: coreauth.QuotaState{Exceeded: true, NextRecoverAt: time.Now().Add(2 * time.Hour)},
 		Metadata: map[string]any{
 			"type":          "claude",
 			"email":         "user@example.com",
@@ -43,9 +44,10 @@ func TestReauthenticateClaudeAuthFile_RefreshesAndReenablesDisabledAccount(t *te
 			"last_error": map[string]any{
 				"code": "unauthorized",
 			},
-			"status":      "disabled",
-			"unavailable": true,
-			"disabled":    true,
+			"status":         "disabled",
+			"unavailable":    true,
+			"disabled":       true,
+			"unified_status": "blocked",
 		},
 	}
 	if _, err := manager.Register(context.Background(), account); err != nil {
@@ -117,6 +119,12 @@ func TestReauthenticateClaudeAuthFile_RefreshesAndReenablesDisabledAccount(t *te
 	}
 	if got := updated.Metadata["auth_source"]; got != claude.AuthSourceClaudeCodeCLI {
 		t.Fatalf("auth_source = %v, want %s", got, claude.AuthSourceClaudeCodeCLI)
+	}
+	if updated.Quota.Exceeded {
+		t.Fatalf("Quota.Exceeded should be cleared after reauth")
+	}
+	if _, ok := updated.Metadata["unified_status"]; ok {
+		t.Fatalf("passive-quota metadata should be cleared after reauth")
 	}
 }
 
