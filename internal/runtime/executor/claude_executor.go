@@ -367,6 +367,13 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 
+	if !e.tryAcquireConcurrencySlot() {
+		msg := fmt.Sprintf("claude concurrency limit reached (cap=%d), rejecting request", e.cfg.ClaudeMaxConcurrentRequests)
+		helps.LogWithRequestID(ctx).Warn(msg)
+		return resp, claudeConcurrencyLimitError()
+	}
+	defer e.releaseConcurrencySlot()
+
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
 	if err != nil {
