@@ -245,6 +245,11 @@ nonstream-keepalive-interval: 0
 # Default 31457280 (30 MiB). Set to a negative value to disable the check.
 # claude-max-request-bytes: 31457280
 
+# 全局并发上限:CPA 同时在途的 Claude 上游请求数上限(服务器带宽/连接保护)。
+# 流式请求会占用槽位直到流结束。达到上限时新请求立即返回 429(不重试、不排队)。
+# <= 0 表示不限制。默认 0(不限制)。
+# claude-max-concurrent-requests: 0
+
 # Default headers for Codex OAuth model requests.
 # These are used only for file-backed/OAuth Codex requests when the client
 # does not send the header. `user-agent` applies to HTTP and websocket requests;

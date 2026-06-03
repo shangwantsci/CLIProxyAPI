@@ -33,6 +33,8 @@ const (
 	DefaultClaudeMimicryGuardEventsLimit              = 500
 
 	defaultClaudeMaxRequestBytes = 30 << 20 // 30 MiB
+
+	defaultClaudeMaxConcurrentRequests = 0 // 0 = 不限制全局并发
 )
 
 // Config represents the application's configuration, loaded from a YAML file.
@@ -146,6 +148,14 @@ type Config struct {
 	// 413 instead of being forwarded (which would return upstream 413 and pollute
 	// account behavior profiles). A value <= 0 disables the check. Default 30 MiB.
 	ClaudeMaxRequestBytes int `yaml:"claude-max-request-bytes" json:"claude-max-request-bytes"`
+
+	// ClaudeMaxConcurrentRequests caps the number of in-flight Claude upstream
+	// requests CPA maintains at once (server bandwidth / connection protection,
+	// NOT per-account protection — that is handled by per-account RPM). Streaming
+	// requests hold a slot until the stream finishes. When the limit is reached,
+	// new requests are rejected immediately with HTTP 429 (not retried across
+	// accounts, not queued). A value <= 0 disables the limit. Default 0 (disabled).
+	ClaudeMaxConcurrentRequests int `yaml:"claude-max-concurrent-requests" json:"claude-max-concurrent-requests"`
 
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
