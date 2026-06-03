@@ -320,7 +320,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
-	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
+	var cloaked bool
+	body, cloaked = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
+	_ = cloaked // TODO(B-3b): 下一个任务用 cloaked 决定是否写审计快照
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
@@ -527,7 +529,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
-	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
+	var cloaked bool
+	body, cloaked = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
+	_ = cloaked // TODO(B-3b): 下一个任务用 cloaked 决定是否写审计快照
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
@@ -846,7 +850,9 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body = repairClaudeRequestShape(body)
 
-	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
+	var cloaked bool
+	body, cloaked = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
+	_ = cloaked // TODO(B-3b): 下一个任务用 cloaked 决定是否写审计快照
 
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
 	body = enforceCacheControlLimit(body, 4)
@@ -3019,7 +3025,7 @@ func resolveClaudeBillingVersion(ctx context.Context, cfg *config.Config, auth *
 
 // applyCloaking applies cloaking transformations to the payload based on config and client.
 // Cloaking includes: system prompt injection, fake user ID, and sensitive word obfuscation.
-func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, payload []byte, model string, apiKey string) []byte {
+func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, payload []byte, model string, apiKey string) ([]byte, bool) {
 	clientUserAgent := getClientUserAgent(ctx)
 	// Enable cch signing for OAuth tokens by default (not just experimental flag).
 	oauthToken := isClaudeOAuthToken(apiKey)
@@ -3053,7 +3059,7 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 	// Determine if cloaking should be applied
 	clientUserID := gjson.GetBytes(payload, "metadata.user_id").String()
 	if !helps.ShouldCloakRequest(cloakMode, clientUserAgent, clientUserID) {
-		return payload
+		return payload, false
 	}
 
 	// Skip system instructions for claude-3-5-haiku models
@@ -3073,7 +3079,7 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		payload = helps.ObfuscateSensitiveWords(payload, matcher)
 	}
 
-	return payload
+	return payload, true
 }
 
 // ensureCacheControl injects cache_control breakpoints into the payload for optimal prompt caching.

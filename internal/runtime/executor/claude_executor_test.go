@@ -2828,7 +2828,7 @@ func TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmi
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123"}}
 	payload := []byte(`{"system":"proxy rules","messages":[{"role":"user","content":[{"type":"text","text":"proxy access"}]}]}`)
 
-	out := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", "key-123")
+	out, _ := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", "key-123")
 
 	blocks := gjson.GetBytes(out, "system").Array()
 	if len(blocks) != 3 {
@@ -2854,7 +2854,7 @@ func TestApplyCloaking_DefaultAlwaysCloaksForgedClaudeCodeClient(t *testing.T) {
 	}`, validClientUserID))
 	auth := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "sk-ant-oat-forged"}}
 
-	out := applyCloaking(ctx, &config.Config{}, auth, payload, "claude-3-5-sonnet-20241022", "sk-ant-oat-forged")
+	out, _ := applyCloaking(ctx, &config.Config{}, auth, payload, "claude-3-5-sonnet-20241022", "sk-ant-oat-forged")
 
 	billingHeader := gjson.GetBytes(out, "system.0.text").String()
 	if !strings.HasPrefix(billingHeader, "x-anthropic-billing-header:") || strings.Contains(billingHeader, "cc_version=0.0.1.bad") {
@@ -2877,7 +2877,7 @@ func TestApplyCloaking_ReplacesValidThirdPartyUserID(t *testing.T) {
 	}`, validClientUserID))
 	auth := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "sk-ant-oat-userid"}}
 
-	out := applyCloaking(ctx, &config.Config{}, auth, payload, "claude-3-5-sonnet-20241022", "sk-ant-oat-userid")
+	out, _ := applyCloaking(ctx, &config.Config{}, auth, payload, "claude-3-5-sonnet-20241022", "sk-ant-oat-userid")
 
 	got := gjson.GetBytes(out, "metadata.user_id").String()
 	if got == validClientUserID {
