@@ -506,7 +506,7 @@ func auditClaudeMimicrySystem(body []byte) ClaudeMimicrySystemAudit {
 		} else if expected.label == "runtime_context" {
 			if !helps.IsClaudeCodeRuntimeContextPrompt(text) {
 				block.Status = ClaudeMimicryStatusFailed
-				block.Detail = "runtime context block does not match Claude Code 2.1.154 shape"
+				block.Detail = "runtime context block does not match Claude Code 2.1.161 shape"
 				audit.Status = ClaudeMimicryStatusFailed
 			}
 		}

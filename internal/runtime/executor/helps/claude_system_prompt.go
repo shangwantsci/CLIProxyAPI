@@ -3,7 +3,7 @@ package helps
 import "strings"
 
 // Claude Code system prompt sections. These strings track the request shape
-// observed from local Claude Code v2.1.154 on 2026-05-29. The runtime context
+// observed from local Claude Code v2.1.161 on 2026-05-29. The runtime context
 // block is generated with a per-request date so cache breakpoints remain on the
 // same block structure while avoiding stale 2.1.152 harness text.
 
@@ -33,7 +33,7 @@ Before outward-facing or hard-to-reverse actions, explain the impact and ask for
 
 const claudeCodeRuntimeContextGitStatusIntro = "gitStatus: This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation."
 
-// ClaudeCodeRuntimeContextPrompt builds the second Claude Code v2.1.154 system
+// ClaudeCodeRuntimeContextPrompt builds the second Claude Code v2.1.161 system
 // block observed in bare OAuth requests. Official Claude Code fills this block
 // with local working tree details; the proxy uses neutral placeholders rather
 // than leaking server paths or repository state.

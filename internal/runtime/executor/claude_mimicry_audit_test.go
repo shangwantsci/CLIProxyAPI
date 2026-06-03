@@ -92,7 +92,7 @@ func TestAuditClaudeMimicryRequest_ClaudeCode214OfficialOAuthBearerShape(t *test
 		"Accept-Encoding":                           []string{"gzip, deflate, br, zstd"},
 		"Authorization":                             []string{"Bearer sk-ant-oat-test"},
 		"Content-Type":                              []string{"application/json"},
-		"User-Agent":                                []string{"claude-cli/2.1.154 (external, sdk-cli)"},
+		"User-Agent":                                []string{"claude-cli/2.1.161 (external, sdk-cli)"},
 		"X-Claude-Code-Session-Id":                  []string{"530ccdf0-8c3b-4b4b-9169-c84d07c76165"},
 		"X-Stainless-Arch":                          []string{"x64"},
 		"X-Stainless-Lang":                          []string{"js"},
@@ -111,7 +111,7 @@ func TestAuditClaudeMimicryRequest_ClaudeCode214OfficialOAuthBearerShape(t *test
 	audit := AuditClaudeMimicryRequest("claude-opus-4-8", "/v1/messages", payload, headers, &config.Config{})
 
 	if audit.System.Status != ClaudeMimicryStatusAligned {
-		t.Fatalf("System = %#v, want aligned official 2.1.154 bearer-token system shape", audit.System)
+		t.Fatalf("System = %#v, want aligned official 2.1.161 bearer-token system shape", audit.System)
 	}
 	if audit.CCH.Status != ClaudeMimicryStatusWarning {
 		t.Fatalf("CCH = %#v, want warning for official bearer-token shape without billing header", audit.CCH)
@@ -120,7 +120,7 @@ func TestAuditClaudeMimicryRequest_ClaudeCode214OfficialOAuthBearerShape(t *test
 		t.Fatalf("Betas = %#v, want aligned Opus 4.8 beta set", audit.Betas)
 	}
 	if audit.Headers.Status != ClaudeMimicryStatusAligned {
-		t.Fatalf("Headers = %#v, want aligned official 2.1.154 headers", audit.Headers)
+		t.Fatalf("Headers = %#v, want aligned official 2.1.161 headers", audit.Headers)
 	}
 }
 
@@ -151,13 +151,13 @@ func TestAuditClaudeMimicryRequest_ClaudeCode214ToolSurfaceIsKnown(t *testing.T)
 	payload = signAnthropicMessagesBody(payload)
 
 	req := newClaudeHeaderTestRequest(t, http.Header{
-		"User-Agent": []string{"claude-cli/2.1.154 (external, sdk-cli)"},
+		"User-Agent": []string{"claude-cli/2.1.161 (external, sdk-cli)"},
 	})
 	applyClaudeHeaders(req, &cliproxyauth.Auth{}, "sk-ant-oat-test", false, nil, &config.Config{})
 	audit := AuditClaudeMimicryRequest("claude-sonnet-4-6", "/v1/messages", payload, req.Header, &config.Config{})
 
 	if audit.Tools.Status != ClaudeMimicryStatusAligned {
-		t.Fatalf("Tools = %#v, want official Claude Code 2.1.154 tools aligned", audit.Tools)
+		t.Fatalf("Tools = %#v, want official Claude Code 2.1.161 tools aligned", audit.Tools)
 	}
 	if len(audit.Tools.Unknown) != 0 {
 		t.Fatalf("Tools.Unknown = %#v, want no unknown official Claude Code tools", audit.Tools.Unknown)

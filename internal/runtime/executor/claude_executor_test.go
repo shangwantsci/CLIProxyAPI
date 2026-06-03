@@ -157,7 +157,7 @@ func TestApplyClaudeHeaders_UsesConfiguredBaselineFingerprint(t *testing.T) {
 		t.Fatalf("X-Claude-Code-Session-Id = %q, want cached session id", got)
 	}
 	if got := req.Header.Get("x-client-request-id"); got != "" {
-		t.Fatalf("x-client-request-id = %q, want omitted to match Claude Code 2.1.154", got)
+		t.Fatalf("x-client-request-id = %q, want omitted to match Claude Code 2.1.161", got)
 	}
 	if got := req.Header.Get("Anthropic-Dangerous-Direct-Browser-Access"); got != "true" {
 		t.Fatalf("Anthropic-Dangerous-Direct-Browser-Access = %q, want true", got)
@@ -280,7 +280,7 @@ func TestApplyClaudeHeaders_DefaultDeviceProfileUsesCoherentBaseline(t *testing.
 	})
 	applyClaudeHeaders(req, &cliproxyauth.Auth{}, "key-default-fingerprint", false, nil, &config.Config{})
 
-	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.154 (external, sdk-cli)", "0.94.0", "v24.3.0", "Windows", "x64")
+	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.161 (external, sdk-cli)", "0.94.0", "v24.3.0", "Windows", "x64")
 }
 
 func TestApplyClaudeHeaders_TracksHighestClaudeCLIFingerprint(t *testing.T) {
@@ -364,7 +364,7 @@ func TestApplyClaudeHeaders_RejectsImplausibleClaudeClientFingerprint(t *testing
 
 	applyClaudeHeaders(req, auth, "key-implausible-fingerprint", false, nil, &config.Config{})
 
-	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.154 (external, sdk-cli)", "0.94.0", "v24.3.0", "Windows", "x64")
+	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.161 (external, sdk-cli)", "0.94.0", "v24.3.0", "Windows", "x64")
 	if _, ok := auth.Metadata["claude_device_profile"]; ok {
 		t.Fatalf("implausible fingerprint should not be persisted to auth metadata: %#v", auth.Metadata["claude_device_profile"])
 	}
@@ -389,7 +389,7 @@ func TestApplyClaudeHeaders_RejectsHigherCliWithOlderPackageVersion(t *testing.T
 
 	applyClaudeHeaders(req, auth, "key-incoherent-package", false, nil, &config.Config{})
 
-	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.154 (external, sdk-cli)", "0.94.0", "v24.3.0", "Windows", "x64")
+	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.161 (external, sdk-cli)", "0.94.0", "v24.3.0", "Windows", "x64")
 	if _, ok := auth.Metadata["claude_device_profile"]; ok {
 		t.Fatalf("incoherent fingerprint should not be persisted to auth metadata: %#v", auth.Metadata["claude_device_profile"])
 	}
@@ -419,7 +419,7 @@ func TestApplyClaudeHeaders_RejectsPollutedMetadataDeviceProfile(t *testing.T) {
 
 	applyClaudeHeaders(req, auth, "key-polluted-metadata", false, nil, &config.Config{})
 
-	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.154 (external, sdk-cli)", "0.94.0", "v24.3.0", "Windows", "x64")
+	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.161 (external, sdk-cli)", "0.94.0", "v24.3.0", "Windows", "x64")
 }
 
 func TestApplyClaudeHeaders_DoesNotDowngradeConfiguredBaselineOnFirstClaudeClient(t *testing.T) {
@@ -686,7 +686,7 @@ func TestApplyClaudeHeaders_PersistsLearnedDeviceProfileToAuthMetadata(t *testin
 	}
 
 	officialReq := newClaudeHeaderTestRequest(t, http.Header{
-		"User-Agent":                  []string{"claude-cli/2.1.155 (external, cli)"},
+		"User-Agent":                  []string{"claude-cli/2.1.162 (external, cli)"},
 		"X-Stainless-Package-Version": []string{"0.95.0"},
 		"X-Stainless-Runtime-Version": []string{"v24.4.0"},
 		"X-Stainless-Os":              []string{"Linux"},
@@ -698,7 +698,7 @@ func TestApplyClaudeHeaders_PersistsLearnedDeviceProfileToAuthMetadata(t *testin
 	if !ok {
 		t.Fatalf("metadata.claude_device_profile = %T, want map[string]any", auth.Metadata["claude_device_profile"])
 	}
-	if got, _ := profileMeta["user_agent"].(string); got != "claude-cli/2.1.155 (external, cli)" {
+	if got, _ := profileMeta["user_agent"].(string); got != "claude-cli/2.1.162 (external, cli)" {
 		t.Fatalf("metadata.claude_device_profile.user_agent = %q, want learned official UA", got)
 	}
 	if got, _ := profileMeta["os"].(string); got != "Windows" {
@@ -716,7 +716,7 @@ func TestApplyClaudeHeaders_PersistsLearnedDeviceProfileToAuthMetadata(t *testin
 		"User-Agent": []string{"CherryStudio/1.0"},
 	})
 	applyClaudeHeaders(thirdPartyReq, auth, "key-metadata-profile", false, nil, cfg)
-	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.155 (external, cli)", "0.95.0", "v24.4.0", "Windows", "x64")
+	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.162 (external, cli)", "0.95.0", "v24.4.0", "Windows", "x64")
 }
 
 func TestApplyClaudeHeaders_ThirdPartyBaselineThenOfficialUpgradeKeepsPinnedPlatform(t *testing.T) {
@@ -1991,7 +1991,7 @@ func TestEnsureModelMaxTokens_SkipsUnregisteredModel(t *testing.T) {
 }
 
 // TestClaudeExecutor_ExecuteStream_MatchesClaudeCodeAcceptHeaders verifies that
-// streaming requests match Claude Code 2.1.154's latest request headers. The
+// streaming requests match Claude Code 2.1.161's latest request headers. The
 // executor decodes compressed upstream bodies before scanning SSE lines.
 func TestClaudeExecutor_ExecuteStream_MatchesClaudeCodeAcceptHeaders(t *testing.T) {
 	var gotEncoding, gotAccept string
@@ -2080,7 +2080,7 @@ func TestClaudeExecutor_Execute_Opus48MatchesClaudeCode214RequestShape(t *testin
 		}
 	}
 	if got := gjson.GetBytes(gotBody, "max_tokens").Int(); got != 64000 {
-		t.Fatalf("max_tokens = %d, want 64000 for Claude Code 2.1.154 Opus 4.8 shape; body=%s", got, string(gotBody))
+		t.Fatalf("max_tokens = %d, want 64000 for Claude Code 2.1.161 Opus 4.8 shape; body=%s", got, string(gotBody))
 	}
 	blocks := gjson.GetBytes(gotBody, "system").Array()
 	if len(blocks) != 3 {
@@ -2090,7 +2090,7 @@ func TestClaudeExecutor_Execute_Opus48MatchesClaudeCode214RequestShape(t *testin
 		t.Fatalf("system.1.text = %q, want Claude Code agent identity", got)
 	}
 	if got := blocks[2].Get("text").String(); !isClaudeCodeRuntimeContextPrompt(got) {
-		t.Fatalf("system.2.text should be Claude Code 2.1.154 runtime context, got %q", got)
+		t.Fatalf("system.2.text should be Claude Code 2.1.161 runtime context, got %q", got)
 	}
 	if got := gjson.GetBytes(gotBody, "system.2.cache_control.type").String(); got != "ephemeral" {
 		t.Fatalf("system.2.cache_control.type = %q, want ephemeral", got)
