@@ -2727,6 +2727,7 @@ func isPermanentAuthErrorMessage(raw string) bool {
 		"refresh token expired",
 		"access_denied",
 		"no refresh token available",
+		"account_session_invalid",
 	}
 	for _, pattern := range patterns {
 		if strings.Contains(raw, pattern) {
@@ -2787,6 +2788,12 @@ func permanentAuthDisabledDetails(statusCode int, rawMessage string) (string, st
 			message = "Claude account has been disabled."
 		}
 		return "account_disabled", message, true
+	}
+	if strings.Contains(combined, "account_session_invalid") {
+		if message == "" || strings.HasPrefix(message, "{") {
+			message = "Session key has expired or been invalidated. Re-import the account cookie."
+		}
+		return "account_session_invalid", message, true
 	}
 	return "", "", false
 }
