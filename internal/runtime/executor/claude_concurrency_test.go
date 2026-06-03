@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -59,5 +60,40 @@ func TestClaudeConcurrencyLimitError_IsNonRetryable429(t *testing.T) {
 	}
 	if ce.HTTPStatus != http.StatusTooManyRequests {
 		t.Fatalf("expected HTTP 429, got %d", ce.HTTPStatus)
+	}
+}
+
+func TestStreamingSlotHeldUntilGoroutineExit(t *testing.T) {
+	e := NewClaudeExecutor(&config.Config{ClaudeMaxConcurrentRequests: 1})
+
+	// 模拟 ExecuteStream:Acquire 后把释放责任交给后台 goroutine 的 defer。
+	if !e.tryAcquireConcurrencySlot() {
+		t.Fatalf("acquire should succeed")
+	}
+	if e.tryAcquireConcurrencySlot() {
+		t.Fatalf("slot must be held while stream in progress")
+	}
+
+	streamDone := make(chan struct{})
+	go func() {
+		defer e.releaseConcurrencySlot() // 对应 ExecuteStream goroutine 的 release defer
+		<-streamDone                      // 模拟流读取中
+	}()
+
+	if e.tryAcquireConcurrencySlot() {
+		t.Fatalf("slot must remain held until stream goroutine exits")
+	}
+	close(streamDone)
+
+	released := false
+	for i := 0; i < 100; i++ {
+		if e.tryAcquireConcurrencySlot() {
+			released = true
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if !released {
+		t.Fatalf("slot must be released after stream goroutine exits")
 	}
 }

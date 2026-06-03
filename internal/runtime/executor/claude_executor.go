@@ -570,6 +570,20 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, err
 	}
 
+	if !e.tryAcquireConcurrencySlot() {
+		helps.LogWithRequestID(ctx).Warn(fmt.Sprintf("claude concurrency limit reached (cap=%d), rejecting stream request", e.cfg.ClaudeMaxConcurrentRequests))
+		return nil, claudeConcurrencyLimitError()
+	}
+	// slotReleased 守卫:Acquire 成功后,若在后台 goroutine 接管释放责任之前
+	// 发生任何 error return,必须显式释放槽位避免泄漏。goroutine 一旦启动,
+	// 由它的 defer 负责释放,届时把 slotReleased 置 true 防止本 defer 重复释放。
+	slotReleased := false
+	defer func() {
+		if !slotReleased {
+			e.releaseConcurrencySlot()
+		}
+	}()
+
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
 	if err != nil {
@@ -644,7 +658,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
+	// goroutine 即将接管并发槽位释放责任。置位后,上面 defer 守卫不再
+	// 释放(避免双重释放);槽位将持有到流读完(下面 goroutine 的 release defer)。
+	slotReleased = true
 	go func() {
+		defer e.releaseConcurrencySlot()
 		recordedMimicryEvent := false
 		var streamUsage usage.Detail
 		streamUsageSeen := false
