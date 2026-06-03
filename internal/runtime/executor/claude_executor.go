@@ -322,7 +322,6 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// based on client type and configuration.
 	var cloaked bool
 	body, cloaked = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
-	_ = cloaked // TODO(B-3b): 下一个任务用 cloaked 决定是否写审计快照
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
@@ -382,7 +381,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg, baseModel)
-	mimicryEvent, _, errGuard := prepareClaudeMimicryGuardEvent(ctx, e.cfg, auth, opts, baseModel, "/v1/messages", bodyForUpstream, httpReq.Header)
+	mimicryEvent, _, errGuard := prepareClaudeMimicryGuardEvent(ctx, e.cfg, auth, opts, baseModel, "/v1/messages", bodyForUpstream, httpReq.Header, cloaked)
 	if errGuard != nil {
 		return resp, errGuard
 	}
@@ -531,7 +530,6 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// based on client type and configuration.
 	var cloaked bool
 	body, cloaked = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
-	_ = cloaked // TODO(B-3b): 下一个任务用 cloaked 决定是否写审计快照
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
@@ -594,7 +592,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, err
 	}
 	applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg, baseModel)
-	mimicryEvent, _, errGuard := prepareClaudeMimicryGuardEvent(ctx, e.cfg, auth, opts, baseModel, "/v1/messages", bodyForUpstream, httpReq.Header)
+	mimicryEvent, _, errGuard := prepareClaudeMimicryGuardEvent(ctx, e.cfg, auth, opts, baseModel, "/v1/messages", bodyForUpstream, httpReq.Header, cloaked)
 	if errGuard != nil {
 		return nil, errGuard
 	}
@@ -852,7 +850,6 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 
 	var cloaked bool
 	body, cloaked = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
-	_ = cloaked // TODO(B-3b): 下一个任务用 cloaked 决定是否写审计快照
 
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
 	body = enforceCacheControlLimit(body, 4)
@@ -880,7 +877,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		return cliproxyexecutor.Response{}, err
 	}
 	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg, baseModel)
-	mimicryEvent, _, errGuard := prepareClaudeMimicryGuardEvent(ctx, e.cfg, auth, opts, baseModel, "/v1/messages/count_tokens", body, httpReq.Header)
+	mimicryEvent, _, errGuard := prepareClaudeMimicryGuardEvent(ctx, e.cfg, auth, opts, baseModel, "/v1/messages/count_tokens", body, httpReq.Header, cloaked)
 	if errGuard != nil {
 		return cliproxyexecutor.Response{}, errGuard
 	}
@@ -1257,8 +1254,21 @@ func extractAndRemoveBetas(body []byte) ([]string, []byte) {
 	return betas, body
 }
 
-func prepareClaudeMimicryGuardEvent(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, opts cliproxyexecutor.Options, model, requestPath string, body []byte, upstreamHeaders http.Header) (ClaudeMimicryEvent, ClaudeMimicryGuardDecision, error) {
-	audit := RecordClaudeMimicryAudit(model, requestPath, body, upstreamHeaders, cfg)
+// auditClaudeMimicryForGuard 对请求做伪装审计打分供 guard 评估。
+// cloaked=true(请求确实被伪装):写入全局快照 claudeMimicryLatest,驱动顶部
+// "CLI 对齐状态"徽章。
+// cloaked=false(故意不伪装:cloak=never 或 auto+真实CLI):仍打分供 guard 判断
+// 真实泄露(如 leaky tool names),但不写全局快照,避免把"故意不伪装"的请求
+// 当作"伪装失败"拉低对齐徽章。
+func auditClaudeMimicryForGuard(model, requestPath string, body []byte, upstreamHeaders http.Header, cfg *config.Config, cloaked bool) ClaudeMimicryAuditSnapshot {
+	if cloaked {
+		return RecordClaudeMimicryAudit(model, requestPath, body, upstreamHeaders, cfg)
+	}
+	return AuditClaudeMimicryRequest(model, requestPath, body, upstreamHeaders, cfg)
+}
+
+func prepareClaudeMimicryGuardEvent(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, opts cliproxyexecutor.Options, model, requestPath string, body []byte, upstreamHeaders http.Header, cloaked bool) (ClaudeMimicryEvent, ClaudeMimicryGuardDecision, error) {
+	audit := auditClaudeMimicryForGuard(model, requestPath, body, upstreamHeaders, cfg, cloaked)
 	requireSystemBlocks := claudeRequestRequiresSystemBlocks(model)
 	decision := EvaluateClaudeMimicryGuardWithPolicy(audit, cfg, ClaudeMimicryGuardPolicy{
 		RequireSignedCCH:    requireSystemBlocks && claudeRequestRequiresCCHSigning(cfg, auth),
