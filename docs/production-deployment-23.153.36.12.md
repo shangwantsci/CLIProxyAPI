@@ -58,21 +58,23 @@ Traefik 动态路由：
 
 ## 当前部署版本
 
-- 后端提交：`bda390ed`（导入实活探测：删抓取来源子模式 + cookie 导入落盘前双探测识别 organization disabled 坏账号拒绝入池 + 413 超大请求本地拦截）
-- 前端提交：`bf43f45`（删抓取来源 UI + 导入结果 rejected 分类展示 + 进度条按提交数驱动 + 清理死入口）
-- 最近一次按本文档部署时间：`2026-06-02T06:24:05+00:00`
-- 本次部署后端二进制 sha256：`7bf6f02a19b0324c832f860cfaab99a5100ffdeed3f69fb21bc20878ac3cce58`
-- 部署前运行版本 backend=`012545f6`，binary sha256 `cd70e17b…043e`
-- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260602-021640.bak`（可回滚到 `012545f6`）
-- 部署前账号备份（473 账号，exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260602-021640.tgz`
-- 部署前/后账号数：474 → 473（健康，无骤降；容器重启后加载 475 auth entries）
+- 后端提交：`ed87579a`（全局并发上限带宽保护阀 + 伪装诊断三项修正 + account_session_invalid 永久失效归类）
+- 前端提交：`c0ef735`（伪装诊断兜底常量修正到真实基线 2.1.161/0.94.0/v24.3.0）
+- 最近一次按本文档部署时间：`2026-06-03T14:00:18+00:00`
+- 本次部署后端二进制 sha256：`c85206261c7d5e61d9668fdcc77809410d6c113d25a03a232c7d2ccdbe943dfa`
+- 本次部署 management.html sha256：`87cb47d5be842a2d07cdeeed7d6bb45ce2e1074fc2ee7b5b7018e78c93ad7436`
+- 部署前运行版本 backend=`e71bfde5`，binary sha256 `a8583cfa…ee447`
+- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260603-135746.bak`（可回滚到 `e71bfde5`）
+- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260603-135746.tgz`
+- 部署后账号数：727 个 json，容器重启后加载 726 auth entries（账号增删由晓宇手动管理）
 
 ### 本轮新增配置项
 
 - `claude-max-request-bytes`（int，默认 `31457280` = 30 MiB）：发往 Claude 上游前的请求体字节上限，超限本地返回 413 而不转发上游（避免超大请求反复打上游污染账号行为画像）。`<= 0`（如 `-1`）表示不限制；未配置（零值）按默认 30 MiB。
+- `claude-max-concurrent-requests`（int，默认 `0` = 不限制）：CPA 同时在途的 Claude 上游请求数上限（服务器带宽/连接保护，**非**账号保护——账号保护由 per-account RPM 负责）。流式请求占用槽位直到流读完。达到上限时新请求立即返回 429（`Retryable=false`，不换账号重试、不排队）。`<= 0` 不限制。**本次部署保持默认 0（功能已上线但待命，配一个正值并重启即生效，无需重新部署二进制）。**
 
 > 注：本轮交叉编译未注入 git commit 的 ldflags，容器日志 `Version: dev, Commit: none` 属正常；权威版本以 `DEPLOYED_COMMITS` 为准。
-> 历史（2026-06-01）：上一轮曾观察到账号从 92 骤降到 5（晓宇确认为手动删除，非 bug）；此后已重新导入，本轮部署时账号数已恢复到 473，号池健康。
+> 本轮三个功能：① 全局并发上限（带宽保护阀，默认 0 待命）；② 伪装诊断三项（UA 基线 2.1.154→2.1.161、前端兜底常量修正、审计排除故意未伪装请求且 guard 仍生效）；③ `account_session_invalid` 403（session_key 失效）归入永久失效自动禁用，不再误标 payment_required/请求异常。伪装基线经一手二进制核实未落后，`X-Stainless-Package-Version` 保持 0.94.0（vendored，勿追 npm 0.100.1）。
 
 - 最近一次有效完整账号备份(92 个)：`/opt/cpa-claude-proxy-backups/auths-20260531-061110.tgz`
 - 最近一次网络入口收口：`2026-05-28T11:32:01+00:00`
