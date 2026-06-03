@@ -39,6 +39,10 @@ import (
 // If api_key is unavailable on auth, it falls back to legacy via ClientAdapter.
 type ClaudeExecutor struct {
 	cfg *config.Config
+	// concurrencySem is a global semaphore capping in-flight Claude upstream
+	// requests. nil means no limit. Capacity = cfg.ClaudeMaxConcurrentRequests
+	// when that value is > 0.
+	concurrencySem chan struct{}
 	// reauthViaCookieFn, when non-nil, overrides the real CookieAuth exchange in
 	// reauthViaSessionKey. Production leaves it nil (defaultReauthViaCookie is used);
 	// tests inject a stub to avoid network calls.
@@ -192,7 +196,50 @@ func (m *oauthToolReverseMap) recordProperty(original, renamed string) {
 // omit max_tokens. Prefer registered model metadata before using a fallback.
 const defaultModelMaxTokens = 1024
 
-func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor { return &ClaudeExecutor{cfg: cfg} }
+func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor {
+	e := &ClaudeExecutor{cfg: cfg}
+	if cfg != nil && cfg.ClaudeMaxConcurrentRequests > 0 {
+		e.concurrencySem = make(chan struct{}, cfg.ClaudeMaxConcurrentRequests)
+	}
+	return e
+}
+
+// tryAcquireConcurrencySlot 非阻塞地获取一个并发槽位。返回 true 表示拿到
+// (或信号量未启用)。返回 false 表示当前并发已满,调用方应立即拒绝请求。
+func (e *ClaudeExecutor) tryAcquireConcurrencySlot() bool {
+	if e.concurrencySem == nil {
+		return true
+	}
+	select {
+	case e.concurrencySem <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+// releaseConcurrencySlot 释放一个并发槽位。non-blocking drain:即使被误调
+// 多次也不会 panic 或阻塞。信号量未启用时为 no-op。
+func (e *ClaudeExecutor) releaseConcurrencySlot() {
+	if e.concurrencySem == nil {
+		return
+	}
+	select {
+	case <-e.concurrencySem:
+	default:
+	}
+}
+
+// claudeConcurrencyLimitError 在全局并发已满时返回。Retryable=false 确保上层
+// 调度器不会换账号重试(全局满了换哪个账号都无济于事),直接以 429 弹回上游。
+func claudeConcurrencyLimitError() error {
+	return &cliproxyauth.Error{
+		Code:       cliproxyauth.LocalRequestGuardErrorCode,
+		Message:    "Claude upstream concurrency limit reached",
+		Retryable:  false,
+		HTTPStatus: http.StatusTooManyRequests,
+	}
+}
 
 func (e *ClaudeExecutor) Identifier() string { return "claude" }
 
