@@ -89,6 +89,13 @@ func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (h2Connectio
 	return h2Conn, nil
 }
 
+// newH2Transport builds the HTTP/2 transport used for each pooled connection.
+// It is a standalone function so tests can assert the idle-timeout wiring
+// without standing up a real TCP/TLS connection.
+func newH2Transport() *http2.Transport {
+	return &http2.Transport{IdleConnTimeout: utlsIdleConnTimeout}
+}
+
 func (t *utlsRoundTripper) createConnection(host, addr string) (h2Connection, error) {
 	conn, err := t.dialer.Dial("tcp", addr)
 	if err != nil {
@@ -103,7 +110,7 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (h2Connection, er
 		return nil, err
 	}
 
-	tr := &http2.Transport{}
+	tr := newH2Transport()
 	h2Conn, err := tr.NewClientConn(tlsConn)
 	if err != nil {
 		tlsConn.Close()

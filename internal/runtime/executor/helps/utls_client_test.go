@@ -20,10 +20,12 @@ type fakeH2Conn struct {
 	closeErr error
 }
 
-func (f *fakeH2Conn) CanTakeNewRequest() bool                         { return f.canTake }
-func (f *fakeH2Conn) State() http2.ClientConnState                    { return f.state }
-func (f *fakeH2Conn) Close() error                                    { f.closed = true; return f.closeErr }
-func (f *fakeH2Conn) RoundTrip(*http.Request) (*http.Response, error) { return &http.Response{StatusCode: 200}, nil }
+func (f *fakeH2Conn) CanTakeNewRequest() bool      { return f.canTake }
+func (f *fakeH2Conn) State() http2.ClientConnState { return f.state }
+func (f *fakeH2Conn) Close() error                 { f.closed = true; return f.closeErr }
+func (f *fakeH2Conn) RoundTrip(*http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: 200}, nil
+}
 
 // TestH2ConnectionInterfaceSatisfiedByFake is a compile-time + runtime guard that
 // the h2Connection interface exists and our fake implements it.
@@ -34,6 +36,43 @@ func TestH2ConnectionInterfaceSatisfiedByFake(t *testing.T) {
 	}
 	if err := c.Close(); err != nil {
 		t.Fatalf("Close returned error: %v", err)
+	}
+}
+
+// TestNewH2Transport_SetsIdleConnTimeout locks in that pooled HTTP/2 connections
+// are built with an idle timeout. Without it, *http2.ClientConn never sets its
+// internal lastIdle, so State().LastIdle stays zero forever and the background
+// sweeper's "idle longer than threshold" guard can never fire — making idle
+// reaping dead code in production.
+func TestNewH2Transport_SetsIdleConnTimeout(t *testing.T) {
+	tr := newH2Transport()
+	if tr.IdleConnTimeout != utlsIdleConnTimeout {
+		t.Fatalf("newH2Transport IdleConnTimeout = %v, want %v", tr.IdleConnTimeout, utlsIdleConnTimeout)
+	}
+}
+
+// TestCleanupIdle_ZeroLastIdleNotClosed pins the real-world behavior of
+// *http2.ClientConn: a connection whose State() reports a zero LastIdle (the
+// value http2 leaves when nothing has marked it idle yet) must NOT be closed,
+// even with no active or reserved streams. This guards against a regression
+// where the zero-value check is dropped and live connections get reaped.
+func TestCleanupIdle_ZeroLastIdleNotClosed(t *testing.T) {
+	zeroIdle := &fakeH2Conn{state: http2.ClientConnState{StreamsActive: 0, StreamsReserved: 0}} // LastIdle is the zero time.Time
+	rt := &utlsRoundTripper{
+		connections: map[string]h2Connection{"host-zero": zeroIdle},
+		pending:     map[string]*sync.Cond{},
+	}
+
+	closed := rt.cleanupIdle(90 * time.Second)
+
+	if closed != 0 {
+		t.Fatalf("cleanupIdle closed = %d, want 0 (zero LastIdle must be treated as not-yet-idle)", closed)
+	}
+	if zeroIdle.closed {
+		t.Error("connection with zero LastIdle must NOT be closed")
+	}
+	if _, ok := rt.connections["host-zero"]; !ok {
+		t.Error("connection with zero LastIdle must remain in map")
 	}
 }
 
