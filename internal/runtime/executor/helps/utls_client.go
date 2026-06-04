@@ -16,11 +16,21 @@ import (
 	"golang.org/x/net/proxy"
 )
 
+// h2Connection is the minimal surface of *http2.ClientConn the connection pool
+// needs. It exists so tests can inject fakes that drive State()/Close() without
+// real TCP/TLS. Production always uses *http2.ClientConn, which satisfies it.
+type h2Connection interface {
+	CanTakeNewRequest() bool
+	State() http2.ClientConnState
+	Close() error
+	RoundTrip(*http.Request) (*http.Response, error)
+}
+
 // utlsRoundTripper implements http.RoundTripper using utls with Chrome fingerprint
 // to bypass Cloudflare's TLS fingerprinting on Anthropic domains.
 type utlsRoundTripper struct {
 	mu          sync.Mutex
-	connections map[string]*http2.ClientConn
+	connections map[string]h2Connection
 	pending     map[string]*sync.Cond
 	dialer      proxy.Dialer
 }
@@ -37,13 +47,13 @@ func newUtlsRoundTripper(proxyURL string) (*utlsRoundTripper, error) {
 		}
 	}
 	return &utlsRoundTripper{
-		connections: make(map[string]*http2.ClientConn),
+		connections: make(map[string]h2Connection),
 		pending:     make(map[string]*sync.Cond),
 		dialer:      dialer,
 	}, nil
 }
 
-func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (*http2.ClientConn, error) {
+func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (h2Connection, error) {
 	t.mu.Lock()
 
 	if h2Conn, ok := t.connections[host]; ok && h2Conn.CanTakeNewRequest() {
@@ -79,7 +89,7 @@ func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (*http2.Clie
 	return h2Conn, nil
 }
 
-func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientConn, error) {
+func (t *utlsRoundTripper) createConnection(host, addr string) (h2Connection, error) {
 	conn, err := t.dialer.Dial("tcp", addr)
 	if err != nil {
 		return nil, err
