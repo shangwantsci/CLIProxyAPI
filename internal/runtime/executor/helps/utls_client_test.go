@@ -198,3 +198,37 @@ func TestNewUtlsHTTPClient_DifferentAuthDoesNotShare(t *testing.T) {
 		t.Error("different authID must not share a utls roundtripper")
 	}
 }
+
+func TestPool_ConcurrentGetAndSweepNoRace(t *testing.T) {
+	p := newUtlsClientPool()
+	var wg sync.WaitGroup
+
+	// Many goroutines fetch roundtrippers across a small key space and inject a
+	// stale idle connection into each, so sweep has real work to do.
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			authID := "auth-" + string(rune('A'+i%5))
+			rt, err := p.getRoundTripper("", authID)
+			if err != nil {
+				t.Errorf("getRoundTripper: %v", err)
+				return
+			}
+			rt.mu.Lock()
+			rt.connections["h"] = &fakeH2Conn{state: http2.ClientConnState{LastIdle: time.Now().Add(-300 * time.Second)}}
+			rt.mu.Unlock()
+		}(i)
+	}
+
+	// Sweepers run concurrently with the fetchers.
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p.sweep(90 * time.Second)
+		}()
+	}
+
+	wg.Wait()
+}
