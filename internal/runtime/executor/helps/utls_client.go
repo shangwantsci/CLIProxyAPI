@@ -139,6 +139,45 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	return resp, nil
 }
 
+// Close closes every cached connection and empties the map. Safe to call
+// concurrently with RoundTrip; callers hold no other lock.
+func (t *utlsRoundTripper) Close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for host, conn := range t.connections {
+		_ = conn.Close()
+		delete(t.connections, host)
+	}
+	return nil
+}
+
+// cleanupIdle closes connections that have no active or reserved streams and
+// have been idle longer than threshold, then removes them from the map. It
+// returns the number of connections closed. Connections still carrying streams
+// (including in-flight SSE streams) are never touched.
+func (t *utlsRoundTripper) cleanupIdle(threshold time.Duration) int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	closed := 0
+	for host, conn := range t.connections {
+		st := conn.State()
+		if st.StreamsActive == 0 && st.StreamsReserved == 0 && !st.LastIdle.IsZero() && time.Since(st.LastIdle) > threshold {
+			_ = conn.Close()
+			delete(t.connections, host)
+			closed++
+		}
+	}
+	return closed
+}
+
+// connectionCount reports how many connections are cached. Used by the pool to
+// drop empty roundtrippers.
+func (t *utlsRoundTripper) connectionCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.connections)
+}
+
 // anthropicHosts contains the hosts that should use utls Chrome TLS fingerprint.
 var anthropicHosts = map[string]struct{}{
 	"api.anthropic.com": {},
