@@ -139,8 +139,12 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	return resp, nil
 }
 
-// Close closes every cached connection and empties the map. Safe to call
-// concurrently with RoundTrip; callers hold no other lock.
+// Close closes every cached connection and empties the map. It must not be
+// called while RoundTrip calls are in flight on this roundtripper: it does not
+// wake goroutines blocked in getOrCreateConnection's pending wait, so a
+// concurrent RoundTrip could rebuild a connection after Close returns. In this
+// package the pool is a process-level singleton that is never closed, so Close
+// exists for interface completeness and tests rather than live teardown.
 func (t *utlsRoundTripper) Close() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
