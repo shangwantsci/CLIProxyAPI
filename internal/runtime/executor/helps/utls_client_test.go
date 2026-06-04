@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"golang.org/x/net/http2"
 )
 
@@ -153,5 +155,43 @@ func TestPoolCleanupSweep_DropsEmptyRoundtrippers(t *testing.T) {
 
 	if got := p.size(); got != 0 {
 		t.Fatalf("roundtripper emptied by cleanup must be dropped from pool, size = %d", got)
+	}
+}
+
+// resetSharedUtlsPoolForTest swaps in a fresh pool (without starting the
+// background sweeper) so pool-reuse tests are independent of execution order.
+// It re-arms the sync.Once so sharedUtlsPool() returns our injected pool.
+// Test-only.
+func resetSharedUtlsPoolForTest() {
+	globalUtlsPool = newUtlsClientPool()
+	globalUtlsPoolOnce = sync.Once{}
+	globalUtlsPoolOnce.Do(func() {}) // fire Once as no-op so sharedUtlsPool keeps our pool
+}
+
+func TestNewUtlsHTTPClient_ReusesPooledRoundtripper(t *testing.T) {
+	resetSharedUtlsPoolForTest()
+
+	auth := &cliproxyauth.Auth{ID: "auth-reuse"}
+	c1 := NewUtlsHTTPClient(&config.Config{}, auth, 0)
+	c2 := NewUtlsHTTPClient(&config.Config{}, auth, 0)
+
+	f1, ok1 := c1.Transport.(*fallbackRoundTripper)
+	f2, ok2 := c2.Transport.(*fallbackRoundTripper)
+	if !ok1 || !ok2 {
+		t.Fatalf("transport types = %T, %T; want *fallbackRoundTripper", c1.Transport, c2.Transport)
+	}
+	if f1.utls != f2.utls {
+		t.Error("two clients for the same (proxy, authID) must share one utls roundtripper")
+	}
+}
+
+func TestNewUtlsHTTPClient_DifferentAuthDoesNotShare(t *testing.T) {
+	resetSharedUtlsPoolForTest()
+	cA := NewUtlsHTTPClient(&config.Config{}, &cliproxyauth.Auth{ID: "auth-A"}, 0)
+	cB := NewUtlsHTTPClient(&config.Config{}, &cliproxyauth.Auth{ID: "auth-B"}, 0)
+	fA := cA.Transport.(*fallbackRoundTripper)
+	fB := cB.Transport.(*fallbackRoundTripper)
+	if fA.utls == fB.utls {
+		t.Error("different authID must not share a utls roundtripper")
 	}
 }

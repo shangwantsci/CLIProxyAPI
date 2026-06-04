@@ -325,7 +325,11 @@ func NewUtlsHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeout time
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
 
-	utlsRT, errBuildDialer := newUtlsRoundTripper(proxyURL)
+	var authID string
+	if auth != nil {
+		authID = auth.ID
+	}
+	utlsRT, errBuildDialer := sharedUtlsPool().getRoundTripper(proxyURL, authID)
 	if errBuildDialer != nil {
 		client := &http.Client{Transport: failingRoundTripper{err: proxyConfigurationError(proxyURL, errBuildDialer)}}
 		if timeout > 0 {
