@@ -1143,12 +1143,22 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	}
 	auth.EnsureIndex()
 	authClone := auth.Clone()
+	// Clone a second, scheduler-private copy while still holding no shared
+	// reference: authClone is about to be published into m.auths and then
+	// mutated in place outside m.mu (InjectCredentials -> executor
+	// PrepareRequest writing auth.Attributes). The scheduler retains its pointer
+	// and reads those maps, so it must own an independent copy, and that copy
+	// must be derived from the not-yet-published auth rather than from authClone.
+	var schedClone *Auth
+	if m.scheduler != nil {
+		schedClone = auth.Clone()
+	}
 	m.mu.Lock()
 	m.auths[auth.ID] = authClone
 	m.mu.Unlock()
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
-	if m.scheduler != nil {
-		m.scheduler.upsertAuth(authClone)
+	if schedClone != nil {
+		m.scheduler.upsertAuth(schedClone)
 	}
 	m.queueRefreshReschedule(auth.ID)
 	_ = m.persist(ctx, auth)
@@ -1181,11 +1191,20 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	}
 	auth.EnsureIndex()
 	authClone := auth.Clone()
+	// Clone the scheduler's private copy while m.mu is still held. Doing it under
+	// the lock is required here: above we may alias auth.ModelStates onto the
+	// previous entry, and authClone is published into m.auths and then mutated in
+	// place outside m.mu (see Register). Cloning now, before unlocking, gives the
+	// scheduler an independent snapshot with no shared map.
+	var schedClone *Auth
+	if m.scheduler != nil {
+		schedClone = auth.Clone()
+	}
 	m.auths[auth.ID] = authClone
 	m.mu.Unlock()
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
-	if m.scheduler != nil {
-		m.scheduler.upsertAuth(authClone)
+	if schedClone != nil {
+		m.scheduler.upsertAuth(schedClone)
 	}
 	m.queueRefreshReschedule(auth.ID)
 	_ = m.persist(ctx, auth)
@@ -5341,10 +5360,16 @@ func (m *Manager) InjectCredentials(req *http.Request, authID string) error {
 		return nil
 	}
 	m.mu.RLock()
-	a := m.auths[authID]
+	shared := m.auths[authID]
+	var a *Auth
 	var exec ProviderExecutor
-	if a != nil {
-		exec = m.executors[executorKeyFromAuth(a)]
+	if shared != nil {
+		// Clone under the lock: PrepareRequest mutates auth.Attributes (e.g.
+		// kimi/xai set base_url/auth_kind), and handing out the m.auths pointer
+		// would race other holders that read it outside m.mu later. The written
+		// values are idempotent derived settings, so the per-request copy is safe.
+		a = shared.Clone()
+		exec = m.executors[executorKeyFromAuth(shared)]
 	}
 	m.mu.RUnlock()
 	if a == nil || exec == nil {
