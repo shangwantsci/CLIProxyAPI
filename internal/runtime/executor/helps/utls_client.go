@@ -325,6 +325,10 @@ func NewUtlsHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeout time
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
 
+	// authID keys the pooled roundtripper per account. Manager.Register assigns a
+	// UUID before any auth reaches an executor, so auth.ID is non-empty in
+	// production; an empty authID (nil auth) only merges connections, which is
+	// harmless because auth is carried per-request in HTTP headers, not per-conn.
 	var authID string
 	if auth != nil {
 		authID = auth.ID

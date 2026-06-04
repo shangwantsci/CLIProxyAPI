@@ -189,8 +189,11 @@ func TestNewUtlsHTTPClient_DifferentAuthDoesNotShare(t *testing.T) {
 	resetSharedUtlsPoolForTest()
 	cA := NewUtlsHTTPClient(&config.Config{}, &cliproxyauth.Auth{ID: "auth-A"}, 0)
 	cB := NewUtlsHTTPClient(&config.Config{}, &cliproxyauth.Auth{ID: "auth-B"}, 0)
-	fA := cA.Transport.(*fallbackRoundTripper)
-	fB := cB.Transport.(*fallbackRoundTripper)
+	fA, okA := cA.Transport.(*fallbackRoundTripper)
+	fB, okB := cB.Transport.(*fallbackRoundTripper)
+	if !okA || !okB {
+		t.Fatalf("transport types = %T, %T; want *fallbackRoundTripper", cA.Transport, cB.Transport)
+	}
 	if fA.utls == fB.utls {
 		t.Error("different authID must not share a utls roundtripper")
 	}
