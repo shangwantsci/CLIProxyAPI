@@ -94,3 +94,64 @@ func TestRoundTripperClose_ClosesAll(t *testing.T) {
 		t.Errorf("Close must empty the connections map, got %d", len(rt.connections))
 	}
 }
+
+func TestPoolGetRoundTripper_ReuseAndIsolation(t *testing.T) {
+	p := newUtlsClientPool()
+
+	rtA1, err := p.getRoundTripper("", "auth-A")
+	if err != nil {
+		t.Fatalf("getRoundTripper A1: %v", err)
+	}
+	rtA2, err := p.getRoundTripper("", "auth-A")
+	if err != nil {
+		t.Fatalf("getRoundTripper A2: %v", err)
+	}
+	if rtA1 != rtA2 {
+		t.Error("same (proxy, authID) must return the same roundtripper pointer")
+	}
+
+	rtB, err := p.getRoundTripper("", "auth-B")
+	if err != nil {
+		t.Fatalf("getRoundTripper B: %v", err)
+	}
+	if rtA1 == rtB {
+		t.Error("different authID must return different roundtrippers")
+	}
+
+	rtProxy, err := p.getRoundTripper("socks5://127.0.0.1:1080", "auth-A")
+	if err != nil {
+		t.Fatalf("getRoundTripper proxy: %v", err)
+	}
+	if rtProxy == rtA1 {
+		t.Error("different proxyURL must return different roundtrippers")
+	}
+}
+
+func TestPoolGetRoundTripper_InvalidProxyNotCached(t *testing.T) {
+	p := newUtlsClientPool()
+	_, err := p.getRoundTripper("ftp://bad.example.com:21", "auth-A")
+	if err == nil {
+		t.Fatal("invalid proxy must return an error")
+	}
+	if got := p.size(); got != 0 {
+		t.Fatalf("invalid proxy must not be cached, pool size = %d", got)
+	}
+}
+
+func TestPoolCleanupSweep_DropsEmptyRoundtrippers(t *testing.T) {
+	p := newUtlsClientPool()
+	rt, err := p.getRoundTripper("", "auth-A")
+	if err != nil {
+		t.Fatalf("getRoundTripper: %v", err)
+	}
+	// Inject one idle connection that cleanupIdle will close.
+	rt.mu.Lock()
+	rt.connections["host"] = &fakeH2Conn{state: http2.ClientConnState{LastIdle: time.Now().Add(-300 * time.Second)}}
+	rt.mu.Unlock()
+
+	p.sweep(90 * time.Second)
+
+	if got := p.size(); got != 0 {
+		t.Fatalf("roundtripper emptied by cleanup must be dropped from pool, size = %d", got)
+	}
+}

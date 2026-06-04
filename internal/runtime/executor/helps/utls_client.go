@@ -182,6 +182,116 @@ func (t *utlsRoundTripper) connectionCount() int {
 	return len(t.connections)
 }
 
+// utlsClientPool caches one *utlsRoundTripper per (proxyURL, authID) so that
+// HTTP/2 connections to api.anthropic.com are reused across requests instead of
+// being rebuilt-and-leaked per request. A background goroutine periodically
+// closes idle connections.
+type utlsClientPool struct {
+	mu            sync.RWMutex
+	roundtrippers map[string]*utlsRoundTripper
+}
+
+// poolKey joins proxyURL and authID with a NUL separator to avoid ambiguity
+// between values that would otherwise concatenate to the same string.
+func poolKey(proxyURL, authID string) string {
+	return proxyURL + "\x00" + authID
+}
+
+func newUtlsClientPool() *utlsClientPool {
+	return &utlsClientPool{roundtrippers: make(map[string]*utlsRoundTripper)}
+}
+
+// getRoundTripper returns the cached roundtripper for (proxyURL, authID),
+// creating one on miss. A roundtripper that fails to build (invalid proxy) is
+// returned with the error and NOT cached.
+func (p *utlsClientPool) getRoundTripper(proxyURL, authID string) (*utlsRoundTripper, error) {
+	key := poolKey(proxyURL, authID)
+
+	p.mu.RLock()
+	if rt, ok := p.roundtrippers[key]; ok {
+		p.mu.RUnlock()
+		return rt, nil
+	}
+	p.mu.RUnlock()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	// Re-check after acquiring the write lock (another goroutine may have built it).
+	if rt, ok := p.roundtrippers[key]; ok {
+		return rt, nil
+	}
+	rt, err := newUtlsRoundTripper(proxyURL)
+	if err != nil {
+		return nil, err
+	}
+	p.roundtrippers[key] = rt
+	return rt, nil
+}
+
+// size reports the number of cached roundtrippers (test/diagnostic helper).
+func (p *utlsClientPool) size() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return len(p.roundtrippers)
+}
+
+// sweep runs cleanupIdle on every roundtripper and drops the ones left empty.
+// Lock order is strictly pool-then-roundtripper: snapshot pointers under the
+// pool lock, release it, run per-roundtripper cleanup, then reacquire the pool
+// lock only to delete now-empty entries.
+func (p *utlsClientPool) sweep(threshold time.Duration) {
+	p.mu.RLock()
+	snapshot := make(map[string]*utlsRoundTripper, len(p.roundtrippers))
+	for k, rt := range p.roundtrippers {
+		snapshot[k] = rt
+	}
+	p.mu.RUnlock()
+
+	for _, rt := range snapshot {
+		rt.cleanupIdle(threshold)
+	}
+
+	p.mu.Lock()
+	for k, rt := range snapshot {
+		if cur, ok := p.roundtrippers[k]; ok && cur == rt && rt.connectionCount() == 0 {
+			delete(p.roundtrippers, k)
+		}
+	}
+	p.mu.Unlock()
+}
+
+// startCleanup launches the process-level background sweeper. Called once via
+// sync.Once from the package singleton.
+func (p *utlsClientPool) startCleanup(interval, threshold time.Duration) {
+	ticker := time.NewTicker(interval)
+	go func() {
+		for range ticker.C {
+			p.sweep(threshold)
+		}
+	}()
+}
+
+const (
+	utlsCleanupInterval = 60 * time.Second
+	utlsIdleConnTimeout = 90 * time.Second
+)
+
+var (
+	globalUtlsPool     *utlsClientPool
+	globalUtlsPoolOnce sync.Once
+)
+
+// sharedUtlsPool returns the process-wide pool, starting its background cleanup
+// goroutine on first use. The pool is shared across executor instances so config
+// hot-reload (which rebuilds executors) never leaks goroutines or connections.
+func sharedUtlsPool() *utlsClientPool {
+	globalUtlsPoolOnce.Do(func() {
+		globalUtlsPool = newUtlsClientPool()
+		globalUtlsPool.startCleanup(utlsCleanupInterval, utlsIdleConnTimeout)
+	})
+	return globalUtlsPool
+}
+
 // anthropicHosts contains the hosts that should use utls Chrome TLS fingerprint.
 var anthropicHosts = map[string]struct{}{
 	"api.anthropic.com": {},
