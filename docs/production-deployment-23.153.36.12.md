@@ -58,15 +58,24 @@ Traefik 动态路由：
 
 ## 当前部署版本
 
-- 后端提交：`ed87579a`（全局并发上限带宽保护阀 + 伪装诊断三项修正 + account_session_invalid 永久失效归类）
-- 前端提交：`c0ef735`（伪装诊断兜底常量修正到真实基线 2.1.161/0.94.0/v24.3.0）
-- 最近一次按本文档部署时间：`2026-06-03T14:00:18+00:00`
-- 本次部署后端二进制 sha256：`c85206261c7d5e61d9668fdcc77809410d6c113d25a03a232c7d2ccdbe943dfa`
-- 本次部署 management.html sha256：`87cb47d5be842a2d07cdeeed7d6bb45ce2e1074fc2ee7b5b7018e78c93ad7436`
-- 部署前运行版本 backend=`e71bfde5`，binary sha256 `a8583cfa…ee447`
-- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260603-135746.bak`（可回滚到 `e71bfde5`）
-- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260603-135746.tgz`
-- 部署后账号数：727 个 json，容器重启后加载 726 auth entries（账号增删由晓宇手动管理）
+- 后端提交：`644d9ea0`（图片 input token 估算修复：billable 投影不再把图片 base64 当文本算，改按 Anthropic `(w×h)/750` 解码估算视觉 token）
+- 前端提交：`c0ef735`（伪装诊断兜底常量修正到真实基线 2.1.161/0.94.0/v24.3.0；本轮仅后端部署，前端未变）
+- 最近一次按本文档部署时间：`2026-06-05T03:49:24+00:00`
+- 本次部署后端二进制 sha256：`50e6838228d90615f51d8a963de85bb7dea8b586985f48629f57e349d5cdfcde`
+- 部署前运行版本 backend=`f891f796`，binary sha256 `5dffa567…452b`
+- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260605-034743.bak`（可回滚到 `f891f796`）
+- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260605-034743.tgz`
+- 部署后账号数：936 个 json，容器重启后加载 935 auth entries（账号增删由晓宇手动管理）
+
+### 本轮变更说明（644d9ea0）
+
+仅后端、仅 `internal/runtime/executor/helps/` 4 文件（2 改 + 2 新）。修复 `EstimateClaudeBillableInputTokens`/`CountOpenAIChatTokens` 把图片内容块的 base64 当文本喂 tokenizer 的 bug：Claude 原生 `image` 块落入 `collectOpenAIContent` 的 default 分支整块 `part.Raw` 计入，OpenAI `image_url` 把 data URL base64 计入，导致 640×640 图被估成 32766 token（真实 ~546，约 60 倍高估，仅在上游无 cache breakdown 时生效）。改为解码图头拿 w×h、按 Anthropic `(w×h)/750`（含 1568px 长边 + 1.15MP 面积缩放上限）估算视觉 token，base64 不再进文本 tokenizer，解码失败回退保守固定值。纯文本估算值不变。AGENTS.md 强制 cache breakdown 回归全过。
+
+### 上一轮部署版本（已被 644d9ea0 取代）
+
+- 后端提交：`f891f796`（concurrent map fatal 根治：InjectCredentials 锁内 clone 共享 *Auth）
+- 部署时间：`2026-06-04T08:58:47+00:00`，binary sha256 `5dffa567…452b`
+- 回滚备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260604-085841.bak`（回到上上版 f261f415/1e716936）
 
 ### 本轮新增配置项
 
