@@ -57,28 +57,30 @@ func EstimateClaudeBillableInputTokens(model, sourceFormat string, payload []byt
 
 	root := gjson.ParseBytes(payload)
 	segments := make([]string, 0, 32)
-	collectClaudeBillableSystem(root.Get("system"), &segments)
-	collectOpenAIMessages(root.Get("messages"), &segments)
+	var imageTokens int64
+	collectClaudeBillableSystem(root.Get("system"), &segments, &imageTokens)
+	collectOpenAIMessages(root.Get("messages"), &segments, &imageTokens)
 	collectOpenAITools(root.Get("tools"), &segments)
 	collectOpenAIFunctions(root.Get("functions"), &segments)
 	collectOpenAIToolChoice(root.Get("tool_choice"), &segments)
 	collectOpenAIResponseFormat(root.Get("response_format"), &segments)
-	collectOpenAIContent(root.Get("input"), &segments)
+	collectOpenAIContent(root.Get("input"), &segments, &imageTokens)
 	addIfNotEmpty(&segments, root.Get("instructions").String())
 	addIfNotEmpty(&segments, root.Get("prompt").String())
 
 	joined := strings.TrimSpace(strings.Join(segments, "\n"))
 	if joined == "" {
-		return 0
+		return imageTokens
 	}
 	count, err := enc.Count(joined)
 	if err != nil {
 		return 0
 	}
-	if count <= 0 {
+	total := int64(count) + imageTokens
+	if total <= 0 {
 		return 0
 	}
-	return int64(count)
+	return total
 }
 
 func ClaudeBillableInputTokens(ctx context.Context, fallbackModel, fallbackSourceFormat string, fallbackOriginal []byte) (int64, bool) {
@@ -239,7 +241,7 @@ func BuildClaudeTokenCountJSON(count int64) []byte {
 	return out
 }
 
-func collectClaudeBillableSystem(system gjson.Result, segments *[]string) {
+func collectClaudeBillableSystem(system gjson.Result, segments *[]string, imageTokens *int64) {
 	if !system.Exists() {
 		return
 	}
@@ -249,8 +251,12 @@ func collectClaudeBillableSystem(system gjson.Result, segments *[]string) {
 	}
 	if system.IsArray() {
 		system.ForEach(func(_, item gjson.Result) bool {
-			if item.Get("type").String() == "text" {
+			switch item.Get("type").String() {
+			case "text":
 				addIfNotEmpty(segments, item.Get("text").String())
+				return true
+			case "image", "input_image":
+				addClaudeImageTokens(item.Get("source"), imageTokens)
 				return true
 			}
 			if item.Type == gjson.JSON {

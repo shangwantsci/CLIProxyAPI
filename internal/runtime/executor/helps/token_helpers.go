@@ -48,26 +48,27 @@ func CountOpenAIChatTokens(enc tokenizer.Codec, payload []byte) (int64, error) {
 
 	root := gjson.ParseBytes(payload)
 	segments := make([]string, 0, 32)
+	var imageTokens int64
 
-	collectOpenAIMessages(root.Get("messages"), &segments)
+	collectOpenAIMessages(root.Get("messages"), &segments, &imageTokens)
 	collectOpenAITools(root.Get("tools"), &segments)
 	collectOpenAIFunctions(root.Get("functions"), &segments)
 	collectOpenAIToolChoice(root.Get("tool_choice"), &segments)
 	collectOpenAIResponseFormat(root.Get("response_format"), &segments)
-	collectOpenAIContent(root.Get("input"), &segments)
+	collectOpenAIContent(root.Get("input"), &segments, &imageTokens)
 	addIfNotEmpty(&segments, root.Get("instructions").String())
 	addIfNotEmpty(&segments, root.Get("prompt").String())
 
 	joined := strings.TrimSpace(strings.Join(segments, "\n"))
 	if joined == "" {
-		return 0, nil
+		return imageTokens, nil
 	}
 
 	count, err := enc.Count(joined)
 	if err != nil {
 		return 0, err
 	}
-	return int64(count), nil
+	return int64(count) + imageTokens, nil
 }
 
 // BuildOpenAIUsageJSON returns a minimal usage structure understood by downstream translators.
@@ -75,21 +76,21 @@ func BuildOpenAIUsageJSON(count int64) []byte {
 	return []byte(fmt.Sprintf(`{"usage":{"prompt_tokens":%d,"completion_tokens":0,"total_tokens":%d}}`, count, count))
 }
 
-func collectOpenAIMessages(messages gjson.Result, segments *[]string) {
+func collectOpenAIMessages(messages gjson.Result, segments *[]string, imageTokens *int64) {
 	if !messages.Exists() || !messages.IsArray() {
 		return
 	}
 	messages.ForEach(func(_, message gjson.Result) bool {
 		addIfNotEmpty(segments, message.Get("role").String())
 		addIfNotEmpty(segments, message.Get("name").String())
-		collectOpenAIContent(message.Get("content"), segments)
+		collectOpenAIContent(message.Get("content"), segments, imageTokens)
 		collectOpenAIToolCalls(message.Get("tool_calls"), segments)
 		collectOpenAIFunctionCall(message.Get("function_call"), segments)
 		return true
 	})
 }
 
-func collectOpenAIContent(content gjson.Result, segments *[]string) {
+func collectOpenAIContent(content gjson.Result, segments *[]string, imageTokens *int64) {
 	if !content.Exists() {
 		return
 	}
@@ -104,15 +105,19 @@ func collectOpenAIContent(content gjson.Result, segments *[]string) {
 			case "text", "input_text", "output_text":
 				addIfNotEmpty(segments, part.Get("text").String())
 			case "image_url":
-				addIfNotEmpty(segments, part.Get("image_url.url").String())
+				// OpenAI-style image: count visual tokens, never the base64 text.
+				addImageURLTokens(part.Get("image_url.url").String(), imageTokens)
+			case "image", "input_image":
+				// Claude-native image block: estimate from dimensions only.
+				addClaudeImageTokens(part.Get("source"), imageTokens)
 			case "input_audio", "output_audio", "audio":
 				addIfNotEmpty(segments, part.Get("id").String())
 			case "tool_result":
 				addIfNotEmpty(segments, part.Get("name").String())
-				collectOpenAIContent(part.Get("content"), segments)
+				collectOpenAIContent(part.Get("content"), segments, imageTokens)
 			default:
 				if part.IsArray() {
-					collectOpenAIContent(part, segments)
+					collectOpenAIContent(part, segments, imageTokens)
 					return true
 				}
 				if part.Type == gjson.JSON {
