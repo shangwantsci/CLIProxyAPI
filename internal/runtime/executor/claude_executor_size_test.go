@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 func TestCheckClaudeUpstreamBodySizeRejectsOversized(t *testing.T) {
@@ -11,15 +13,21 @@ func TestCheckClaudeUpstreamBodySizeRejectsOversized(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for oversized body, got nil")
 	}
-	se, ok := err.(statusErr)
+	authErr, ok := err.(*cliproxyauth.Error)
 	if !ok {
-		t.Fatalf("expected statusErr, got %T", err)
+		t.Fatalf("expected *cliproxyauth.Error, got %T", err)
 	}
-	if se.code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("code = %d, want 413", se.code)
+	if authErr.Code != cliproxyauth.LocalRequestTooLargeErrorCode {
+		t.Fatalf("code = %q, want %q (must be a local request-guard error so the conductor excludes it from account health)", authErr.Code, cliproxyauth.LocalRequestTooLargeErrorCode)
 	}
-	if !strings.Contains(se.msg, "exceeds") {
-		t.Fatalf("msg should explain size limit, got %q", se.msg)
+	if authErr.HTTPStatus != http.StatusRequestEntityTooLarge {
+		t.Fatalf("HTTPStatus = %d, want 413", authErr.HTTPStatus)
+	}
+	if authErr.Retryable {
+		t.Fatal("Retryable = true, want false: an oversized body will not shrink on retry")
+	}
+	if !strings.Contains(authErr.Message, "exceeds") {
+		t.Fatalf("message should explain size limit, got %q", authErr.Message)
 	}
 }
 

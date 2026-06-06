@@ -2,6 +2,13 @@ package auth
 
 const LocalRequestGuardErrorCode = "claude_mimicry_guard_blocked"
 
+// LocalRequestTooLargeErrorCode marks a request rejected locally because its
+// body exceeds the configured Claude upstream size limit. The request never
+// reaches upstream, so this must be treated like other local guard errors and
+// excluded from account health, otherwise oversized client requests would
+// wrongly mark healthy accounts as request-error.
+const LocalRequestTooLargeErrorCode = "claude_request_too_large"
+
 // Error describes an authentication related failure in a provider agnostic format.
 type Error struct {
 	// Code is a short machine readable identifier.

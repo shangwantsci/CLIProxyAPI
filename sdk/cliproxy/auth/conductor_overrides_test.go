@@ -874,6 +874,57 @@ func TestManager_Execute_LocalMimicryGuardErrorDoesNotCooldownAuth(t *testing.T)
 	}
 }
 
+func TestManager_Execute_LocalRequestTooLargeErrorDoesNotMarkAuthUnhealthy(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"auth-too-large": &Error{
+				Code:       LocalRequestTooLargeErrorCode,
+				HTTPStatus: http.StatusRequestEntityTooLarge,
+				Message:    "request body (34681338 bytes) exceeds the maximum size (31457280 bytes); reduce attachments or shorten the conversation history",
+				Retryable:  false,
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	auth := &Auth{ID: "auth-too-large", Provider: "claude"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "claude-sonnet-4-6"
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+	_, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatal("expected oversized-request error")
+	}
+	if statusCodeFromError(errExecute) != http.StatusRequestEntityTooLarge {
+		t.Fatalf("execute status = %d, want %d", statusCodeFromError(errExecute), http.StatusRequestEntityTooLarge)
+	}
+
+	updated, ok := m.GetByID("auth-too-large")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to remain registered")
+	}
+	if updated.Unavailable {
+		t.Fatalf("auth.Unavailable = true, want false: oversized request was blocked locally, account is healthy")
+	}
+	if updated.Status == StatusError {
+		t.Fatalf("auth.Status = StatusError, want healthy: local 413 must not mark the account as request-error")
+	}
+	if updated.LastError != nil {
+		t.Fatalf("auth.LastError = %#v, want nil: local 413 must not be recorded on the account", updated.LastError)
+	}
+	if state := updated.ModelStates[model]; state != nil && state.Unavailable {
+		t.Fatalf("model state should not be cooled down by local oversized-request block: %#v", state)
+	}
+}
+
 func TestManager_Execute_DisableCooling_RetriesAfter429RetryAfter(t *testing.T) {
 	prev := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)

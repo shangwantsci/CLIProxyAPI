@@ -2707,7 +2707,8 @@ func isLocalRequestGuardError(err error) bool {
 	if !errors.As(err, &authErr) || authErr == nil {
 		return false
 	}
-	return authErr.Code == LocalRequestGuardErrorCode
+	return authErr.Code == LocalRequestGuardErrorCode ||
+		authErr.Code == LocalRequestTooLargeErrorCode
 }
 
 func isUnauthorizedError(err error) bool {

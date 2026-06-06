@@ -1138,18 +1138,21 @@ func newClaudeStatusErr(statusCode int, body []byte, headers http.Header) status
 }
 
 // checkClaudeUpstreamBodySize rejects request bodies larger than limit (bytes)
-// before they are sent upstream. Anthropic returns HTTP 413 for oversized
-// requests, which lands in the conductor's zero-cooldown default branch and lets
-// the same oversized request hammer the account repeatedly. A limit <= 0 disables
-// the check.
+// before they are sent upstream. The request never reaches Anthropic, so it is
+// returned as a local request-guard error (LocalRequestTooLargeErrorCode): the
+// conductor short-circuits these without recording them on account health, so an
+// oversized client request does not mark an otherwise healthy account as
+// request-error. A limit <= 0 disables the check.
 func checkClaudeUpstreamBodySize(body []byte, limit int) error {
 	if limit <= 0 {
 		return nil
 	}
 	if len(body) > limit {
-		return statusErr{
-			code: http.StatusRequestEntityTooLarge,
-			msg:  fmt.Sprintf("request body (%d bytes) exceeds the maximum size (%d bytes); reduce attachments or shorten the conversation history", len(body), limit),
+		return &cliproxyauth.Error{
+			Code:       cliproxyauth.LocalRequestTooLargeErrorCode,
+			Message:    fmt.Sprintf("request body (%d bytes) exceeds the maximum size (%d bytes); reduce attachments or shorten the conversation history", len(body), limit),
+			Retryable:  false,
+			HTTPStatus: http.StatusRequestEntityTooLarge,
 		}
 	}
 	return nil
