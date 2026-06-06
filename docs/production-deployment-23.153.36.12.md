@@ -58,24 +58,25 @@ Traefik 动态路由：
 
 ## 当前部署版本
 
+- 后端提交：`71b68992`（请求体过大 413 不再污染账号健康：`checkClaudeUpstreamBodySize` 改返回带 `LocalRequestTooLargeErrorCode` 的本地守卫错误，conductor 短路豁免、不写入账号 `LastError/Status`，客户端仍收到 413）
+- 前端提交：`c0ef735`（未变；本轮仅后端部署）
+- 最近一次按本文档部署时间：`2026-06-06T04:12:09+00:00`
+- 本次部署后端二进制 sha256：`f07396238658f40fc2af74b6d8d6eac05cdcc40f388eec6bdfe7b6cb0bcfe9bf`
+- 部署前运行版本 backend=`644d9ea0`，binary sha256 `50e6838228d90615f51d8a963de85bb7dea8b586985f48629f57e349d5cdfcde`
+- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260606-000917.bak`（可回滚到 `644d9ea0`）
+- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260606-000917.tgz`
+- 部署后账号数：839 个 json，容器重启后加载 838 auth entries（账号增删由晓宇手动管理）
+
+### 本轮变更说明（71b68992）
+
+仅后端、5 文件（3 改 + 2 测试）。修复本地请求体大小拦截误标账号的 bug：`checkClaudeUpstreamBodySize`（`internal/runtime/executor/claude_executor.go`）在请求体超过 `claude-max-request-bytes`（默认 30 MiB）时本地返回 413、不发上游，但原先返回的是普通 `statusErr`，conductor 的 `isLocalRequestGuardError` 只豁免带 `LocalRequestGuardErrorCode` 的 `*auth.Error`，导致该 413 落入 `MarkResult`，把**根本没碰上游的健康账号**写成 `StatusError`/`LastError=413`，管理面板误显示「请求异常」。改为返回 `*auth.Error{Code: LocalRequestTooLargeErrorCode(新增常量), HTTPStatus:413, Retryable:false}`，并让 `isLocalRequestGuardError` 同时认这个新 code（与并发限流 429、mimicry guard 400 同款豁免机制）。修复后：客户端仍收到 413「请求过大」，账号不再被误标、也不会拿超大请求换账号重试。改动文件：`sdk/cliproxy/auth/errors.go`、`sdk/cliproxy/auth/conductor.go`、`internal/runtime/executor/claude_executor.go`、`sdk/cliproxy/auth/conductor_overrides_test.go`(新增测试)、`internal/runtime/executor/claude_executor_size_test.go`(更新契约)。`auth` 包、`helps` 包（含 AGENTS.md 强制 cache breakdown 5 回归）全过；`executor` 包除 2 个预存失败（antigravity loadCodeAssist mock URL，经 git stash 客观验证与本改动无关）外全过。
+
+### 上一轮部署版本（已被 71b68992 取代）
+
 - 后端提交：`644d9ea0`（图片 input token 估算修复：billable 投影不再把图片 base64 当文本算，改按 Anthropic `(w×h)/750` 解码估算视觉 token）
-- 前端提交：`c0ef735`（伪装诊断兜底常量修正到真实基线 2.1.161/0.94.0/v24.3.0；本轮仅后端部署，前端未变）
-- 最近一次按本文档部署时间：`2026-06-05T03:49:24+00:00`
-- 本次部署后端二进制 sha256：`50e6838228d90615f51d8a963de85bb7dea8b586985f48629f57e349d5cdfcde`
-- 部署前运行版本 backend=`f891f796`，binary sha256 `5dffa567…452b`
-- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260605-034743.bak`（可回滚到 `f891f796`）
-- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260605-034743.tgz`
-- 部署后账号数：936 个 json，容器重启后加载 935 auth entries（账号增删由晓宇手动管理）
-
-### 本轮变更说明（644d9ea0）
-
-仅后端、仅 `internal/runtime/executor/helps/` 4 文件（2 改 + 2 新）。修复 `EstimateClaudeBillableInputTokens`/`CountOpenAIChatTokens` 把图片内容块的 base64 当文本喂 tokenizer 的 bug：Claude 原生 `image` 块落入 `collectOpenAIContent` 的 default 分支整块 `part.Raw` 计入，OpenAI `image_url` 把 data URL base64 计入，导致 640×640 图被估成 32766 token（真实 ~546，约 60 倍高估，仅在上游无 cache breakdown 时生效）。改为解码图头拿 w×h、按 Anthropic `(w×h)/750`（含 1568px 长边 + 1.15MP 面积缩放上限）估算视觉 token，base64 不再进文本 tokenizer，解码失败回退保守固定值。纯文本估算值不变。AGENTS.md 强制 cache breakdown 回归全过。
-
-### 上一轮部署版本（已被 644d9ea0 取代）
-
-- 后端提交：`f891f796`（concurrent map fatal 根治：InjectCredentials 锁内 clone 共享 *Auth）
-- 部署时间：`2026-06-04T08:58:47+00:00`，binary sha256 `5dffa567…452b`
-- 回滚备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260604-085841.bak`（回到上上版 f261f415/1e716936）
+- 前端提交：`c0ef735`（伪装诊断兜底常量修正到真实基线 2.1.161/0.94.0/v24.3.0）
+- 部署时间：`2026-06-05T03:49:24+00:00`，binary sha256 `50e6838228d90615f51d8a963de85bb7dea8b586985f48629f57e349d5cdfcde`
+- 回滚备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260605-034743.bak`（回到 `f891f796`）
 
 ### 本轮新增配置项
 
