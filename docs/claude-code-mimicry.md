@@ -161,6 +161,7 @@ effort-2025-11-24
 oauth-2025-04-20
 prompt-caching-scope-2026-01-05
 context-management-2025-06-27
+context-1m-2025-08-07
 extended-cache-ttl-2025-04-11
 fine-grained-tool-streaming-2025-05-14
 structured-outputs-2025-12-15
@@ -175,8 +176,10 @@ mid-conversation-system-2026-04-07
 当前会丢弃：
 
 ```text
-context-1m-2025-08-07
+（无）
 ```
+
+> `context-1m-2025-08-07`（1M 上下文）历史上曾被强制丢弃以收窄请求形态、降低订阅号被识别为非官方客户端的风险。2026-06-08（commit `fa83c466`）按业务需求改为放开：从丢弃表移除并加入上述允许白名单，使客户端显式请求 1M 时能透传上游、且不被 mimicry guard 判为 unexpected beta 拦截。它**不在默认注入列表**，仅当客户端显式携带时才透传，因此只有真正需要 1M 的请求才暴露该指纹。**风险**：走此路径的请求（含 OAuth 订阅号）会向上游暴露真实 Claude Code 不发送的 1M 指纹，存在被风控的可能；这是已知并被接受的取舍。
 
 维护原则：
 
@@ -220,6 +223,7 @@ context-1m-2025-08-07
 - `thinking.type` 为 `enabled`、`adaptive` 或 `auto` 时，`output_config.effort=xhigh` 会降级为 `high`。这是按 2026-05-29 生产日志中上游明确拒绝 `xhigh`，且真实 Opus 4.8 OAuth 抓包使用 `high` 校准。
 - `thinking.budget_tokens` 超出已知模型 `thinking.min/max` 时会 clamp 到模型范围内；如请求同时设置 `max_tokens`，会尽量保持 `budget_tokens < max_tokens`。
 - `messages[*].content` 中空字符串 text block 会删除；如果非空 text block 带 `cache_control`，该字段必须保留。
+- `cache_control` TTL 归一化（`normalizeCacheControlTTL`）：Anthropic 要求按 `tools → system → messages` 的求值顺序，1h TTL 块不能排在 5m 块之后。号池注入的 Claude Code 身份/runtime context 块带默认（5m）`cache_control` 且排在最前，会与客户端显式的 `ttl="1h"` 块冲突。**策略（2026-06-08 commit `fa83c466` 起）**：只要请求中存在任意客户端显式 1h 块（仅客户端会写 `ttl="1h"`，号池注入块不写 ttl），就把**所有** ephemeral 块统一升级为 1h，保住客户端的 1h 缓存意图，同时让顺序天然合法。请求中没有 1h 块时字节级原样返回，默认（5m）行为不变。注意：升级只改 `cache_control.ttl`，不动 system block 的 `text`，因此不影响 mimicry guard 的 system 块哈希审计（该审计只哈希 `text`）。此前的旧策略是反向的——遇到 5m 块就把后续 1h 块降级成 5m，会静默丢掉客户端请求的 1h 缓存，已废弃。
 - `context_management.edits` 中的 `clear_thinking_20251015` 只有在最终请求没有 `enabled/adaptive/auto` thinking 时才会删除，避免被上游以“clear_thinking 需要 thinking”为由拒绝。
 - 前置修复和最终修复分层执行：`ApplyThinking` 前只修会导致本地 thinking 校验失败的字段；`ApplyThinking` 和 payload config 完成后再根据最终 body 处理 `context_management`，避免误删模型后缀稍后启用 thinking 的合法请求。
 

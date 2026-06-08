@@ -58,25 +58,32 @@ Traefik 动态路由：
 
 ## 当前部署版本
 
-- 后端提交：`71b68992`（请求体过大 413 不再污染账号健康：`checkClaudeUpstreamBodySize` 改返回带 `LocalRequestTooLargeErrorCode` 的本地守卫错误，conductor 短路豁免、不写入账号 `LastError/Status`，客户端仍收到 413）
+- 后端提交：`fa83c466`（保住客户端 1h 缓存 TTL + 放开 1M 上下文：`normalizeCacheControlTTL` 改为「有任意客户端显式 1h 块则把所有 ephemeral 块统一升级为 1h」，不再把客户的 1h 静默降级成 5m；`context-1m-2025-08-07` 从丢弃表移除并加入 beta 允许白名单，客户端显式请求时透传上游且不被 mimicry guard 拦截）
 - 前端提交：`c0ef735`（未变；本轮仅后端部署）
-- 最近一次按本文档部署时间：`2026-06-06T04:12:09+00:00`
-- 本次部署后端二进制 sha256：`f07396238658f40fc2af74b6d8d6eac05cdcc40f388eec6bdfe7b6cb0bcfe9bf`
-- 部署前运行版本 backend=`644d9ea0`，binary sha256 `50e6838228d90615f51d8a963de85bb7dea8b586985f48629f57e349d5cdfcde`
-- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260606-000917.bak`（可回滚到 `644d9ea0`）
-- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260606-000917.tgz`
-- 部署后账号数：839 个 json，容器重启后加载 838 auth entries（账号增删由晓宇手动管理）
+- 最近一次按本文档部署时间：`2026-06-08T04:38:25+00:00`
+- 本次部署后端二进制 sha256：`67461f9370c3c0176f6358e3ae59161db53ebf7c5f28a96c41c63d856f97d6ac`
+- 部署前运行版本 backend=`71b68992`，binary sha256 `f07396238658f40fc2af74b6d8d6eac05cdcc40f388eec6bdfe7b6cb0bcfe9bf`
+- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260608-043614.bak`（可回滚到 `71b68992`）
+- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260608-043614.tgz`
+- 部署后账号数：1195 个 json（账号增删由晓宇手动管理）
 
-### 本轮变更说明（71b68992）
+### 本轮变更说明（fa83c466）
 
-仅后端、5 文件（3 改 + 2 测试）。修复本地请求体大小拦截误标账号的 bug：`checkClaudeUpstreamBodySize`（`internal/runtime/executor/claude_executor.go`）在请求体超过 `claude-max-request-bytes`（默认 30 MiB）时本地返回 413、不发上游，但原先返回的是普通 `statusErr`，conductor 的 `isLocalRequestGuardError` 只豁免带 `LocalRequestGuardErrorCode` 的 `*auth.Error`，导致该 413 落入 `MarkResult`，把**根本没碰上游的健康账号**写成 `StatusError`/`LastError=413`，管理面板误显示「请求异常」。改为返回 `*auth.Error{Code: LocalRequestTooLargeErrorCode(新增常量), HTTPStatus:413, Retryable:false}`，并让 `isLocalRequestGuardError` 同时认这个新 code（与并发限流 429、mimicry guard 400 同款豁免机制）。修复后：客户端仍收到 413「请求过大」，账号不再被误标、也不会拿超大请求换账号重试。改动文件：`sdk/cliproxy/auth/errors.go`、`sdk/cliproxy/auth/conductor.go`、`internal/runtime/executor/claude_executor.go`、`sdk/cliproxy/auth/conductor_overrides_test.go`(新增测试)、`internal/runtime/executor/claude_executor_size_test.go`(更新契约)。`auth` 包、`helps` 包（含 AGENTS.md 强制 cache breakdown 5 回归）全过；`executor` 包除 2 个预存失败（antigravity loadCodeAssist mock URL，经 git stash 客观验证与本改动无关）外全过。
+仅后端、3 文件（1 改 + 2 测试）。修复客户反馈的两个问题：
 
-### 上一轮部署版本（已被 71b68992 取代）
+1. **1h 缓存被降级成 5min**：号池伪装注入的 Claude Code system 块（身份块 / runtime context 块）带默认 5m `cache_control` 且排在客户端块之前。Anthropic 要求按 `tools→system→messages` 顺序「1h 块不能排在 5m 块之后」，原 `normalizeCacheControlTTL` 为满足该约束**把客户端显式的 `ttl="1h"` 剥掉、静默降级成 5m**。改为：只要请求含任意客户端显式 1h 块（仅客户端写 `ttl="1h"`，注入块不写 ttl），就把**所有** ephemeral 块统一升级为 1h，保住客户端 1h 意图、顺序天然合法；无 1h 块时字节级原样返回，默认 5m 行为不变。升级只改 `cache_control.ttl` 不动 `text`，不影响 guard 的 system 块哈希审计。
+2. **1M 上下文被禁用**：`context-1m-2025-08-07` 原在 `claudeDroppedBetaTokens` 被强制丢弃且不在 guard 白名单——透传也会被自家 guard 判 unexpected beta 拦截。改为从丢弃表移除 + 加入 `claudeAllowedBetaTokens` optional 白名单（**不**加入默认注入列表，仅客户端显式请求时透传）。**风险**：走此路径的请求（含 OAuth 订阅号）会暴露真实 Claude Code 不发送的 1M 指纹，存在风控可能，是已知并被接受的取舍。
 
-- 后端提交：`644d9ea0`（图片 input token 估算修复：billable 投影不再把图片 base64 当文本算，改按 Anthropic `(w×h)/750` 解码估算视觉 token）
-- 前端提交：`c0ef735`（伪装诊断兜底常量修正到真实基线 2.1.161/0.94.0/v24.3.0）
-- 部署时间：`2026-06-05T03:49:24+00:00`，binary sha256 `50e6838228d90615f51d8a963de85bb7dea8b586985f48629f57e349d5cdfcde`
-- 回滚备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260605-034743.bak`（回到 `f891f796`）
+改动文件：`internal/runtime/executor/claude_executor.go`、`internal/runtime/executor/claude_executor_test.go`、`internal/runtime/executor/claude_mimicry_audit_test.go`。`auth` 包、`helps` 包（含 AGENTS.md 强制 cache breakdown 5 回归）、`executor` 包（除 2 个预存 antigravity loadCodeAssist mock URL 失败外）全过；`go build ./...` 通过。
+
+**部署后生产实测**：① 1h 缓存——同最初复现请求,`ephemeral_1h_input_tokens` 从 0 → 1976、`ephemeral_5m` 从 3835 → 0,客户端 1h 完整保留;② 1M——带 `context-1m-2025-08-07` 的请求正常返回 200(修复前会被丢弃),360K-450K token 大输入正常处理。注:该上游路径默认上下文窗口已 >360K,未能用「不带 beta 被拒/带 beta 通过」建立 200K→1M 的精确边界对照。
+
+### 上一轮部署版本（已被 fa83c466 取代）
+
+- 后端提交：`71b68992`（请求体过大 413 不再污染账号健康：`checkClaudeUpstreamBodySize` 改返回带 `LocalRequestTooLargeErrorCode` 的本地守卫错误，conductor 短路豁免、不写入账号 `LastError/Status`，客户端仍收到 413）
+- 前端提交：`c0ef735`（未变）
+- 部署时间：`2026-06-06T04:12:09+00:00`，binary sha256 `f07396238658f40fc2af74b6d8d6eac05cdcc40f388eec6bdfe7b6cb0bcfe9bf`
+- 回滚备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260606-000917.bak`（回到 `644d9ea0`）
 
 ### 本轮新增配置项
 
