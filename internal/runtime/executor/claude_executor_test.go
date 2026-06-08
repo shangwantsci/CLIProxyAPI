@@ -200,15 +200,19 @@ func TestApplyClaudeHeaders_AddsLatestClaudeCodeMimicryBetas(t *testing.T) {
 	}
 }
 
-func TestApplyClaudeHeaders_DropsContext1MBetaFromClientAndBody(t *testing.T) {
+func TestApplyClaudeHeaders_ForwardsContext1MBetaFromClientAndBody(t *testing.T) {
+	// 1M context is intentionally enabled: context-1m-2025-08-07 is now an
+	// allowed beta, so a client that requests it (via header or body betas) must
+	// have it forwarded upstream. It is also on the mimicry guard allow-list, so
+	// it will not be flagged as an unexpected beta.
 	req := newClaudeHeaderTestRequest(t, http.Header{
 		"Anthropic-Beta": []string{"custom-beta,context-1m-2025-08-07"},
 	})
 	applyClaudeHeaders(req, &cliproxyauth.Auth{}, "key-betas-filter", false, []string{"context-1m-2025-08-07", "body-beta", "prompt-caching-scope-2026-01-05"}, &config.Config{})
 
 	got := req.Header.Get("Anthropic-Beta")
-	if strings.Contains(got, "context-1m-2025-08-07") {
-		t.Fatalf("Anthropic-Beta = %q, should drop context-1m", got)
+	if !strings.Contains(got, "context-1m-2025-08-07") {
+		t.Fatalf("Anthropic-Beta = %q, should forward context-1m", got)
 	}
 	for _, beta := range []string{"custom-beta", "body-beta"} {
 		if strings.Contains(got, beta) {
@@ -1452,7 +1456,14 @@ func TestApplyClaudeToolPrefix_SkipsBuiltinToolReference(t *testing.T) {
 	}
 }
 
-func TestNormalizeCacheControlTTL_DowngradesLaterOneHourBlocks(t *testing.T) {
+func TestNormalizeCacheControlTTL_UpgradesEarlierBlocksToOneHour(t *testing.T) {
+	// A client explicitly requests a 1h cache breakpoint (messages), while an
+	// earlier proxy-injected ephemeral block (system) carries no ttl (= default
+	// 5m). Anthropic forbids a 1h block after a 5m block in evaluation order, so
+	// the proxy must reconcile them. Instead of downgrading the client's 1h to
+	// 5m (which silently breaks the requested 1h caching), every ephemeral block
+	// is upgraded to 1h, preserving the client's intent while keeping the
+	// ordering valid.
 	payload := []byte(`{
 		"tools": [{"name":"t1","cache_control":{"type":"ephemeral","ttl":"1h"}}],
 		"system": [{"type":"text","text":"s1","cache_control":{"type":"ephemeral"}}],
@@ -1464,8 +1475,24 @@ func TestNormalizeCacheControlTTL_DowngradesLaterOneHourBlocks(t *testing.T) {
 	if got := gjson.GetBytes(out, "tools.0.cache_control.ttl").String(); got != "1h" {
 		t.Fatalf("tools.0.cache_control.ttl = %q, want %q", got, "1h")
 	}
-	if gjson.GetBytes(out, "messages.0.content.0.cache_control.ttl").Exists() {
-		t.Fatalf("messages.0.content.0.cache_control.ttl should be removed after a default-5m block")
+	if got := gjson.GetBytes(out, "system.0.cache_control.ttl").String(); got != "1h" {
+		t.Fatalf("system.0.cache_control.ttl = %q, want %q (earlier 5m block must be upgraded)", got, "1h")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.cache_control.ttl").String(); got != "1h" {
+		t.Fatalf("messages.0.content.0.cache_control.ttl = %q, want %q (client 1h must be preserved)", got, "1h")
+	}
+}
+
+func TestNormalizeCacheControlTTL_LeavesAllFiveMinuteBlocksUntouched(t *testing.T) {
+	// No client 1h block anywhere: the proxy must not invent 1h ttls. All blocks
+	// stay at their default (5m) so we keep the existing low-cost behavior for
+	// clients that never asked for extended caching.
+	payload := []byte(`{"tools":[{"name":"t1","cache_control":{"type":"ephemeral"}}],"system":[{"type":"text","text":"s1","cache_control":{"type":"ephemeral"}}]}`)
+
+	out := normalizeCacheControlTTL(payload)
+
+	if !bytes.Equal(out, payload) {
+		t.Fatalf("normalizeCacheControlTTL altered bytes when no 1h block was present.\noriginal: %s\ngot:      %s", payload, out)
 	}
 }
 
@@ -1487,8 +1514,11 @@ func TestNormalizeCacheControlTTL_PreservesKeyOrderWhenModified(t *testing.T) {
 
 	out := normalizeCacheControlTTL(payload)
 
-	if gjson.GetBytes(out, "messages.0.content.0.cache_control.ttl").Exists() {
-		t.Fatalf("messages.0.content.0.cache_control.ttl should be removed after a default-5m block")
+	if got := gjson.GetBytes(out, "messages.0.content.0.cache_control.ttl").String(); got != "1h" {
+		t.Fatalf("messages.0.content.0.cache_control.ttl = %q, want %q (client 1h preserved)", got, "1h")
+	}
+	if got := gjson.GetBytes(out, "tools.0.cache_control.ttl").String(); got != "1h" {
+		t.Fatalf("tools.0.cache_control.ttl = %q, want %q (earlier 5m upgraded)", got, "1h")
 	}
 
 	outStr := string(out)

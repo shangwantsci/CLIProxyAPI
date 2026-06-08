@@ -1522,9 +1522,7 @@ func appendClaudeBetaToken(tokens []string, beta string) []string {
 	return append(tokens, beta)
 }
 
-var claudeDroppedBetaTokens = map[string]struct{}{
-	"context-1m-2025-08-07": {},
-}
+var claudeDroppedBetaTokens = map[string]struct{}{}
 
 var claudeCodeDefaultBetaTokens = []string{
 	"claude-code-20250219",
@@ -1539,6 +1537,7 @@ var claudeAllowedBetaTokens = func() map[string]struct{} {
 		"oauth-2025-04-20",
 		"prompt-caching-scope-2026-01-05",
 		"context-management-2025-06-27",
+		"context-1m-2025-08-07",
 		"extended-cache-ttl-2025-04-11",
 		"fine-grained-tool-streaming-2025-05-14",
 		"structured-outputs-2025-12-15",
@@ -3175,47 +3174,43 @@ func countCacheControls(payload []byte) int {
 // followed by a 1h block at ANY later position is an error — including within
 // the same section (e.g. system[1]=5m then system[3]=1h).
 //
-// Strategy: walk all cache_control blocks in evaluation order. Once a 5m block
-// is seen, strip ttl from ALL subsequent 1h blocks (downgrading them to 5m).
+// Strategy: when the request contains ANY explicit 1h block (only clients set
+// ttl="1h"; proxy-injected blocks omit ttl), upgrade EVERY ephemeral block to
+// 1h. This preserves the client's requested 1h caching instead of silently
+// downgrading it to 5m, and trivially satisfies the ordering constraint because
+// all blocks end up at the same tier. When no 1h block is present, the payload
+// is returned unchanged so clients that never asked for extended caching keep
+// the default (5m) behavior.
 func normalizeCacheControlTTL(payload []byte) []byte {
 	if len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return payload
 	}
 
 	original := payload
-	seen5m := false
 	modified := false
 
-	processBlock := func(path string, obj gjson.Result) {
+	type blockRef struct {
+		path string
+		cc   gjson.Result
+	}
+	var blocks []blockRef
+	hasOneHour := false
+
+	collectBlock := func(path string, obj gjson.Result) {
 		cc := obj.Get("cache_control")
-		if !cc.Exists() {
-			return
-		}
 		if !cc.IsObject() {
-			seen5m = true
 			return
 		}
-		ttl := cc.Get("ttl")
-		if ttl.Type != gjson.String || ttl.String() != "1h" {
-			seen5m = true
-			return
+		blocks = append(blocks, blockRef{path: path, cc: cc})
+		if ttl := cc.Get("ttl"); ttl.Type == gjson.String && ttl.String() == "1h" {
+			hasOneHour = true
 		}
-		if !seen5m {
-			return
-		}
-		ttlPath := path + ".cache_control.ttl"
-		updated, errDel := sjson.DeleteBytes(payload, ttlPath)
-		if errDel != nil {
-			return
-		}
-		payload = updated
-		modified = true
 	}
 
 	tools := gjson.GetBytes(payload, "tools")
 	if tools.IsArray() {
 		tools.ForEach(func(idx, item gjson.Result) bool {
-			processBlock(fmt.Sprintf("tools.%d", int(idx.Int())), item)
+			collectBlock(fmt.Sprintf("tools.%d", int(idx.Int())), item)
 			return true
 		})
 	}
@@ -3223,7 +3218,7 @@ func normalizeCacheControlTTL(payload []byte) []byte {
 	system := gjson.GetBytes(payload, "system")
 	if system.IsArray() {
 		system.ForEach(func(idx, item gjson.Result) bool {
-			processBlock(fmt.Sprintf("system.%d", int(idx.Int())), item)
+			collectBlock(fmt.Sprintf("system.%d", int(idx.Int())), item)
 			return true
 		})
 	}
@@ -3236,11 +3231,28 @@ func normalizeCacheControlTTL(payload []byte) []byte {
 				return true
 			}
 			content.ForEach(func(itemIdx, item gjson.Result) bool {
-				processBlock(fmt.Sprintf("messages.%d.content.%d", int(msgIdx.Int()), int(itemIdx.Int())), item)
+				collectBlock(fmt.Sprintf("messages.%d.content.%d", int(msgIdx.Int()), int(itemIdx.Int())), item)
 				return true
 			})
 			return true
 		})
+	}
+
+	if !hasOneHour {
+		return original
+	}
+
+	for _, block := range blocks {
+		if ttl := block.cc.Get("ttl"); ttl.Type == gjson.String && ttl.String() == "1h" {
+			continue
+		}
+		ttlPath := block.path + ".cache_control.ttl"
+		updated, errSet := sjson.SetBytes(payload, ttlPath, "1h")
+		if errSet != nil {
+			continue
+		}
+		payload = updated
+		modified = true
 	}
 
 	if !modified {

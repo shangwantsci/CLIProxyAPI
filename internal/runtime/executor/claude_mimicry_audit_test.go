@@ -174,7 +174,7 @@ func TestAuditClaudeMimicryRequest_FlagsLeakyThirdPartyShape(t *testing.T) {
 	}`)
 	headers := http.Header{
 		"User-Agent":                  []string{"Hermes/1.0"},
-		"Anthropic-Beta":              []string{"context-1m-2025-08-07,unknown-client-beta"},
+		"Anthropic-Beta":              []string{"hermes-relay-beta,unknown-client-beta"},
 		"X-Hermes-Version":            []string{"1.0"},
 		"X-Stainless-Package-Version": []string{"0.98.0"},
 		"X-Stainless-Runtime-Version": []string{"v24.13.0"},
@@ -201,6 +201,23 @@ func TestAuditClaudeMimicryRequest_FlagsLeakyThirdPartyShape(t *testing.T) {
 	}
 	if len(audit.Betas.Unexpected) == 0 {
 		t.Fatalf("Betas.Unexpected = %#v, want unexpected beta detected", audit.Betas.Unexpected)
+	}
+}
+
+func TestAuditClaudeMimicryRequest_Context1MBetaIsAllowed(t *testing.T) {
+	// 1M context is intentionally enabled. context-1m-2025-08-07 must be on the
+	// beta allow-list so the mimicry guard does not flag it as unexpected and
+	// block an otherwise-valid 1M request.
+	headers := http.Header{
+		"Anthropic-Beta": []string{"context-1m-2025-08-07"},
+	}
+
+	betas := auditClaudeMimicryBetas(headers, ClaudeMimicryBaseline{})
+
+	for _, beta := range betas.Unexpected {
+		if beta == "context-1m-2025-08-07" {
+			t.Fatalf("Betas.Unexpected = %#v, context-1m must be allowed", betas.Unexpected)
+		}
 	}
 }
 
