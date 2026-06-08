@@ -13,11 +13,16 @@
 
 ## 仓库与路径
 
-- 后端仓库：`F:\claude反代\CLIProxyAPI`
-- 前端仓库：`F:\claude反代\Cli-Proxy-API-Management-Center`
+- 后端仓库：
+  - Windows 旧工作机：`F:\claude反代\CLIProxyAPI`
+  - Mac 建议路径：`~/Code/cpa/CLIProxyAPI`
+- 前端仓库：
+  - Windows 旧工作机：`F:\claude反代\Cli-Proxy-API-Management-Center`
+  - Mac 建议路径：`~/Code/cpa/Cli-Proxy-API-Management-Center`
 - 当前后端分支：`xiaoyu/claude-oauth-cookie-mimicry`
 - 当前前端分支：`xiaoyu/claude-oauth-cookie-mimicry`
 - 后端远端：`https://github.com/shangwantsci/CLIProxyAPI.git`
+- 前端远端：`https://github.com/shangwantsci/Cli-Proxy-API-Management-Center.git`
 
 生产服务器只运行构建产物，不在服务器上保存 GitHub 凭据，不在服务器上临时改代码。
 
@@ -27,9 +32,10 @@
 - CPA 管理入口：`https://admin.openstaryu.com/management.html`
 - CPA 本机健康检查：`http://127.0.0.1:8318/healthz`
 - SSH：`root@23.153.36.248:41629`
-- 后端部署提交：`0cbfea52`
-- 前端部署提交：`919c982`
-- 最近一次账号备份：`/opt/cpa-claude-proxy-backups/auths-20260529-173644.tgz`
+- 当前生产版本摘要见 `docs/production-deployment-23.153.36.12.md` 的“当前部署版本”。
+- 截至 `2026-06-08`，生产后端二进制部署提交为 `fa83c466`，前端部署提交为 `c0ef735`。
+- 后端仓库本地 HEAD 可能是部署后的文档提交，例如 `096ceb99`；生产实际运行的二进制仍以服务器 `/opt/cpa-claude-proxy/DEPLOYED_COMMITS` 为准。
+- 最近一次账号备份以生产部署文档记录为准；部署前必须重新备份 `/opt/cpa-claude-proxy/auths`。
 - 最近一次网络入口收口备份：`/root/openstaryu-hardening-20260528-113201`
 
 当前端口策略：
@@ -47,12 +53,18 @@
 cat /opt/cpa-claude-proxy/DEPLOYED_COMMITS
 ```
 
+如果本文档和部署文档不一致，先读 `docs/production-deployment-23.153.36.12.md`，再用服务器 `/opt/cpa-claude-proxy/DEPLOYED_COMMITS` 校准，并在同次维护中修本文档。
+
 ## 必读文档
 
 - 部署更新：`docs/production-deployment-23.153.36.12.md`
 - 文件地图：`docs/project-file-map.md`
 - Claude Code 伪装：`docs/claude-code-mimicry.md`
-- 前端账号池维护：`F:\claude反代\Cli-Proxy-API-Management-Center\docs\claude-account-pool-maintenance.md`
+- Mac 本地接手：`docs/local-development-macos.md`
+- Claude/Codex 统一接手提示词：`docs/agent-start-prompt.md`
+- 前端账号池维护：
+  - Windows 旧工作机：`F:\claude反代\Cli-Proxy-API-Management-Center\docs\claude-account-pool-maintenance.md`
+  - Mac 建议路径：`~/Code/cpa/Cli-Proxy-API-Management-Center/docs/claude-account-pool-maintenance.md`
 
 ## 最近关键后端改动
 
@@ -97,6 +109,10 @@ cat /opt/cpa-claude-proxy/DEPLOYED_COMMITS
   - 管理端新增 API 连接开关；可视化配置保存 YAML 后会直接触发运行时热更新，不再只依赖文件 watcher，因此账号切换策略保存后会立即应用到 selector。
   - 未触碰 Claude token/cache 透传路径；部署前跑过 cache/usage 回归与前端静态敏感词扫描。
   - 已部署到生产服务器，服务器 `DEPLOYED_COMMITS` 显示 `backend=0cbfea52`、`frontend=919c982`。
+- `fa83c466 feat(claude): preserve client 1h cache TTL and enable 1M context`
+  - 保住客户端显式 `ttl="1h"` 的 cache_control：只要请求里存在客户端显式 1h 块，就把所有 ephemeral 块统一升级为 1h，避免被号池注入的 5m system 块静默降级。
+  - 放开客户端显式携带的 `context-1m-2025-08-07`，允许 1M 上下文 beta 透传上游，但不默认注入；该路径存在风控指纹风险，已在 `docs/claude-code-mimicry.md` 中记录。
+  - 已部署到生产服务器，生产后端二进制提交为 `fa83c466`，前端仍为 `c0ef735`；后续文档提交 `096ceb99` 只更新部署记录，不代表生产二进制。
 
 ## 最近关键运维改动
 
@@ -167,7 +183,9 @@ npm run build
    - 改文件或找入口：读项目文件地图。
    - 改前端账号池：读前端账号池维护地图。
    - 改 Claude Code 伪装：读 Claude Code 伪装文档。
-3. 执行 `git status -sb` 和 `git log --oneline -5`，确认当前分支与最近提交。
+   - Mac 新电脑接手：读 `docs/local-development-macos.md`。
+   - Claude/Codex 新窗口接手：复制 `docs/agent-start-prompt.md` 的提示词。
+3. 执行 `git status -sb` 和 `git log --oneline -5`，确认当前分支与最近提交；后端存在任务前无关 `M` 时只暂存本次真实改动。
 4. 如果涉及生产，先确认服务器 `DEPLOYED_COMMITS`，并先备份账号数据。
 5. 如果涉及账号状态分类，至少覆盖列表、一键探测、管理 API 调用、正常用户请求四条路径。
 6. 如果涉及 Claude token usage、cache_control、system prompt 或 OpenAI/Responses 翻译层，先读 `docs/claude-code-mimicry.md` 的 `5.2 thinking/signature 与 token usage`，并跑其中列出的 cache breakdown 回归测试。
