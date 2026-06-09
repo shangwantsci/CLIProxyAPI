@@ -1,6 +1,9 @@
 package registry
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestCodexFreeModelsExcludeGPT55(t *testing.T) {
 	model := findModelInfo(GetCodexFreeModels(), "gpt-5.5")
@@ -45,6 +48,35 @@ func TestClaudeStaticModelsIncludeFable5(t *testing.T) {
 		t.Fatal("expected LookupStaticModelInfo to find claude-fable-5")
 	}
 	assertClaudeFable5ModelInfo(t, "lookup", model)
+}
+
+func TestClaudeBuiltinsRetainFable5WhenRemoteCatalogOmitsIt(t *testing.T) {
+	t.Cleanup(func() {
+		if err := loadModelsFromBytes(embeddedModelsJSON, "test cleanup"); err != nil {
+			t.Fatalf("cleanup load embedded models: %v", err)
+		}
+	})
+
+	data := validTestModelsCatalog()
+	data.Claude = []*ModelInfo{{
+		ID:      "claude-sonnet-4-6",
+		Object:  "model",
+		OwnedBy: "anthropic",
+		Type:    "claude",
+	}}
+	raw, err := marshalStaticModelsForTest(data)
+	if err != nil {
+		t.Fatalf("marshal test catalog: %v", err)
+	}
+	if err := loadModelsFromBytes(raw, "test remote catalog"); err != nil {
+		t.Fatalf("loadModelsFromBytes() error = %v", err)
+	}
+
+	model := findModelInfo(GetClaudeModels(), "claude-fable-5")
+	if model == nil {
+		t.Fatal("expected claude builtins to retain claude-fable-5 when remote catalog omits it")
+	}
+	assertClaudeFable5ModelInfo(t, "remote override", model)
 }
 
 func TestWithXAIBuiltinsAddsVideoModel(t *testing.T) {
@@ -97,6 +129,10 @@ func validTestModelsCatalog() *staticModelsJSON {
 		Antigravity: models,
 		XAI:         models,
 	}
+}
+
+func marshalStaticModelsForTest(data *staticModelsJSON) ([]byte, error) {
+	return json.Marshal(data)
 }
 
 func findModelInfo(models []*ModelInfo, id string) *ModelInfo {
