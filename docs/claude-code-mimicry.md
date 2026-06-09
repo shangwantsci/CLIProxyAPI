@@ -16,7 +16,7 @@
 当前代码默认值位于 `internal/runtime/executor/helps/claude_device_profile.go`：
 
 ```text
-User-Agent: claude-cli/2.1.161 (external, sdk-cli)
+User-Agent: claude-cli/2.1.170 (external, sdk-cli)
 X-Stainless-Package-Version: 0.94.0
 X-Stainless-Runtime-Version: v24.3.0
 X-Stainless-Os: Windows
@@ -25,10 +25,10 @@ X-Stainless-Arch: x64
 
 验证来源：
 
-- `2.1.161` 来自 2026-06-02 官方 `@anthropic-ai/claude-code-linux-x64` 原生二进制(Bun 1.3.14 编译)一手解包比对：内嵌 UA 模板确认为 `claude-cli/<version> (external, sdk-cli)`，版本号 2.1.161 为当时 npm `latest`。
-- `0.94.0`、`v24.3.0`、`Windows/x64` 经同一轮一手二进制比对确认：2.1.154 与 2.1.161 二进制内嵌的 `X-Stainless-Package-Version` 常量**均为 `0.94.0`**，runtime 均为 `v24.3.0`。
+- `2.1.170` 来自 2026-06-10 本机 `claude --version` 与官方 Claude Code changelog 校准；本轮只更新 UA 版本号以跟随 Fable 5 发布窗口。
+- `0.94.0`、`v24.3.0`、`Windows/x64` 经历史一手二进制比对确认：2.1.154 与 2.1.161 二进制内嵌的 `X-Stainless-Package-Version` 常量**均为 `0.94.0`**，runtime 均为 `v24.3.0`；2026-06-10 本机 2.1.170 二进制字符串仍可见 `0.94.0`，但 runtime/platform 未做新 HTTPS 抓包确认，因此保持不变。
 - ⚠️ **关键陷阱**：npm 上独立包 `@anthropic-ai/sdk` 已升到 `0.100.1`，但官方 Claude Code 把 SDK **vendored(内联)进二进制**，真实 CLI 上报的 `X-Stainless-Package-Version` 仍是 `0.94.0`。**不要**把它追到 npm 的最新版——那会制造一个真实 CLI 永不发出的假指纹。runtime `v24.3.0` 同理(Bun 编译内嵌 node-compat 版本),保持不变。
-- `2.1.154`(历史基线)来自 2026-05-29 本机 `claude --version` 和真实 Opus 4.8 OAuth 请求抓包；2026-06-03 升级到 2.1.161。
+- `2.1.154`(历史基线)来自 2026-05-29 本机 `claude --version` 和真实 Opus 4.8 OAuth 请求抓包；2026-06-03 升级到 2.1.161；2026-06-10 跟随 Claude Code 2.1.170/Fable 5 升级 UA。
 
 这些是当前仓库默认基线，不等于“永远正确的最新版真实 Claude Code 指纹”。完整 HTTPS 抓包仍然是最强校准方式；如后续 Claude Code 更新导致 package/runtime、beta 或 system prompt 有差异，应按抓包结果更新。**升级 UA 版本号时务必只改版本号，不要连带改 package/runtime version,除非有新的一手抓包证据。**
 
@@ -170,6 +170,8 @@ redact-thinking-2026-02-12
 thinking-token-count-2026-05-13
 task-budgets-2026-03-13
 cache-diagnosis-2026-04-07
+server-side-fallback-2026-06-01
+fallback-credit-2026-06-01
 mid-conversation-system-2026-04-07
 ```
 

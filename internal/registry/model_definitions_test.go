@@ -33,6 +33,20 @@ func TestCodexStaticModelsIncludeGPT55(t *testing.T) {
 	assertGPT55ModelInfo(t, "lookup", model)
 }
 
+func TestClaudeStaticModelsIncludeFable5(t *testing.T) {
+	model := findModelInfo(GetClaudeModels(), "claude-fable-5")
+	if model == nil {
+		t.Fatal("expected claude static models to include claude-fable-5")
+	}
+	assertClaudeFable5ModelInfo(t, "claude", model)
+
+	model = LookupStaticModelInfo("claude-fable-5")
+	if model == nil {
+		t.Fatal("expected LookupStaticModelInfo to find claude-fable-5")
+	}
+	assertClaudeFable5ModelInfo(t, "lookup", model)
+}
+
 func TestWithXAIBuiltinsAddsVideoModel(t *testing.T) {
 	models := WithXAIBuiltins(nil)
 	found := false
@@ -92,6 +106,48 @@ func findModelInfo(models []*ModelInfo, id string) *ModelInfo {
 		}
 	}
 	return nil
+}
+
+func assertClaudeFable5ModelInfo(t *testing.T, source string, model *ModelInfo) {
+	t.Helper()
+
+	if model.ID != "claude-fable-5" {
+		t.Fatalf("%s id mismatch: got %q", source, model.ID)
+	}
+	if model.Object != "model" {
+		t.Fatalf("%s object mismatch: got %q", source, model.Object)
+	}
+	if model.Created != 1780963200 {
+		t.Fatalf("%s created timestamp mismatch: got %d", source, model.Created)
+	}
+	if model.OwnedBy != "anthropic" {
+		t.Fatalf("%s owned_by mismatch: got %q", source, model.OwnedBy)
+	}
+	if model.Type != "claude" {
+		t.Fatalf("%s type mismatch: got %q", source, model.Type)
+	}
+	if model.DisplayName != "Claude Fable 5" {
+		t.Fatalf("%s display name mismatch: got %q", source, model.DisplayName)
+	}
+	if model.ContextLength != 1000000 {
+		t.Fatalf("%s context length mismatch: got %d", source, model.ContextLength)
+	}
+	if model.MaxCompletionTokens != 128000 {
+		t.Fatalf("%s max completion tokens mismatch: got %d", source, model.MaxCompletionTokens)
+	}
+	if model.Thinking == nil {
+		t.Fatalf("%s missing thinking support", source)
+	}
+
+	want := []string{"low", "medium", "high", "xhigh", "max"}
+	if len(model.Thinking.Levels) != len(want) {
+		t.Fatalf("%s thinking level count mismatch: got %d, want %d", source, len(model.Thinking.Levels), len(want))
+	}
+	for i, level := range want {
+		if model.Thinking.Levels[i] != level {
+			t.Fatalf("%s thinking level %d mismatch: got %q, want %q", source, i, model.Thinking.Levels[i], level)
+		}
+	}
 }
 
 func assertGPT55ModelInfo(t *testing.T, source string, model *ModelInfo) {

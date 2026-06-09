@@ -157,7 +157,7 @@ func TestApplyClaudeHeaders_UsesConfiguredBaselineFingerprint(t *testing.T) {
 		t.Fatalf("X-Claude-Code-Session-Id = %q, want cached session id", got)
 	}
 	if got := req.Header.Get("x-client-request-id"); got != "" {
-		t.Fatalf("x-client-request-id = %q, want omitted to match Claude Code 2.1.161", got)
+		t.Fatalf("x-client-request-id = %q, want omitted to match Claude Code 2.1.170", got)
 	}
 	if got := req.Header.Get("Anthropic-Dangerous-Direct-Browser-Access"); got != "true" {
 		t.Fatalf("Anthropic-Dangerous-Direct-Browser-Access = %q, want true", got)
@@ -226,6 +226,26 @@ func TestApplyClaudeHeaders_ForwardsContext1MBetaFromClientAndBody(t *testing.T)
 	}
 }
 
+func TestApplyClaudeHeaders_ForwardsFableFallbackBetasWhenRequested(t *testing.T) {
+	req := newClaudeHeaderTestRequest(t, http.Header{
+		"Anthropic-Beta": []string{"server-side-fallback-2026-06-01,custom-beta"},
+	})
+	applyClaudeHeaders(req, &cliproxyauth.Auth{}, "key-fable-fallback-betas", false, []string{"fallback-credit-2026-06-01"}, &config.Config{}, "claude-fable-5")
+
+	got := req.Header.Get("Anthropic-Beta")
+	for _, beta := range []string{
+		"server-side-fallback-2026-06-01",
+		"fallback-credit-2026-06-01",
+	} {
+		if !strings.Contains(got, beta) {
+			t.Fatalf("Anthropic-Beta = %q, missing requested Fable fallback beta %s", got, beta)
+		}
+	}
+	if strings.Contains(got, "custom-beta") {
+		t.Fatalf("Anthropic-Beta = %q, should drop unknown beta", got)
+	}
+}
+
 func TestApplyClaudeHeaders_StripsKnownRelayClientHeaders(t *testing.T) {
 	leakyHeaders := []string{
 		"X-OpenClaw-Client",
@@ -284,7 +304,7 @@ func TestApplyClaudeHeaders_DefaultDeviceProfileUsesCoherentBaseline(t *testing.
 	})
 	applyClaudeHeaders(req, &cliproxyauth.Auth{}, "key-default-fingerprint", false, nil, &config.Config{})
 
-	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.161 (external, sdk-cli)", "0.94.0", "v24.3.0", "Windows", "x64")
+	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.170 (external, sdk-cli)", "0.94.0", "v24.3.0", "Windows", "x64")
 }
 
 func TestApplyClaudeHeaders_TracksHighestClaudeCLIFingerprint(t *testing.T) {
@@ -368,7 +388,7 @@ func TestApplyClaudeHeaders_RejectsImplausibleClaudeClientFingerprint(t *testing
 
 	applyClaudeHeaders(req, auth, "key-implausible-fingerprint", false, nil, &config.Config{})
 
-	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.161 (external, sdk-cli)", "0.94.0", "v24.3.0", "Windows", "x64")
+	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.170 (external, sdk-cli)", "0.94.0", "v24.3.0", "Windows", "x64")
 	if _, ok := auth.Metadata["claude_device_profile"]; ok {
 		t.Fatalf("implausible fingerprint should not be persisted to auth metadata: %#v", auth.Metadata["claude_device_profile"])
 	}
@@ -393,7 +413,7 @@ func TestApplyClaudeHeaders_RejectsHigherCliWithOlderPackageVersion(t *testing.T
 
 	applyClaudeHeaders(req, auth, "key-incoherent-package", false, nil, &config.Config{})
 
-	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.161 (external, sdk-cli)", "0.94.0", "v24.3.0", "Windows", "x64")
+	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.170 (external, sdk-cli)", "0.94.0", "v24.3.0", "Windows", "x64")
 	if _, ok := auth.Metadata["claude_device_profile"]; ok {
 		t.Fatalf("incoherent fingerprint should not be persisted to auth metadata: %#v", auth.Metadata["claude_device_profile"])
 	}
@@ -423,7 +443,7 @@ func TestApplyClaudeHeaders_RejectsPollutedMetadataDeviceProfile(t *testing.T) {
 
 	applyClaudeHeaders(req, auth, "key-polluted-metadata", false, nil, &config.Config{})
 
-	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.161 (external, sdk-cli)", "0.94.0", "v24.3.0", "Windows", "x64")
+	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.170 (external, sdk-cli)", "0.94.0", "v24.3.0", "Windows", "x64")
 }
 
 func TestApplyClaudeHeaders_DoesNotDowngradeConfiguredBaselineOnFirstClaudeClient(t *testing.T) {
@@ -690,7 +710,7 @@ func TestApplyClaudeHeaders_PersistsLearnedDeviceProfileToAuthMetadata(t *testin
 	}
 
 	officialReq := newClaudeHeaderTestRequest(t, http.Header{
-		"User-Agent":                  []string{"claude-cli/2.1.162 (external, cli)"},
+		"User-Agent":                  []string{"claude-cli/2.1.171 (external, cli)"},
 		"X-Stainless-Package-Version": []string{"0.95.0"},
 		"X-Stainless-Runtime-Version": []string{"v24.4.0"},
 		"X-Stainless-Os":              []string{"Linux"},
@@ -702,7 +722,7 @@ func TestApplyClaudeHeaders_PersistsLearnedDeviceProfileToAuthMetadata(t *testin
 	if !ok {
 		t.Fatalf("metadata.claude_device_profile = %T, want map[string]any", auth.Metadata["claude_device_profile"])
 	}
-	if got, _ := profileMeta["user_agent"].(string); got != "claude-cli/2.1.162 (external, cli)" {
+	if got, _ := profileMeta["user_agent"].(string); got != "claude-cli/2.1.171 (external, cli)" {
 		t.Fatalf("metadata.claude_device_profile.user_agent = %q, want learned official UA", got)
 	}
 	if got, _ := profileMeta["os"].(string); got != "Windows" {
@@ -720,7 +740,7 @@ func TestApplyClaudeHeaders_PersistsLearnedDeviceProfileToAuthMetadata(t *testin
 		"User-Agent": []string{"CherryStudio/1.0"},
 	})
 	applyClaudeHeaders(thirdPartyReq, auth, "key-metadata-profile", false, nil, cfg)
-	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.162 (external, cli)", "0.95.0", "v24.4.0", "Windows", "x64")
+	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.171 (external, cli)", "0.95.0", "v24.4.0", "Windows", "x64")
 }
 
 func TestApplyClaudeHeaders_ThirdPartyBaselineThenOfficialUpgradeKeepsPinnedPlatform(t *testing.T) {
@@ -2964,6 +2984,15 @@ func TestRepairClaudeRequestShape_ClampsAdaptiveEffort(t *testing.T) {
 
 	if got := gjson.GetBytes(out, "output_config.effort").String(); got != "high" {
 		t.Fatalf("output_config.effort = %q, want high", got)
+	}
+}
+
+func TestRepairClaudeRequestShape_PreservesFableXHighAdaptiveEffort(t *testing.T) {
+	payload := []byte(`{"model":"claude-fable-5","thinking":{"type":"adaptive"},"output_config":{"effort":"xhigh"},"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if got := gjson.GetBytes(out, "output_config.effort").String(); got != "xhigh" {
+		t.Fatalf("output_config.effort = %q, want xhigh", got)
 	}
 }
 

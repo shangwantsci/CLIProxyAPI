@@ -9,6 +9,8 @@
 package claude
 
 import (
+	"strings"
+
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/tidwall/gjson"
@@ -82,9 +84,13 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 	}
 
 	supportsAdaptive := modelInfo != nil && modelInfo.Thinking != nil && len(modelInfo.Thinking.Levels) > 0
+	alwaysAdaptive := claudeModelUsesAlwaysAdaptiveThinking(modelInfo)
 
 	switch config.Mode {
 	case thinking.ModeNone:
+		if alwaysAdaptive {
+			return stripClaudeThinkingControls(body), nil
+		}
 		result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
 		result, _ = sjson.DeleteBytes(result, "output_config.effort")
@@ -117,12 +123,29 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		// Budget is expected to be pre-validated by ValidateConfig (clamped, ZeroAllowed enforced).
 		// Decide enabled/disabled based on budget value.
 		if config.Budget == 0 {
+			if alwaysAdaptive {
+				return stripClaudeThinkingControls(body), nil
+			}
 			result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
 			result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
 			result, _ = sjson.DeleteBytes(result, "output_config.effort")
 			if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
 				result, _ = sjson.DeleteBytes(result, "output_config")
 			}
+			return result, nil
+		}
+
+		if alwaysAdaptive && supportsAdaptive {
+			level, ok := thinking.ConvertBudgetToLevel(config.Budget)
+			if !ok {
+				return body, nil
+			}
+			if !thinking.HasLevel(modelInfo.Thinking.Levels, level) {
+				level = string(thinking.LevelLow)
+			}
+			result, _ := sjson.SetBytes(body, "thinking.type", "adaptive")
+			result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
+			result, _ = sjson.SetBytes(result, "output_config.effort", level)
 			return result, nil
 		}
 
@@ -162,6 +185,25 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 	default:
 		return body, nil
 	}
+}
+
+func claudeModelUsesAlwaysAdaptiveThinking(modelInfo *registry.ModelInfo) bool {
+	if modelInfo == nil {
+		return false
+	}
+	modelID := strings.ToLower(strings.TrimSpace(modelInfo.ID))
+	modelID = strings.TrimSuffix(modelID, "-thinking")
+	return modelID == "claude-fable-5" || strings.HasPrefix(modelID, "claude-fable-5-") ||
+		modelID == "claude-mythos-5" || strings.HasPrefix(modelID, "claude-mythos-5-")
+}
+
+func stripClaudeThinkingControls(body []byte) []byte {
+	result, _ := sjson.DeleteBytes(body, "thinking")
+	result, _ = sjson.DeleteBytes(result, "output_config.effort")
+	if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
+		result, _ = sjson.DeleteBytes(result, "output_config")
+	}
+	return result
 }
 
 // normalizeClaudeBudget applies Claude-specific constraints to ensure max_tokens > budget_tokens.

@@ -4,10 +4,10 @@ import (
 	"testing"
 )
 
-func TestDefaultClaudeVersion_Is2_1_161(t *testing.T) {
+func TestDefaultClaudeVersion_Is2_1_170(t *testing.T) {
 	got := DefaultClaudeVersion(nil)
-	if got != "2.1.161" {
-		t.Fatalf("expected baseline claude version 2.1.161, got %q", got)
+	if got != "2.1.170" {
+		t.Fatalf("expected baseline claude version 2.1.170, got %q", got)
 	}
 }
 

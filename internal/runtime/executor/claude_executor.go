@@ -1400,6 +1400,10 @@ func repairClaudeAdaptiveEffort(body []byte) []byte {
 	if effort != "xhigh" {
 		return body
 	}
+	modelInfo := registry.LookupModelInfo(gjson.GetBytes(body, "model").String(), "claude")
+	if modelInfo != nil && modelInfo.Thinking != nil && thinking.HasLevel(modelInfo.Thinking.Levels, effort) {
+		return body
+	}
 	body, _ = sjson.SetBytes(body, "output_config.effort", "high")
 	return body
 }
@@ -1546,6 +1550,8 @@ var claudeAllowedBetaTokens = func() map[string]struct{} {
 		"thinking-token-count-2026-05-13",
 		"task-budgets-2026-03-13",
 		"cache-diagnosis-2026-04-07",
+		"server-side-fallback-2026-06-01",
+		"fallback-credit-2026-06-01",
 		claudeCodeMidConversationSystemBeta,
 	}
 	allowed := make(map[string]struct{}, len(claudeCodeDefaultBetaTokens)+len(optional))
