@@ -33,8 +33,8 @@
 - CPA 本机健康检查：`http://127.0.0.1:8318/healthz`
 - SSH：`root@154.29.158.193:56260`
 - 当前生产版本摘要见 `docs/production-deployment-23.153.36.12.md` 的“当前部署版本”。
-- 截至 `2026-06-08`，生产后端二进制部署提交为 `fa83c466`，前端部署提交为 `c0ef735`。
-- 后端仓库本地 HEAD 可能是部署后的文档提交，例如 `096ceb99`；生产实际运行的二进制仍以服务器 `/opt/cpa-claude-proxy/DEPLOYED_COMMITS` 为准。
+- 截至 `2026-06-11`，生产后端二进制部署提交为 `4cde9eaa`，前端部署提交为 `d5a90440`。
+- 后端仓库本地 HEAD 可能是部署后的文档提交；生产实际运行的二进制仍以服务器 `/opt/cpa-claude-proxy/DEPLOYED_COMMITS` 为准。
 - 最近一次账号备份以生产部署文档记录为准；部署前必须重新备份 `/opt/cpa-claude-proxy/auths`。
 - 最近一次网络入口收口备份：`/root/openstaryu-hardening-20260528-113201`
 
@@ -113,6 +113,12 @@ cat /opt/cpa-claude-proxy/DEPLOYED_COMMITS
   - 保住客户端显式 `ttl="1h"` 的 cache_control：只要请求里存在客户端显式 1h 块，就把所有 ephemeral 块统一升级为 1h，避免被号池注入的 5m system 块静默降级。
   - 放开客户端显式携带的 `context-1m-2025-08-07`，允许 1M 上下文 beta 透传上游，但不默认注入；该路径存在风控指纹风险，已在 `docs/claude-code-mimicry.md` 中记录。
   - 已部署到生产服务器，生产后端二进制提交为 `fa83c466`，前端仍为 `c0ef735`；后续文档提交 `096ceb99` 只更新部署记录，不代表生产二进制。
+- `834a9200 fix: classify Claude upstream errors`
+  - 把 `Identity verification is required to continue.` 归类为 `identity_verification_required`，按永久/半永久账号不可用处理并触发换号重试。
+  - 批量导入探测更严格：`identity_verification_required` 会拒绝导入；未明确归类的 Claude 上游 HTTP 400 也会以 `probe_bad_request` 拒绝导入。
+  - OAuth/Claude Code 账号请求会在上游前剥离 `context-1m-2025-08-07`，避免 1M beta 与 OAuth 鉴权形态不兼容；API Key 形态仍允许显式 1M beta。
+  - `500/529 Overloaded` 按临时上游过载处理，不永久污染账号健康；客户端请求形态错误仍不扫全池重试。
+  - 已部署到生产服务器，生产后端二进制提交为 `4cde9eaa`（同次文档提交更新生产主机为 `154.29.158.193:56260`），前端仍为 `d5a90440`。
 
 ## 最近关键运维改动
 

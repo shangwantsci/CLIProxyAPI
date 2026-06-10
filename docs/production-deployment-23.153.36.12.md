@@ -58,16 +58,26 @@ Traefik 动态路由：
 
 ## 当前部署版本
 
-- 后端提交：`fa83c466`（保住客户端 1h 缓存 TTL + 放开 1M 上下文：`normalizeCacheControlTTL` 改为「有任意客户端显式 1h 块则把所有 ephemeral 块统一升级为 1h」，不再把客户的 1h 静默降级成 5m；`context-1m-2025-08-07` 从丢弃表移除并加入 beta 允许白名单，客户端显式请求时透传上游且不被 mimicry guard 拦截）
-- 前端提交：`c0ef735`（未变；本轮仅后端部署）
-- 最近一次按本文档部署时间：`2026-06-08T04:38:25+00:00`
-- 本次部署后端二进制 sha256：`67461f9370c3c0176f6358e3ae59161db53ebf7c5f28a96c41c63d856f97d6ac`
-- 部署前运行版本 backend=`71b68992`，binary sha256 `f07396238658f40fc2af74b6d8d6eac05cdcc40f388eec6bdfe7b6cb0bcfe9bf`
-- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260608-043614.bak`（可回滚到 `71b68992`）
-- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260608-043614.tgz`
-- 部署后账号数：1195 个 json（账号增删由晓宇手动管理）
+- 后端提交：`4cde9eaa`（包含 `834a9200` 的 Claude 上游错误分类修复；同次文档将当前生产主机统一为 `154.29.158.193:56260`）
+- 前端提交：`d5a90440`（未变；本轮仅后端部署）
+- 最近一次按本文档部署时间：`2026-06-10T20:06:05+00:00`
+- 本次部署后端二进制 sha256：`76835d8b3b4da4c352bd5ce8b6811035e21c68683107b4b6611052a1c99d387f`
+- 部署前运行版本 backend=`4f619fce`，binary sha256 `beb44f031a9fe9cce4fccb37375faa05a46a284fc11b09369651b13c4edc0aed`
+- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260610-200603.bak`（可回滚到 `4f619fce`）
+- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260610-200603.tgz`
+- 部署后账号数：1230 个 json（账号增删由晓宇手动管理）
 
-### 本轮变更说明（fa83c466）
+### 本轮变更说明（4cde9eaa，逻辑改动 834a9200）
+
+仅后端部署。本轮重点是 Claude 上游错误分类，不做全局 400 重试：
+
+1. `Identity verification is required to continue.` 归类为 `identity_verification_required`，按永久/半永久账号不可用处理，账号移出轮转并触发换号重试。
+2. 批量导入探测更严格：`identity_verification_required` 会拒绝导入；未匹配到明确永久账号错误的 Claude 上游 HTTP 400 也会以 `probe_bad_request` 拒绝导入，避免坏账号进池。
+3. OAuth/Claude Code 账号请求会在上游前剥离 `context-1m-2025-08-07`，避免 `This authentication style is incompatible with the long context beta header.`；API Key 形态仍允许显式 1M beta。
+4. `500/529 Overloaded` 按上游临时过载处理，允许尝试下一个账号，但不把当前账号标记为永久不可用、不挂模型、不写冷却。
+5. 客户端请求形态错误仍按请求错误返回，例如 malformed payload、thinking 参数非法、prompt too long 等，不扫全池重试，避免误伤正常账号。
+
+### 上一轮变更说明（fa83c466，已被 4cde9eaa 取代）
 
 仅后端、3 文件（1 改 + 2 测试）。修复客户反馈的两个问题：
 
