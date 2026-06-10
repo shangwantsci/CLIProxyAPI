@@ -9,7 +9,7 @@
 - Claude Code / Claude OAuth 多账号池。
 - Claude Code 伪装与指纹一致性。
 - 管理面板中的账号健康、批量探测、代理池和策略设置。
-- 生产服务器 `23.153.36.248` 上 `api.openstaryu.com` / `admin.openstaryu.com` 的稳定部署更新。
+- 生产服务器 `154.29.158.193` 上 `api.openstaryu.com` / `admin.openstaryu.com` 的稳定部署更新。
 
 ## 仓库与路径
 
@@ -31,7 +31,7 @@
 - NewAPI 对外入口：`https://api.openstaryu.com`
 - CPA 管理入口：`https://admin.openstaryu.com/management.html`
 - CPA 本机健康检查：`http://127.0.0.1:8318/healthz`
-- SSH：`root@23.153.36.248:41629`
+- SSH：`root@154.29.158.193:56260`
 - 当前生产版本摘要见 `docs/production-deployment-23.153.36.12.md` 的“当前部署版本”。
 - 截至 `2026-06-08`，生产后端二进制部署提交为 `fa83c466`，前端部署提交为 `c0ef735`。
 - 后端仓库本地 HEAD 可能是部署后的文档提交，例如 `096ceb99`；生产实际运行的二进制仍以服务器 `/opt/cpa-claude-proxy/DEPLOYED_COMMITS` 为准。
@@ -40,7 +40,7 @@
 
 当前端口策略：
 
-- 公网只保留 `80/tcp`、`443/tcp`、`41629/tcp`。
+- 公网只保留 `80/tcp`、`443/tcp`、`56260/tcp`。
 - CPA `8318` 只监听 `127.0.0.1`，通过 Traefik 的 `admin.openstaryu.com` 访问管理前端。
 - NewAPI `13000` 只监听 `127.0.0.1`，通过 Traefik 的 `api.openstaryu.com` 对外。
 - NewAPI 中 CPA 号池渠道的 `base_url` 应保持 `http://cpa-claude-proxy:8318`，不要改回公网 IP。
@@ -122,7 +122,7 @@ cat /opt/cpa-claude-proxy/DEPLOYED_COMMITS
   - NewAPI 号池渠道 `base_url` 从 `http://23.153.36.12:8318` 改为 `http://cpa-claude-proxy:8318`。
   - Coolify `8000`、Traefik `8080`、Coolify realtime `6001-6002` 均收口为 `127.0.0.1`。
   - Traefik HTTP/3/QUIC 关闭，不再公开 `443/udp`。
-  - UFW 入站规则只保留 `41629/tcp`、`80/tcp`、`443/tcp`。
+  - UFW 入站规则只保留 `56260/tcp`、`80/tcp`、`443/tcp`。
   - 服务器备份目录：`/root/openstaryu-hardening-20260528-113201`。
 
 ## 常用命令
