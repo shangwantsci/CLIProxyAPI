@@ -246,6 +246,35 @@ func TestApplyClaudeHeaders_ForwardsFableFallbackBetasWhenRequested(t *testing.T
 	}
 }
 
+func TestApplyClaudeHeaders_FableMatchesClaudeCode2170Betas(t *testing.T) {
+	req := newClaudeHeaderTestRequest(t, http.Header{
+		"Anthropic-Beta": []string{"custom-beta"},
+	})
+	applyClaudeHeaders(req, &cliproxyauth.Auth{}, "key-fable-betas", false, nil, &config.Config{}, "claude-fable-5")
+
+	got := req.Header.Get("Anthropic-Beta")
+	want := strings.Join([]string{
+		"claude-code-20250219",
+		"interleaved-thinking-2025-05-14",
+		"thinking-token-count-2026-05-13",
+		"context-management-2025-06-27",
+		"prompt-caching-scope-2026-01-05",
+		"mid-conversation-system-2026-04-07",
+		"advisor-tool-2026-03-01",
+		"effort-2025-11-24",
+		"fallback-credit-2026-06-01",
+	}, ",")
+	if got != want {
+		t.Fatalf("Anthropic-Beta = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "server-side-fallback-2026-06-01") {
+		t.Fatalf("Anthropic-Beta = %q, should not default server-side fallback", got)
+	}
+	if strings.Contains(got, "custom-beta") {
+		t.Fatalf("Anthropic-Beta = %q, should drop unknown client beta", got)
+	}
+}
+
 func TestApplyClaudeHeaders_StripsKnownRelayClientHeaders(t *testing.T) {
 	leakyHeaders := []string{
 		"X-OpenClaw-Client",
@@ -2144,6 +2173,47 @@ func TestClaudeExecutor_Execute_Opus48MatchesClaudeCode214RequestShape(t *testin
 	}
 	if got := gjson.GetBytes(gotBody, "system.2.cache_control.type").String(); got != "ephemeral" {
 		t.Fatalf("system.2.cache_control.type = %q, want ephemeral", got)
+	}
+}
+
+func TestClaudeExecutor_Execute_FableDefaultThinkingMatchesClaudeCode2170(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-fable-5","role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-fable-default-thinking",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-fable-5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	if got := gjson.GetBytes(gotBody, "thinking.type").String(); got != "adaptive" {
+		t.Fatalf("thinking.type = %q, want adaptive; body=%s", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "output_config.effort").String(); got != "high" {
+		t.Fatalf("output_config.effort = %q, want high; body=%s", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "max_tokens").Int(); got != 64000 {
+		t.Fatalf("max_tokens = %d, want 64000; body=%s", got, string(gotBody))
 	}
 }
 

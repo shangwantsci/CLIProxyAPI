@@ -131,7 +131,7 @@ func claudeBuiltinFable5ModelInfo() *ModelInfo {
 		DisplayName:         "Claude Fable 5",
 		Description:         "Most capable generally available Claude model with always-on adaptive thinking.",
 		ContextLength:       1000000,
-		MaxCompletionTokens: 128000,
+		MaxCompletionTokens: 64000,
 		Thinking: &ThinkingSupport{
 			DynamicAllowed: true,
 			Levels:         []string{"low", "medium", "high", "xhigh", "max"},

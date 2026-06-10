@@ -374,6 +374,8 @@ func mapAnthropicStopReasonToOpenAI(anthropicReason string) string {
 		return "length"
 	case "stop_sequence":
 		return "stop"
+	case "refusal":
+		return "content_filter"
 	default:
 		return "stop"
 	}

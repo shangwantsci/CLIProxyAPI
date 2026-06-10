@@ -9,7 +9,7 @@
       "display_name": "Claude Fable 5",
       "description": "Most capable generally available Claude model with always-on adaptive thinking.",
       "context_length": 1000000,
-      "max_completion_tokens": 128000,
+      "max_completion_tokens": 64000,
       "thinking": {
         "dynamic_allowed": true,
         "levels": [

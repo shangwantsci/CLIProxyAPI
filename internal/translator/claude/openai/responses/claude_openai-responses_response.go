@@ -44,6 +44,7 @@ type claudeToResponsesState struct {
 	CacheCreation1hTokens    int64
 	CacheReadInputTokens     int64
 	UsageSeen                bool
+	StopReason               string
 }
 
 var dataTag = []byte("data:")
@@ -159,6 +160,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			st.CacheCreation1hTokens = 0
 			st.CacheReadInputTokens = 0
 			st.UsageSeen = false
+			st.StopReason = ""
 			if usage := msg.Get("usage"); usage.Exists() {
 				mergeClaudeResponsesUsage(st, usage)
 			}
@@ -337,12 +339,24 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			st.ReasoningPartAdded = false
 		}
 	case "message_delta":
+		if delta := root.Get("delta"); delta.Exists() {
+			if stopReason := delta.Get("stop_reason"); stopReason.Exists() {
+				st.StopReason = stopReason.String()
+			}
+		}
 		if usage := root.Get("usage"); usage.Exists() {
 			mergeClaudeResponsesUsage(st, usage)
 		}
 	case "message_stop":
 
+		eventName := "response.completed"
 		completed := []byte(`{"type":"response.completed","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null}}`)
+		if incompleteReason := openAIResponsesIncompleteReasonFromClaudeStop(st.StopReason); incompleteReason != "" {
+			eventName = "response.incomplete"
+			completed, _ = sjson.SetBytes(completed, "type", "response.incomplete")
+			completed, _ = sjson.SetBytes(completed, "response.status", "incomplete")
+			completed, _ = sjson.SetBytes(completed, "response.incomplete_details.reason", incompleteReason)
+		}
 		completed, _ = sjson.SetBytes(completed, "sequence_number", nextSeq())
 		completed, _ = sjson.SetBytes(completed, "response.id", st.ResponseID)
 		completed, _ = sjson.SetBytes(completed, "response.created_at", st.CreatedAt)
@@ -496,7 +510,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				completed, _ = sjson.SetBytes(completed, "response.usage.output_tokens_details.reasoning_tokens", reasoningTokens)
 			}
 		}
-		out = append(out, emitEvent("response.completed", completed))
+		out = append(out, emitEvent(eventName, completed))
 	}
 
 	return out
@@ -544,6 +558,7 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(ctx context.Context, modelN
 		cacheCreate5m   int64
 		cacheCreate1h   int64
 		cacheRead       int64
+		stopReason      string
 	)
 	mergeUsage := func(usage gjson.Result) {
 		if !usage.Exists() {
@@ -648,6 +663,11 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(ctx context.Context, modelN
 			_ = root
 
 		case "message_delta":
+			if delta := root.Get("delta"); delta.Exists() {
+				if sr := delta.Get("stop_reason"); sr.Exists() {
+					stopReason = sr.String()
+				}
+			}
 			mergeUsage(root.Get("usage"))
 		}
 	}
@@ -655,6 +675,10 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(ctx context.Context, modelN
 	// Populate base fields
 	out, _ = sjson.SetBytes(out, "id", responseID)
 	out, _ = sjson.SetBytes(out, "created_at", createdAt)
+	if incompleteReason := openAIResponsesIncompleteReasonFromClaudeStop(stopReason); incompleteReason != "" {
+		out, _ = sjson.SetBytes(out, "status", "incomplete")
+		out, _ = sjson.SetBytes(out, "incomplete_details.reason", incompleteReason)
+	}
 
 	// Inject request echo fields as top-level (similar to streaming variant)
 	reqBytes := pickRequestJSON(originalRequestRawJSON, requestRawJSON)
@@ -796,6 +820,17 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(ctx context.Context, modelN
 	}
 
 	return out
+}
+
+func openAIResponsesIncompleteReasonFromClaudeStop(reason string) string {
+	switch reason {
+	case "max_tokens":
+		return "max_output_tokens"
+	case "refusal":
+		return "content_filter"
+	default:
+		return ""
+	}
 }
 
 func repairOpenAIResponsesToolArguments(arguments string) string {

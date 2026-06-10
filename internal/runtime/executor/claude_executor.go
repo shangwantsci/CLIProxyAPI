@@ -311,6 +311,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body = repairClaudeRequestShapeBeforeThinking(body)
+	applyDefaultAdaptiveThinking := shouldApplyClaudeDefaultAdaptiveThinking(body, req.Model)
 	ctx = helps.WithClaudeBillableUsage(ctx, config.ClaudeBillableUsageEnabled(e.cfg), baseModel, from.String(), originalPayloadSource)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
@@ -327,6 +328,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body = ensureModelMaxTokens(body, baseModel)
+	if applyDefaultAdaptiveThinking {
+		body = applyClaudeDefaultAdaptiveThinking(body)
+	}
 	body = repairClaudeRequestShape(body)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
@@ -519,6 +523,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body = repairClaudeRequestShapeBeforeThinking(body)
+	applyDefaultAdaptiveThinking := shouldApplyClaudeDefaultAdaptiveThinking(body, req.Model)
 	ctx = helps.WithClaudeBillableUsage(ctx, config.ClaudeBillableUsageEnabled(e.cfg), baseModel, from.String(), originalPayloadSource)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
@@ -535,6 +540,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body = ensureModelMaxTokens(body, baseModel)
+	if applyDefaultAdaptiveThinking {
+		body = applyClaudeDefaultAdaptiveThinking(body)
+	}
 	body = repairClaudeRequestShape(body)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
@@ -846,6 +854,9 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	stream := from != to
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
+	if shouldApplyClaudeDefaultAdaptiveThinking(body, req.Model) {
+		body = applyClaudeDefaultAdaptiveThinking(body)
+	}
 	body = repairClaudeRequestShape(body)
 
 	var cloaked bool
@@ -1391,6 +1402,33 @@ func repairClaudeRequestShapeBeforeThinking(body []byte) []byte {
 	return body
 }
 
+func shouldApplyClaudeDefaultAdaptiveThinking(body []byte, model string) bool {
+	suffix := thinking.ParseSuffix(model)
+	if suffix.HasSuffix || !claudeModelUsesAlwaysAdaptiveThinking(suffix.ModelName) {
+		return false
+	}
+	if gjson.GetBytes(body, "thinking").Exists() || gjson.GetBytes(body, "output_config.effort").Exists() {
+		return false
+	}
+	return true
+}
+
+func applyClaudeDefaultAdaptiveThinking(body []byte) []byte {
+	if gjson.GetBytes(body, "thinking").Exists() || gjson.GetBytes(body, "output_config.effort").Exists() {
+		return body
+	}
+	body, _ = sjson.SetBytes(body, "thinking.type", "adaptive")
+	body, _ = sjson.SetBytes(body, "output_config.effort", string(thinking.LevelHigh))
+	return body
+}
+
+func claudeModelUsesAlwaysAdaptiveThinking(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(model).ModelName))
+	model = strings.TrimSuffix(model, "-thinking")
+	return model == "claude-fable-5" || strings.HasPrefix(model, "claude-fable-5-") ||
+		model == "claude-mythos-5" || strings.HasPrefix(model, "claude-mythos-5-")
+}
+
 func repairClaudeAdaptiveEffort(body []byte) []byte {
 	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
 	if thinkingType != "enabled" && thinkingType != "adaptive" && thinkingType != "auto" {
@@ -1534,11 +1572,24 @@ var claudeCodeDefaultBetaTokens = []string{
 	"effort-2025-11-24",
 }
 
+var claudeCodeFableBetaTokens = []string{
+	"claude-code-20250219",
+	"interleaved-thinking-2025-05-14",
+	"thinking-token-count-2026-05-13",
+	"context-management-2025-06-27",
+	"prompt-caching-scope-2026-01-05",
+	claudeCodeMidConversationSystemBeta,
+	"advisor-tool-2026-03-01",
+	"effort-2025-11-24",
+	"fallback-credit-2026-06-01",
+}
+
 const claudeCodeMidConversationSystemBeta = "mid-conversation-system-2026-04-07"
 
 var claudeAllowedBetaTokens = func() map[string]struct{} {
 	optional := []string{
 		"oauth-2025-04-20",
+		"advisor-tool-2026-03-01",
 		"prompt-caching-scope-2026-01-05",
 		"context-management-2025-06-27",
 		"context-1m-2025-08-07",
@@ -1790,6 +1841,9 @@ func ginHeadersFromContext(ctx context.Context) http.Header {
 }
 
 func claudeCodeDefaultBetaTokensForModel(model string) []string {
+	if claudeModelUsesAlwaysAdaptiveThinking(model) {
+		return append([]string(nil), claudeCodeFableBetaTokens...)
+	}
 	if !claudeModelUsesMidConversationSystemBeta(model) {
 		return append([]string(nil), claudeCodeDefaultBetaTokens...)
 	}

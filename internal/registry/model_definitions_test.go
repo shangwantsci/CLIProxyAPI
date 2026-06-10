@@ -168,7 +168,7 @@ func assertClaudeFable5ModelInfo(t *testing.T, source string, model *ModelInfo) 
 	if model.ContextLength != 1000000 {
 		t.Fatalf("%s context length mismatch: got %d", source, model.ContextLength)
 	}
-	if model.MaxCompletionTokens != 128000 {
+	if model.MaxCompletionTokens != 64000 {
 		t.Fatalf("%s max completion tokens mismatch: got %d", source, model.MaxCompletionTokens)
 	}
 	if model.Thinking == nil {

@@ -165,8 +165,12 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		if supportsAdaptive {
 			result, _ := sjson.SetBytes(body, "thinking.type", "adaptive")
 			result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
-			// Explicit effort is optional for adaptive thinking; omit it to allow upstream default.
-			result, _ = sjson.DeleteBytes(result, "output_config.effort")
+			if alwaysAdaptive {
+				result, _ = sjson.SetBytes(result, "output_config.effort", string(thinking.LevelHigh))
+			} else {
+				// Explicit effort is optional for adaptive thinking; omit it to allow upstream default.
+				result, _ = sjson.DeleteBytes(result, "output_config.effort")
+			}
 			if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
 				result, _ = sjson.DeleteBytes(result, "output_config")
 			}

@@ -86,6 +86,21 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStream_RepairsConcatenatedTool
 	}
 }
 
+func TestConvertClaudeResponseToOpenAIResponsesNonStream_RefusalMarksIncomplete(t *testing.T) {
+	raw := []byte(strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"msg_refusal","model":"claude-fable-5","usage":{"input_tokens":1,"output_tokens":0}}}`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"refusal"},"usage":{"output_tokens":1}}`,
+	}, "\n"))
+
+	out := ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-fable-5", nil, nil, raw, nil)
+	if got := gjson.GetBytes(out, "status").String(); got != "incomplete" {
+		t.Fatalf("status = %q, want incomplete; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "incomplete_details.reason").String(); got != "content_filter" {
+		t.Fatalf("incomplete reason = %q, want content_filter; out=%s", got, string(out))
+	}
+}
+
 func TestConvertClaudeResponseToOpenAIResponsesStream_RewritesUsageToBillableInput(t *testing.T) {
 	original := []byte(`{"model":"claude-opus-4-7","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
 	ctx := helps.WithClaudeBillableUsage(context.Background(), true, "claude-opus-4-7", "openai-response", original)
@@ -184,5 +199,31 @@ func TestConvertClaudeResponseToOpenAIResponsesStreamReadsCacheBreakdownWhenBill
 	}
 	if got := gjson.GetBytes(completed, "response.usage.total_tokens").Int(); got != 45 {
 		t.Fatalf("response.usage.total_tokens = %d, want %d; payload=%s", got, 45, string(completed))
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponsesStream_RefusalEmitsIncomplete(t *testing.T) {
+	var param any
+
+	_ = ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-fable-5", nil, nil, []byte(`data: {"type":"message_start","message":{"id":"msg_refusal","model":"claude-fable-5","usage":{"input_tokens":1,"output_tokens":0}}}`), &param)
+	_ = ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-fable-5", nil, nil, []byte(`data: {"type":"message_delta","delta":{"stop_reason":"refusal"},"usage":{"output_tokens":1}}`), &param)
+	chunks := ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-fable-5", nil, nil, []byte(`data: {"type":"message_stop"}`), &param)
+
+	var incomplete []byte
+	for _, chunk := range chunks {
+		if strings.HasPrefix(string(chunk), "event: response.incomplete") {
+			if idx := strings.Index(string(chunk), "\ndata: "); idx >= 0 {
+				incomplete = chunk[idx+7:]
+			}
+		}
+	}
+	if len(incomplete) == 0 {
+		t.Fatalf("response.incomplete event not found: %q", chunks)
+	}
+	if got := gjson.GetBytes(incomplete, "response.status").String(); got != "incomplete" {
+		t.Fatalf("status = %q, want incomplete; payload=%s", got, string(incomplete))
+	}
+	if got := gjson.GetBytes(incomplete, "response.incomplete_details.reason").String(); got != "content_filter" {
+		t.Fatalf("incomplete reason = %q, want content_filter; payload=%s", got, string(incomplete))
 	}
 }

@@ -25,8 +25,10 @@ X-Stainless-Arch: x64
 
 验证来源：
 
-- `2.1.170` 来自 2026-06-10 本机 `claude --version` 与官方 Claude Code changelog 校准；本轮只更新 UA 版本号以跟随 Fable 5 发布窗口。
-- `0.94.0`、`v24.3.0`、`Windows/x64` 经历史一手二进制比对确认：2.1.154 与 2.1.161 二进制内嵌的 `X-Stainless-Package-Version` 常量**均为 `0.94.0`**，runtime 均为 `v24.3.0`；2026-06-10 本机 2.1.170 二进制字符串仍可见 `0.94.0`，但 runtime/platform 未做新 HTTPS 抓包确认，因此保持不变。
+- `2.1.170` 来自 2026-06-10 本机 `claude --version` 与 Claude Code `claude-fable-5` 本地假上游抓包校准。抓包使用空 `CLAUDE_CONFIG_DIR` 和测试 API key，只观测请求形态，不使用真实 OAuth token。
+- `0.94.0`、`v24.3.0` 经历史一手二进制比对确认：2.1.154 与 2.1.161 二进制内嵌的 `X-Stainless-Package-Version` 常量**均为 `0.94.0`**，runtime 均为 `v24.3.0`；2026-06-10 本机 2.1.170 二进制字符串与 Fable 抓包仍确认 `X-Stainless-Package-Version: 0.94.0`、`X-Stainless-Runtime-Version: v24.3.0`。
+- 2026-06-10 本机 Mac 抓包中的 `X-Stainless-Os` 为 `MacOS`，但当前仓库默认仍保留既有生产 baseline `Windows/x64`，避免无生产抓包证据时改变账号 device profile 的平台指纹。
+- Fable 抓包确认主请求形态：`/v1/messages?beta=true`、`model: claude-fable-5`、`max_tokens: 64000`、`stream: true`、`thinking.type: adaptive`。默认无 `--effort` 时 `output_config.effort: high`；显式 `--effort xhigh/max` 会分别发送 `xhigh/max`。
 - ⚠️ **关键陷阱**：npm 上独立包 `@anthropic-ai/sdk` 已升到 `0.100.1`，但官方 Claude Code 把 SDK **vendored(内联)进二进制**，真实 CLI 上报的 `X-Stainless-Package-Version` 仍是 `0.94.0`。**不要**把它追到 npm 的最新版——那会制造一个真实 CLI 永不发出的假指纹。runtime `v24.3.0` 同理(Bun 编译内嵌 node-compat 版本),保持不变。
 - `2.1.154`(历史基线)来自 2026-05-29 本机 `claude --version` 和真实 Opus 4.8 OAuth 请求抓包；2026-06-03 升级到 2.1.161；2026-06-10 跟随 Claude Code 2.1.170/Fable 5 升级 UA。
 
@@ -138,12 +140,26 @@ x-llm-
 
 代码入口：`internal/runtime/executor/claude_executor.go`
 
-当前默认 beta tokens：
+普通 Claude Code 默认 beta tokens：
 
 ```text
 claude-code-20250219
 interleaved-thinking-2025-05-14
 effort-2025-11-24
+```
+
+`claude-fable-5` / `claude-mythos-5` 这类 always-adaptive 模型使用模型特定默认 beta 顺序：
+
+```text
+claude-code-20250219
+interleaved-thinking-2025-05-14
+thinking-token-count-2026-05-13
+context-management-2025-06-27
+prompt-caching-scope-2026-01-05
+mid-conversation-system-2026-04-07
+advisor-tool-2026-03-01
+effort-2025-11-24
+fallback-credit-2026-06-01
 ```
 
 `claude-opus-4-8` 会使用模型特定 beta 顺序：
@@ -173,6 +189,7 @@ cache-diagnosis-2026-04-07
 server-side-fallback-2026-06-01
 fallback-credit-2026-06-01
 mid-conversation-system-2026-04-07
+advisor-tool-2026-03-01
 ```
 
 当前会丢弃：
@@ -190,6 +207,7 @@ mid-conversation-system-2026-04-07
 - 强制补齐 Claude Code 默认 beta。
 - 客户端/请求体显式传入的已知 beta 可以保留；不再把历史观察到的所有 beta 都默认注入，避免请求形态过宽。
 - 请求体包含 `context_management` 时会自动补 `context-management-2025-06-27`，避免客户端忘记带 beta 时被上游直接拒绝。
+- `server-side-fallback-2026-06-01` 只允许客户端显式请求时透传，不默认注入；2026-06-10 Claude Code 2.1.170 Fable 抓包即使设置 `--fallback-model claude-opus-4-8`，主请求 body 仍为 `fallbacks: null`，默认 beta 也只包含 `fallback-credit-2026-06-01`。
 - 每次更新 beta 列表必须说明来源，最好来自真实 Claude Code 抓包。
 
 ### 5. Claude Code system prompt 静态块
@@ -222,7 +240,8 @@ mid-conversation-system-2026-04-07
 当前策略：
 
 - 对外接客户端优先修复可安全修复的请求，而不是直接拦截。
-- `thinking.type` 为 `enabled`、`adaptive` 或 `auto` 时，`output_config.effort=xhigh` 会降级为 `high`。这是按 2026-05-29 生产日志中上游明确拒绝 `xhigh`，且真实 Opus 4.8 OAuth 抓包使用 `high` 校准。
+- `thinking.type` 为 `enabled`、`adaptive` 或 `auto` 时，若当前模型不声明支持 `output_config.effort=xhigh`，会把 `xhigh` 降级为 `high`。这是按 2026-05-29 生产日志中上游明确拒绝 Opus 旧路径 `xhigh`，且真实 Opus 4.8 OAuth 抓包使用 `high` 校准。
+- `claude-fable-5` 是 always-adaptive 模型：默认请求补 `thinking.type=adaptive` 与 `output_config.effort=high`，但显式 `low/high/xhigh/max` 都应保留。`(none)` 或显式 `thinking.type=disabled` 不会向 Fable 发送 `disabled`，因为该模型不支持关闭 thinking。
 - `thinking.budget_tokens` 超出已知模型 `thinking.min/max` 时会 clamp 到模型范围内；如请求同时设置 `max_tokens`，会尽量保持 `budget_tokens < max_tokens`。
 - `messages[*].content` 中空字符串 text block 会删除；如果非空 text block 带 `cache_control`，该字段必须保留。
 - `cache_control` TTL 归一化（`normalizeCacheControlTTL`）：Anthropic 要求按 `tools → system → messages` 的求值顺序，1h TTL 块不能排在 5m 块之后。号池注入的 Claude Code 身份/runtime context 块带默认（5m）`cache_control` 且排在最前，会与客户端显式的 `ttl="1h"` 块冲突。**策略（2026-06-08 commit `fa83c466` 起）**：只要请求中存在任意客户端显式 1h 块（仅客户端会写 `ttl="1h"`，号池注入块不写 ttl），就把**所有** ephemeral 块统一升级为 1h，保住客户端的 1h 缓存意图，同时让顺序天然合法。请求中没有 1h 块时字节级原样返回，默认（5m）行为不变。注意：升级只改 `cache_control.ttl`，不动 system block 的 `text`，因此不影响 mimicry guard 的 system 块哈希审计（该审计只哈希 `text`）。此前的旧策略是反向的——遇到 5m 块就把后续 1h 块降级成 5m，会静默丢掉客户端请求的 1h 缓存，已废弃。

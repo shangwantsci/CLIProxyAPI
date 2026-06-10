@@ -43,3 +43,18 @@ func TestApplyThinking_ClaudeFableBudgetConvertsToAdaptiveEffort(t *testing.T) {
 		t.Fatalf("output_config.effort = %q, want high, body=%s", got, string(out))
 	}
 }
+
+func TestApplyThinking_ClaudeFableAutoUsesClaudeCodeDefaultEffort(t *testing.T) {
+	body := []byte(`{"model":"claude-fable-5","thinking":{"type":"enabled"}}`)
+
+	out, err := thinking.ApplyThinking(body, "claude-fable-5", "claude", "claude", "claude")
+	if err != nil {
+		t.Fatalf("ApplyThinking() error = %v", err)
+	}
+	if got := gjson.GetBytes(out, "thinking.type").String(); got != "adaptive" {
+		t.Fatalf("thinking.type = %q, want adaptive, body=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "output_config.effort").String(); got != "high" {
+		t.Fatalf("output_config.effort = %q, want high, body=%s", got, string(out))
+	}
+}
