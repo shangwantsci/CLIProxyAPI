@@ -2809,6 +2809,13 @@ func permanentAuthDisabledDetails(statusCode int, rawMessage string) (string, st
 		}
 		return "account_disabled", message, true
 	}
+	if strings.Contains(combined, "identity_verification_required") ||
+		strings.Contains(combined, "identity verification is required") {
+		if message == "" || strings.HasPrefix(message, "{") {
+			message = "Identity verification is required to continue."
+		}
+		return "identity_verification_required", message, true
+	}
 	if strings.Contains(combined, "account_session_invalid") {
 		if message == "" || strings.HasPrefix(message, "{") {
 			message = "Session key has expired or been invalidated. Re-import the account cookie."
