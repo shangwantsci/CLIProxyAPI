@@ -12,20 +12,18 @@ import (
 
 func TestNewClaudeExecutor_ConcurrencySemDisabledByDefault(t *testing.T) {
 	e := NewClaudeExecutor(&config.Config{})
-	if e.concurrencySem != nil {
-		t.Fatalf("expected nil concurrencySem when limit is 0 (disabled), got non-nil")
+	if !e.tryAcquireConcurrencySlot() {
+		t.Fatalf("tryAcquire should succeed when limit is disabled")
 	}
 	if !e.tryAcquireConcurrencySlot() {
-		t.Fatalf("nil sem tryAcquire should always succeed")
+		t.Fatalf("second tryAcquire should also succeed when limit is disabled")
 	}
 	e.releaseConcurrencySlot() // 不应 panic
+	e.releaseConcurrencySlot()
 }
 
 func TestClaudeExecutor_ConcurrencySlot_AcquireRelease(t *testing.T) {
 	e := NewClaudeExecutor(&config.Config{ClaudeMaxConcurrentRequests: 2})
-	if e.concurrencySem == nil {
-		t.Fatalf("expected non-nil concurrencySem when limit is 2")
-	}
 	if !e.tryAcquireConcurrencySlot() {
 		t.Fatalf("1st acquire should succeed")
 	}
@@ -77,7 +75,7 @@ func TestStreamingSlotHeldUntilGoroutineExit(t *testing.T) {
 	streamDone := make(chan struct{})
 	go func() {
 		defer e.releaseConcurrencySlot() // 对应 ExecuteStream goroutine 的 release defer
-		<-streamDone                      // 模拟流读取中
+		<-streamDone                     // 模拟流读取中
 	}()
 
 	if e.tryAcquireConcurrencySlot() {
@@ -96,4 +94,30 @@ func TestStreamingSlotHeldUntilGoroutineExit(t *testing.T) {
 	if !released {
 		t.Fatalf("slot must be released after stream goroutine exits")
 	}
+}
+
+func TestClaudeExecutor_ConcurrencyLimitHotReloadsConfig(t *testing.T) {
+	cfg := &config.Config{ClaudeMaxConcurrentRequests: 1}
+	e := NewClaudeExecutor(cfg)
+
+	if !e.tryAcquireConcurrencySlot() {
+		t.Fatalf("first acquire should succeed")
+	}
+	if e.tryAcquireConcurrencySlot() {
+		t.Fatalf("second acquire should fail while cap is 1")
+	}
+
+	cfg.ClaudeMaxConcurrentRequests = 2
+	if !e.tryAcquireConcurrencySlot() {
+		t.Fatalf("second acquire should succeed after hot-reloading cap to 2")
+	}
+
+	cfg.ClaudeMaxConcurrentRequests = 0
+	if !e.tryAcquireConcurrencySlot() {
+		t.Fatalf("acquire should bypass limit after hot-reloading cap to 0")
+	}
+
+	e.releaseConcurrencySlot()
+	e.releaseConcurrencySlot()
+	e.releaseConcurrencySlot()
 }

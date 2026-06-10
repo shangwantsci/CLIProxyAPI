@@ -88,7 +88,7 @@ Traefik 动态路由：
 ### 本轮新增配置项
 
 - `claude-max-request-bytes`（int，默认 `31457280` = 30 MiB）：发往 Claude 上游前的请求体字节上限，超限本地返回 413 而不转发上游（避免超大请求反复打上游污染账号行为画像）。`<= 0`（如 `-1`）表示不限制；未配置（零值）按默认 30 MiB。
-- `claude-max-concurrent-requests`（int，默认 `0` = 不限制）：CPA 同时在途的 Claude 上游请求数上限（服务器带宽/连接保护，**非**账号保护——账号保护由 per-account RPM 负责）。流式请求占用槽位直到流读完。达到上限时新请求立即返回 429（`Retryable=false`，不换账号重试、不排队）。`<= 0` 不限制。**本次部署保持默认 0（功能已上线但待命，配一个正值并重启即生效，无需重新部署二进制）。**
+- `claude-max-concurrent-requests`（int，默认 `0` = 不限制）：CPA 同时在途的 Claude 上游请求数上限（服务器带宽/连接保护，**非**账号保护——账号保护由 per-account RPM 负责）。流式请求占用槽位直到流读完。达到上限时新请求立即返回 429（`Retryable=false`，不换账号重试、不排队）。`<= 0` 不限制。前端策略页可配置，保存后后端按新值热更新生效；无需重启或重新部署二进制。
 
 > 注：本轮交叉编译未注入 git commit 的 ldflags，容器日志 `Version: dev, Commit: none` 属正常；权威版本以 `DEPLOYED_COMMITS` 为准。
 > 本轮三个功能：① 全局并发上限（带宽保护阀，默认 0 待命）；② 伪装诊断三项（UA 基线 2.1.154→2.1.161、前端兜底常量修正、审计排除故意未伪装请求且 guard 仍生效）；③ `account_session_invalid` 403（session_key 失效）归入永久失效自动禁用，不再误标 payment_required/请求异常。伪装基线经一手二进制核实未落后，`X-Stainless-Package-Version` 保持 0.94.0（vendored，勿追 npm 0.100.1）。

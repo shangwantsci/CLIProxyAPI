@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/andybalholm/brotli"
@@ -39,10 +40,10 @@ import (
 // If api_key is unavailable on auth, it falls back to legacy via ClientAdapter.
 type ClaudeExecutor struct {
 	cfg *config.Config
-	// concurrencySem is a global semaphore capping in-flight Claude upstream
-	// requests. nil means no limit. Capacity = cfg.ClaudeMaxConcurrentRequests
-	// when that value is > 0.
-	concurrencySem chan struct{}
+	// concurrencyMu protects concurrencyInFlight. The limit is read from cfg at
+	// acquire time so config hot reloads can change the cap without restarting.
+	concurrencyMu       sync.Mutex
+	concurrencyInFlight int
 	// reauthViaCookieFn, when non-nil, overrides the real CookieAuth exchange in
 	// reauthViaSessionKey. Production leaves it nil (defaultReauthViaCookie is used);
 	// tests inject a stub to avoid network calls.
@@ -197,37 +198,37 @@ func (m *oauthToolReverseMap) recordProperty(original, renamed string) {
 const defaultModelMaxTokens = 1024
 
 func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor {
-	e := &ClaudeExecutor{cfg: cfg}
-	if cfg != nil && cfg.ClaudeMaxConcurrentRequests > 0 {
-		e.concurrencySem = make(chan struct{}, cfg.ClaudeMaxConcurrentRequests)
-	}
-	return e
+	return &ClaudeExecutor{cfg: cfg}
 }
 
-// tryAcquireConcurrencySlot 非阻塞地获取一个并发槽位。返回 true 表示拿到
-// (或信号量未启用)。返回 false 表示当前并发已满,调用方应立即拒绝请求。
+// tryAcquireConcurrencySlot 非阻塞地获取一个并发槽位。返回 true 表示拿到。
+// 返回 false 表示当前并发已满,调用方应立即拒绝请求。
 func (e *ClaudeExecutor) tryAcquireConcurrencySlot() bool {
-	if e.concurrencySem == nil {
-		return true
-	}
-	select {
-	case e.concurrencySem <- struct{}{}:
-		return true
-	default:
+	e.concurrencyMu.Lock()
+	defer e.concurrencyMu.Unlock()
+	limit := e.claudeMaxConcurrentRequests()
+	if limit > 0 && e.concurrencyInFlight >= limit {
 		return false
 	}
+	e.concurrencyInFlight++
+	return true
 }
 
-// releaseConcurrencySlot 释放一个并发槽位。non-blocking drain:即使被误调
-// 多次也不会 panic 或阻塞。信号量未启用时为 no-op。
+// releaseConcurrencySlot 释放一个并发槽位。即使被误调多次也不会 panic 或阻塞。
 func (e *ClaudeExecutor) releaseConcurrencySlot() {
-	if e.concurrencySem == nil {
+	e.concurrencyMu.Lock()
+	defer e.concurrencyMu.Unlock()
+	if e.concurrencyInFlight <= 0 {
 		return
 	}
-	select {
-	case <-e.concurrencySem:
-	default:
+	e.concurrencyInFlight--
+}
+
+func (e *ClaudeExecutor) claudeMaxConcurrentRequests() int {
+	if e == nil || e.cfg == nil {
+		return 0
 	}
+	return e.cfg.ClaudeMaxConcurrentRequests
 }
 
 // claudeConcurrencyLimitError 在全局并发已满时返回。Retryable=false 确保上层
