@@ -676,6 +676,13 @@ func normalizeClaudePermanentAccountError(code, message string) (string, string,
 		}
 		return "account_disabled", trimmedMessage, true
 	}
+	if strings.Contains(raw, "identity_verification_required") ||
+		strings.Contains(raw, "identity verification is required") {
+		if trimmedMessage == "" {
+			trimmedMessage = "Identity verification is required to continue."
+		}
+		return "identity_verification_required", trimmedMessage, true
+	}
 	return "", "", false
 }
 

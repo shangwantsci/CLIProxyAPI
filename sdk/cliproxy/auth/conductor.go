@@ -2304,6 +2304,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
 		now := time.Now()
 		clientRequestError := !result.Success && isClientRequestResultError(result.Error)
+		neutralUpstreamError := !result.Success && isNeutralUpstreamTransientResultError(result.Error)
 		responseHeaders := logging.GetResponseHeaders(ctx)
 		claudeAuthResult := isClaudeAuthResult(auth, result.Provider)
 		passiveClaudeQuotaHeaders := claudeAuthResult && claudePassiveQuotaHeadersPresent(responseHeaders)
@@ -2322,6 +2323,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			if m.scheduler != nil && authSnapshot != nil {
 				m.scheduler.upsertAuth(authSnapshot)
 			}
+			m.hook.OnResult(ctx, result)
+			return
+		}
+		if neutralUpstreamError {
+			m.mu.Unlock()
 			m.hook.OnResult(ctx, result)
 			return
 		}
@@ -3061,6 +3067,24 @@ func isClientRequestResultError(err *Error) bool {
 	default:
 		return false
 	}
+}
+
+func isNeutralUpstreamTransientResultError(err *Error) bool {
+	return isUpstreamOverloadedResultError(err)
+}
+
+func isUpstreamOverloadedResultError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	status := statusCodeFromResult(err)
+	combined := strings.ToLower(strings.TrimSpace(err.Code + " " + err.Message))
+	if status == 529 {
+		return true
+	}
+	return status >= http.StatusInternalServerError &&
+		(strings.Contains(combined, "overloaded_error") ||
+			strings.Contains(combined, "overloaded"))
 }
 
 // IsClientRequestError reports whether an auth error was caused by the

@@ -134,5 +134,11 @@ func (h *Handler) singleClaudeImportProbeTo(ctx context.Context, endpoint, proxy
 	if isClaudePermanentAccountError(code, message) {
 		return &claudeImportPermanentError{Code: code, Message: message}
 	}
+	if resp.StatusCode == http.StatusBadRequest {
+		if strings.TrimSpace(message) == "" {
+			message = "Claude import probe returned HTTP 400."
+		}
+		return &claudeImportPermanentError{Code: "probe_bad_request", Message: message}
+	}
 	return nil // non-permanent error: allow import
 }

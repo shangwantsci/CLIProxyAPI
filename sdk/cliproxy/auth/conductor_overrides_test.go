@@ -1055,7 +1055,10 @@ func TestManager_MarkResult_ClientRequestBadRequestDoesNotPolluteAuthHealth(t *t
 				Message:    tc.message,
 			}
 			if !isRequestInvalidError(requestErr) {
-				t.Fatalf("expected %q to be classified as a client request error", tc.message)
+				t.Fatalf("expected %q to stop auth fallback", tc.message)
+			}
+			if !isClientRequestResultError(requestErr) {
+				t.Fatalf("expected %q to remain a non-polluting client request result error", tc.message)
 			}
 
 			m.MarkResult(context.Background(), Result{
@@ -1086,6 +1089,109 @@ func TestManager_MarkResult_ClientRequestBadRequestDoesNotPolluteAuthHealth(t *t
 				t.Fatalf("client request error should not create model health state, got %#v", state)
 			}
 		})
+	}
+}
+
+func TestManager_MarkResult_UpstreamOverloadedDoesNotPolluteAuthHealth(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{
+			name:   "wrapped 500 overloaded",
+			status: http.StatusInternalServerError,
+			body:   "status_code=500, Overloaded",
+		},
+		{
+			name:   "anthropic 529 overloaded error",
+			status: 529,
+			body:   `{"type":"error","error":{"type":"overloaded_error","message":"The API is temporarily overloaded."}}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewManager(nil, nil, nil)
+			model := "claude-sonnet-4-6"
+			auth := &Auth{ID: "auth-overloaded", Provider: "claude"}
+			if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+				t.Fatalf("register auth: %v", errRegister)
+			}
+
+			m.MarkResult(context.Background(), Result{
+				AuthID:   auth.ID,
+				Provider: auth.Provider,
+				Model:    model,
+				Success:  false,
+				Error: &Error{
+					HTTPStatus: tc.status,
+					Message:    tc.body,
+				},
+			})
+
+			updated, ok := m.GetByID(auth.ID)
+			if !ok || updated == nil {
+				t.Fatalf("expected auth to be present")
+			}
+			if updated.Disabled || updated.Unavailable || updated.Status == StatusError {
+				t.Fatalf("overloaded should not pollute auth health: disabled=%v unavailable=%v status=%s", updated.Disabled, updated.Unavailable, updated.Status)
+			}
+			if updated.Failed != 0 || updated.LastError != nil || updated.StatusMessage != "" {
+				t.Fatalf("overloaded should not record account failure: failed=%d last_error=%#v status_message=%q", updated.Failed, updated.LastError, updated.StatusMessage)
+			}
+			if state := updated.ModelStates[model]; state != nil {
+				t.Fatalf("overloaded should not create model health state, got %#v", state)
+			}
+		})
+	}
+}
+
+func TestManager_RetriesNextAuthOnUpstreamOverloadedWithoutDisablingAuth(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"aa-overloaded-auth": &Error{
+				HTTPStatus: http.StatusInternalServerError,
+				Message:    "status_code=500, Overloaded",
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "claude-sonnet-4-6"
+	overloadedAuth := &Auth{ID: "aa-overloaded-auth", Provider: "claude"}
+	healthyAuth := &Auth{ID: "bb-healthy-auth", Provider: "claude"}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(overloadedAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(healthyAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(overloadedAuth.ID)
+		reg.UnregisterClient(healthyAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), overloadedAuth); errRegister != nil {
+		t.Fatalf("register overloaded auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), healthyAuth); errRegister != nil {
+		t.Fatalf("register healthy auth: %v", errRegister)
+	}
+
+	resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("Execute returned error: %v", errExecute)
+	}
+	if string(resp.Payload) != healthyAuth.ID {
+		t.Fatalf("response payload = %q, want %q", string(resp.Payload), healthyAuth.ID)
+	}
+
+	updated, ok := m.GetByID(overloadedAuth.ID)
+	if !ok {
+		t.Fatal("overloaded auth not found")
+	}
+	if updated.Disabled || updated.Unavailable || updated.Status == StatusError || updated.Failed != 0 {
+		t.Fatalf("overloaded fallback should not pollute auth health: disabled=%v unavailable=%v status=%s failed=%d", updated.Disabled, updated.Unavailable, updated.Status, updated.Failed)
 	}
 }
 

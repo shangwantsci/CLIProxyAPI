@@ -54,6 +54,48 @@ func TestSingleProbeTransientAllows(t *testing.T) {
 	}
 }
 
+func TestSingleProbeBadRequestRejects(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"type":"invalid_request_error","message":"Identity verification is required to continue."}}`))
+	}))
+	defer srv.Close()
+
+	h := newProbeTestHandler()
+	err := h.singleClaudeImportProbeTo(context.Background(), srv.URL, "", "tok", "claude-sonnet-4-5")
+	if err == nil {
+		t.Fatal("expected bad-request probe to reject import")
+	}
+	var permErr *claudeImportPermanentError
+	if !errors.As(err, &permErr) {
+		t.Fatalf("expected *claudeImportPermanentError, got %T: %v", err, err)
+	}
+	if permErr.Code != "identity_verification_required" {
+		t.Fatalf("code = %q, want identity_verification_required", permErr.Code)
+	}
+}
+
+func TestSingleProbeUnknownBadRequestRejects(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"type":"invalid_request_error","message":"malformed payload"}}`))
+	}))
+	defer srv.Close()
+
+	h := newProbeTestHandler()
+	err := h.singleClaudeImportProbeTo(context.Background(), srv.URL, "", "tok", "claude-sonnet-4-5")
+	if err == nil {
+		t.Fatal("expected unknown bad-request probe to reject import")
+	}
+	var permErr *claudeImportPermanentError
+	if !errors.As(err, &permErr) {
+		t.Fatalf("expected *claudeImportPermanentError, got %T: %v", err, err)
+	}
+	if permErr.Code != "probe_bad_request" {
+		t.Fatalf("code = %q, want probe_bad_request", permErr.Code)
+	}
+}
+
 // TestSingleProbe2xxAllows verifies that a 200 OK response returns nil.
 func TestSingleProbe2xxAllows(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

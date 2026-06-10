@@ -1585,7 +1585,10 @@ var claudeCodeFableBetaTokens = []string{
 	"fallback-credit-2026-06-01",
 }
 
-const claudeCodeMidConversationSystemBeta = "mid-conversation-system-2026-04-07"
+const (
+	claudeCodeMidConversationSystemBeta = "mid-conversation-system-2026-04-07"
+	claudeContext1MBeta                 = "context-1m-2025-08-07"
+)
 
 var claudeAllowedBetaTokens = func() map[string]struct{} {
 	optional := []string{
@@ -1593,7 +1596,7 @@ var claudeAllowedBetaTokens = func() map[string]struct{} {
 		"advisor-tool-2026-03-01",
 		"prompt-caching-scope-2026-01-05",
 		"context-management-2025-06-27",
-		"context-1m-2025-08-07",
+		claudeContext1MBeta,
 		"extended-cache-ttl-2025-04-11",
 		"fine-grained-tool-streaming-2025-05-14",
 		"structured-outputs-2025-12-15",
@@ -1642,12 +1645,19 @@ var claudeBlockedUpstreamHeaderPrefixes = []string{
 }
 
 func filterClaudeBetaHeader(header string) string {
+	return filterClaudeBetaHeaderWithOptions(header, false)
+}
+
+func filterClaudeBetaHeaderWithOptions(header string, dropContext1M bool) string {
 	parts := strings.Split(header, ",")
 	filtered := make([]string, 0, len(parts))
 	seen := make(map[string]struct{}, len(parts))
 	for _, part := range parts {
 		beta := strings.TrimSpace(part)
 		if beta == "" {
+			continue
+		}
+		if dropContext1M && beta == claudeContext1MBeta {
 			continue
 		}
 		if _, drop := claudeDroppedBetaTokens[beta]; drop {
@@ -1666,6 +1676,10 @@ func filterClaudeBetaHeader(header string) string {
 }
 
 func filterClaudeBetaList(betas []string) []string {
+	return filterClaudeBetaListWithOptions(betas, false)
+}
+
+func filterClaudeBetaListWithOptions(betas []string, dropContext1M bool) []string {
 	if len(betas) == 0 {
 		return nil
 	}
@@ -1673,6 +1687,9 @@ func filterClaudeBetaList(betas []string) []string {
 	for _, beta := range betas {
 		beta = strings.TrimSpace(beta)
 		if beta == "" {
+			continue
+		}
+		if dropContext1M && beta == claudeContext1MBeta {
 			continue
 		}
 		if _, drop := claudeDroppedBetaTokens[beta]; drop {
@@ -1868,7 +1885,7 @@ func claudeModelUsesMidConversationSystemBeta(model string) bool {
 	return model == "claude-opus-4-8" || strings.HasPrefix(model, "claude-opus-4-8-")
 }
 
-func buildClaudeBetaHeader(ginHeaders http.Header, extraBetas []string, model ...string) string {
+func buildClaudeBetaHeader(ginHeaders http.Header, extraBetas []string, dropContext1M bool, model ...string) string {
 	baseBetas := ""
 	modelName := ""
 	if len(model) > 0 {
@@ -1877,13 +1894,13 @@ func buildClaudeBetaHeader(ginHeaders http.Header, extraBetas []string, model ..
 	for _, beta := range claudeCodeDefaultBetaTokensForModel(modelName) {
 		baseBetas = appendClaudeBeta(baseBetas, beta)
 	}
-	for _, beta := range strings.Split(filterClaudeBetaHeader(ginHeaders.Get("Anthropic-Beta")), ",") {
+	for _, beta := range strings.Split(filterClaudeBetaHeaderWithOptions(ginHeaders.Get("Anthropic-Beta"), dropContext1M), ",") {
 		baseBetas = appendClaudeBeta(baseBetas, beta)
 	}
-	for _, beta := range filterClaudeBetaList(extraBetas) {
+	for _, beta := range filterClaudeBetaListWithOptions(extraBetas, dropContext1M) {
 		baseBetas = appendClaudeBeta(baseBetas, beta)
 	}
-	return filterClaudeBetaHeader(baseBetas)
+	return filterClaudeBetaHeaderWithOptions(baseBetas, dropContext1M)
 }
 
 func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config, model ...string) {
@@ -1943,7 +1960,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	r.Header.Set("Anthropic-Dangerous-Direct-Browser-Access", "true")
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Anthropic-Version", "2023-06-01")
-	r.Header.Set("Anthropic-Beta", buildClaudeBetaHeader(ginHeaders, extraBetas, model...))
+	r.Header.Set("Anthropic-Beta", buildClaudeBetaHeader(ginHeaders, extraBetas, isClaudeOAuthToken(apiKey), model...))
 	r.Header.Set("X-App", "cli")
 	r.Header.Set("X-Stainless-Retry-Count", "0")
 	r.Header.Set("X-Stainless-Runtime", "node")

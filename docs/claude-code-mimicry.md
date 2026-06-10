@@ -198,7 +198,7 @@ advisor-tool-2026-03-01
 （无）
 ```
 
-> `context-1m-2025-08-07`（1M 上下文）历史上曾被强制丢弃以收窄请求形态、降低订阅号被识别为非官方客户端的风险。2026-06-08（commit `fa83c466`）按业务需求改为放开：从丢弃表移除并加入上述允许白名单，使客户端显式请求 1M 时能透传上游、且不被 mimicry guard 判为 unexpected beta 拦截。它**不在默认注入列表**，仅当客户端显式携带时才透传，因此只有真正需要 1M 的请求才暴露该指纹。**风险**：走此路径的请求（含 OAuth 订阅号）会向上游暴露真实 Claude Code 不发送的 1M 指纹，存在被风控的可能；这是已知并被接受的取舍。
+> `context-1m-2025-08-07`（1M 上下文）历史上曾被强制丢弃以收窄请求形态、降低订阅号被识别为非官方客户端的风险。2026-06-08（commit `fa83c466`）按业务需求改为放开：从丢弃表移除并加入上述允许白名单，使客户端显式请求 1M 时能透传上游、且不被 mimicry guard 判为 unexpected beta 拦截。它**不在默认注入列表**。2026-06-11 生产反馈显示 OAuth/Claude Code 认证方式会被上游拒绝并返回 `This authentication style is incompatible with the long context beta header.`，因此当前实现对 OAuth token 自动过滤该 beta；仅 API key 等兼容认证方式可透传客户端显式请求的 1M beta。
 
 维护原则：
 

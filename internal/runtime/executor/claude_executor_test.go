@@ -226,6 +226,21 @@ func TestApplyClaudeHeaders_ForwardsContext1MBetaFromClientAndBody(t *testing.T)
 	}
 }
 
+func TestApplyClaudeHeaders_DropsContext1MBetaForOAuthAuth(t *testing.T) {
+	req := newClaudeHeaderTestRequest(t, http.Header{
+		"Anthropic-Beta": []string{"context-1m-2025-08-07,prompt-caching-scope-2026-01-05"},
+	})
+	applyClaudeHeaders(req, &cliproxyauth.Auth{}, "sk-ant-oat-test", false, []string{"context-1m-2025-08-07"}, &config.Config{})
+
+	got := req.Header.Get("Anthropic-Beta")
+	if strings.Contains(got, "context-1m-2025-08-07") {
+		t.Fatalf("Anthropic-Beta = %q, should drop context-1m for OAuth auth", got)
+	}
+	if !strings.Contains(got, "prompt-caching-scope-2026-01-05") {
+		t.Fatalf("Anthropic-Beta = %q, should preserve other allowed betas", got)
+	}
+}
+
 func TestApplyClaudeHeaders_ForwardsFableFallbackBetasWhenRequested(t *testing.T) {
 	req := newClaudeHeaderTestRequest(t, http.Header{
 		"Anthropic-Beta": []string{"server-side-fallback-2026-06-01,custom-beta"},
