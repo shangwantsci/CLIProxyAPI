@@ -1251,6 +1251,29 @@ func TestManager_MarkResult_ClientRequestBadRequestClearsStaleClientHealth(t *te
 	}
 }
 
+func TestIsRequestInvalidError_ClaudeMessageShapeBadRequests(t *testing.T) {
+	tests := []string{
+		`{"type":"error","error":{"type":"invalid_request_error","message":"role 'system' is not supported on this model"}}`,
+		`{"type":"error","error":{"type":"invalid_request_error","message":"This model does not support assistant message prefill. The conversation must end with a user message."}}`,
+		`{"type":"error","error":{"type":"invalid_request_error","message":"` + "`temperature`" + ` is deprecated for this model."}}`,
+		`status_code=400, role 'system' is not supported on this model`,
+		`status_code=400, This model does not support assistant message prefill. The conversation must end with a user message.`,
+		`status_code=400, ` + "`temperature`" + ` is deprecated for this model.`,
+	}
+
+	for _, message := range tests {
+		t.Run(message, func(t *testing.T) {
+			err := &Error{HTTPStatus: http.StatusBadRequest, Message: message}
+			if !isRequestInvalidError(err) {
+				t.Fatalf("isRequestInvalidError(%q) = false, want true", message)
+			}
+			if !isClientRequestResultError(err) {
+				t.Fatalf("isClientRequestResultError(%q) = false, want true", message)
+			}
+		})
+	}
+}
+
 func TestManager_RequestScopedNotFoundStopsRetryWithoutSuspendingAuth(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	executor := &authFallbackExecutor{

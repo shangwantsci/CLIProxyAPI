@@ -3034,6 +3034,18 @@ func isClientRequestInvalidMessage(message string) bool {
 	if strings.Contains(lower, "thinking not supported") {
 		return true
 	}
+	if (strings.Contains(lower, "role 'system' is not supported") ||
+		strings.Contains(lower, `role "system" is not supported`)) &&
+		strings.Contains(lower, "model") {
+		return true
+	}
+	if strings.Contains(lower, "assistant message prefill") ||
+		strings.Contains(lower, "conversation must end with a user message") {
+		return true
+	}
+	if strings.Contains(lower, "temperature") && strings.Contains(lower, "deprecated for this model") {
+		return true
+	}
 	if strings.Contains(lower, "unknown level:") {
 		return true
 	}

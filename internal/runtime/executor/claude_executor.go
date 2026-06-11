@@ -1393,10 +1393,13 @@ func normalizeClaudeTemperatureForThinking(body []byte) []byte {
 func repairClaudeRequestShape(body []byte) []byte {
 	body = repairClaudeRequestShapeBeforeThinking(body)
 	body = repairClaudeContextManagement(body)
+	body = repairClaudeAssistantPrefill(body)
+	body = repairClaudeDeprecatedTemperature(body)
 	return body
 }
 
 func repairClaudeRequestShapeBeforeThinking(body []byte) []byte {
+	body = repairClaudeSystemRoleMessages(body)
 	body = repairClaudeAdaptiveEffort(body)
 	body = repairClaudeThinkingBudget(body)
 	body = repairClaudeMessageContent(body)
@@ -1425,10 +1428,14 @@ func applyClaudeDefaultAdaptiveThinking(body []byte) []byte {
 }
 
 func claudeModelUsesAlwaysAdaptiveThinking(model string) bool {
-	model = strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(model).ModelName))
-	model = strings.TrimSuffix(model, "-thinking")
+	model = normalizeClaudeModelName(model)
 	return model == "claude-fable-5" || strings.HasPrefix(model, "claude-fable-5-") ||
 		model == "claude-mythos-5" || strings.HasPrefix(model, "claude-mythos-5-")
+}
+
+func normalizeClaudeModelName(model string) string {
+	model = strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(model).ModelName))
+	return strings.TrimSuffix(model, "-thinking")
 }
 
 func repairClaudeAdaptiveEffort(body []byte) []byte {
@@ -1544,6 +1551,194 @@ func repairClaudeMessageContent(body []byte) []byte {
 		return true
 	})
 	return body
+}
+
+func repairClaudeSystemRoleMessages(body []byte) []byte {
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return body
+	}
+
+	systemBlocks := collectExistingClaudeSystemBlocks(body)
+	cleanedMessages := make([]any, 0, len(messages.Array()))
+	changed := false
+
+	messages.ForEach(func(_, message gjson.Result) bool {
+		if strings.EqualFold(message.Get("role").String(), "system") {
+			systemBlocks = append(systemBlocks, claudeSystemBlocksFromMessageContent(message.Get("content"))...)
+			changed = true
+			return true
+		}
+		cleanedMessages = append(cleanedMessages, message.Value())
+		return true
+	})
+	if !changed {
+		return body
+	}
+
+	if len(systemBlocks) > 0 {
+		body, _ = sjson.SetBytes(body, "system", systemBlocks)
+	} else if !gjson.GetBytes(body, "system").Exists() {
+		body, _ = sjson.DeleteBytes(body, "system")
+	}
+	if len(cleanedMessages) == 0 {
+		cleanedMessages = append(cleanedMessages, map[string]any{
+			"role":    "user",
+			"content": []any{map[string]any{"type": "text", "text": ""}},
+		})
+	}
+	body, _ = sjson.SetBytes(body, "messages", cleanedMessages)
+	return body
+}
+
+func collectExistingClaudeSystemBlocks(body []byte) []any {
+	system := gjson.GetBytes(body, "system")
+	if !system.Exists() {
+		return nil
+	}
+	blocks := make([]any, 0)
+	switch {
+	case system.IsArray():
+		system.ForEach(func(_, part gjson.Result) bool {
+			blocks = append(blocks, part.Value())
+			return true
+		})
+	case system.Type == gjson.String:
+		if text := system.String(); text != "" {
+			blocks = append(blocks, map[string]any{"type": "text", "text": text})
+		}
+	case system.IsObject():
+		blocks = append(blocks, system.Value())
+	}
+	return blocks
+}
+
+func claudeSystemBlocksFromMessageContent(content gjson.Result) []any {
+	if !content.Exists() {
+		return nil
+	}
+	switch {
+	case content.Type == gjson.String:
+		if text := content.String(); text != "" {
+			return []any{map[string]any{"type": "text", "text": text}}
+		}
+	case content.IsArray():
+		blocks := make([]any, 0, len(content.Array()))
+		content.ForEach(func(_, part gjson.Result) bool {
+			switch {
+			case part.Type == gjson.String:
+				if text := part.String(); text != "" {
+					blocks = append(blocks, map[string]any{"type": "text", "text": text})
+				}
+			case part.IsObject():
+				if block := claudeSystemTextBlockFromObject(part); block != nil {
+					blocks = append(blocks, block)
+				}
+			}
+			return true
+		})
+		return blocks
+	case content.IsObject():
+		if block := claudeSystemTextBlockFromObject(content); block != nil {
+			return []any{block}
+		}
+	}
+	return nil
+}
+
+func claudeSystemTextBlockFromObject(part gjson.Result) any {
+	text := part.Get("text")
+	if !text.Exists() || text.String() == "" {
+		return nil
+	}
+	block := map[string]any{"type": "text", "text": text.String()}
+	if cacheControl := part.Get("cache_control"); cacheControl.Exists() && cacheControl.IsObject() {
+		block["cache_control"] = cacheControl.Value()
+	}
+	return block
+}
+
+func repairClaudeAssistantPrefill(body []byte) []byte {
+	if !claudeModelDisallowsAssistantPrefill(gjson.GetBytes(body, "model").String()) && !claudeRequestUsesActiveThinking(body) {
+		return body
+	}
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() || len(messages.Array()) == 0 {
+		return body
+	}
+	lastIndex := len(messages.Array()) - 1
+	last := messages.Get(strconv.Itoa(lastIndex))
+	if last.Get("role").String() != "assistant" || !claudeAssistantMessageIsTextOnly(last) {
+		return body
+	}
+	fallback := map[string]any{
+		"role":    "user",
+		"content": []any{map[string]any{"type": "text", "text": ""}},
+	}
+	body, _ = sjson.SetBytes(body, "messages.-1", fallback)
+	return body
+}
+
+func claudeModelDisallowsAssistantPrefill(model string) bool {
+	model = normalizeClaudeModelName(model)
+	return model == "claude-fable-5" || strings.HasPrefix(model, "claude-fable-5-") ||
+		model == "claude-mythos-5" || strings.HasPrefix(model, "claude-mythos-5-") ||
+		model == "claude-mythos-preview" || strings.HasPrefix(model, "claude-mythos-preview-") ||
+		model == "claude-opus-4-8" || strings.HasPrefix(model, "claude-opus-4-8-") ||
+		model == "claude-opus-4-7" || strings.HasPrefix(model, "claude-opus-4-7-")
+}
+
+func claudeRequestUsesActiveThinking(body []byte) bool {
+	switch strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String())) {
+	case "enabled", "adaptive", "auto":
+		return true
+	default:
+		return false
+	}
+}
+
+func claudeAssistantMessageIsTextOnly(message gjson.Result) bool {
+	content := message.Get("content")
+	if !content.Exists() {
+		return false
+	}
+	if content.Type == gjson.String {
+		return true
+	}
+	if !content.IsArray() || len(content.Array()) == 0 {
+		return false
+	}
+	textBlocks := 0
+	onlyText := true
+	content.ForEach(func(_, block gjson.Result) bool {
+		if !block.IsObject() || block.Get("type").String() != "text" {
+			onlyText = false
+			return false
+		}
+		textBlocks++
+		return true
+	})
+	return onlyText && textBlocks > 0
+}
+
+func repairClaudeDeprecatedTemperature(body []byte) []byte {
+	if !gjson.GetBytes(body, "temperature").Exists() {
+		return body
+	}
+	if !claudeModelUsesDeprecatedTemperature(gjson.GetBytes(body, "model").String()) {
+		return body
+	}
+	body, _ = sjson.DeleteBytes(body, "temperature")
+	return body
+}
+
+func claudeModelUsesDeprecatedTemperature(model string) bool {
+	model = normalizeClaudeModelName(model)
+	return model == "claude-fable-5" || strings.HasPrefix(model, "claude-fable-5-") ||
+		model == "claude-mythos-5" || strings.HasPrefix(model, "claude-mythos-5-") ||
+		model == "claude-mythos-preview" || strings.HasPrefix(model, "claude-mythos-preview-") ||
+		model == "claude-opus-4-8" || strings.HasPrefix(model, "claude-opus-4-8-") ||
+		model == "claude-opus-4-7" || strings.HasPrefix(model, "claude-opus-4-7-")
 }
 
 func repairClaudeToolUseIDs(body []byte) []byte {

@@ -3129,6 +3129,132 @@ func TestRepairClaudeRequestShape_RemovesEmptyTextBlocks(t *testing.T) {
 	}
 }
 
+func TestRepairClaudeRequestShape_MovesSystemRoleMessagesToTopLevelSystem(t *testing.T) {
+	payload := []byte(`{"system":[{"type":"text","text":"top","cache_control":{"type":"ephemeral"}}],"messages":[
+		{"role":"system","content":"first rule"},
+		{"role":"user","content":[{"type":"text","text":"hi"}]},
+		{"role":"system","content":[{"type":"text","text":"second rule","cache_control":{"type":"ephemeral"}}]}
+	]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if got := gjson.GetBytes(out, `messages.#(role=="system")#`).Int(); got != 0 {
+		t.Fatalf("system role messages count = %d, want 0; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "system.#").Int(); got != 3 {
+		t.Fatalf("system count = %d, want 3; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "system.1.text").String(); got != "first rule" {
+		t.Fatalf("system.1.text = %q, want first rule", got)
+	}
+	if got := gjson.GetBytes(out, "system.2.text").String(); got != "second rule" {
+		t.Fatalf("system.2.text = %q, want second rule", got)
+	}
+	if got := gjson.GetBytes(out, "system.2.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("system.2.cache_control.type = %q, want ephemeral", got)
+	}
+	if got := gjson.GetBytes(out, "messages.0.role").String(); got != "user" {
+		t.Fatalf("messages.0.role = %q, want user", got)
+	}
+}
+
+func TestRepairClaudeRequestShape_MovesSystemOnlyInputAndAddsFallbackUserMessage(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"system","content":"rules"}]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if got := gjson.GetBytes(out, `messages.#(role=="system")#`).Int(); got != 0 {
+		t.Fatalf("system role messages count = %d, want 0; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "system.0.text").String(); got != "rules" {
+		t.Fatalf("system.0.text = %q, want rules", got)
+	}
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 1 {
+		t.Fatalf("messages count = %d, want fallback user; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.role").String(); got != "user" {
+		t.Fatalf("messages.0.role = %q, want user", got)
+	}
+}
+
+func TestRepairClaudeRequestShape_AddsUserTurnAfterFableAssistantTextPrefill(t *testing.T) {
+	payload := []byte(`{"model":"claude-fable-5","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]},{"role":"assistant","content":[{"type":"text","text":"prefill"}]}]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 3 {
+		t.Fatalf("messages count = %d, want 3; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.2.role").String(); got != "user" {
+		t.Fatalf("messages.2.role = %q, want user; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.2.content.0.text").String(); got != "" {
+		t.Fatalf("messages.2.content.0.text = %q, want empty fallback", got)
+	}
+}
+
+func TestRepairClaudeRequestShape_AddsUserTurnAfterOpus48AssistantTextPrefill(t *testing.T) {
+	payload := []byte(`{"model":"claude-opus-4-8","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]},{"role":"assistant","content":[{"type":"text","text":"prefill"}]}]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 3 {
+		t.Fatalf("messages count = %d, want 3; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.2.role").String(); got != "user" {
+		t.Fatalf("messages.2.role = %q, want user; out=%s", got, string(out))
+	}
+}
+
+func TestRepairClaudeRequestShape_AddsUserTurnAfterThinkingAssistantTextPrefill(t *testing.T) {
+	payload := []byte(`{"model":"claude-sonnet-4-6","thinking":{"type":"adaptive"},"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]},{"role":"assistant","content":[{"type":"text","text":"prefill"}]}]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 3 {
+		t.Fatalf("messages count = %d, want 3; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.2.role").String(); got != "user" {
+		t.Fatalf("messages.2.role = %q, want user; out=%s", got, string(out))
+	}
+}
+
+func TestRepairClaudeRequestShape_KeepsAssistantPrefillForLegacyClaudeModels(t *testing.T) {
+	payload := []byte(`{"model":"claude-sonnet-4-5-20250929","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]},{"role":"assistant","content":[{"type":"text","text":"prefill"}]}]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 2 {
+		t.Fatalf("messages count = %d, want unchanged 2; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.1.role").String(); got != "assistant" {
+		t.Fatalf("messages.1.role = %q, want assistant", got)
+	}
+}
+
+func TestRepairClaudeRequestShape_RemovesDeprecatedTemperatureForNewClaudeModels(t *testing.T) {
+	tests := []string{
+		"claude-fable-5",
+		"claude-mythos-5",
+		"claude-opus-4-8",
+		"claude-opus-4-7",
+	}
+
+	for _, model := range tests {
+		t.Run(model, func(t *testing.T) {
+			payload := []byte(fmt.Sprintf(`{"model":%q,"temperature":0.2,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`, model))
+			out := repairClaudeRequestShape(payload)
+
+			if gjson.GetBytes(out, "temperature").Exists() {
+				t.Fatalf("temperature should be removed for %s; out=%s", model, string(out))
+			}
+		})
+	}
+}
+
+func TestRepairClaudeRequestShape_KeepsTemperatureForLegacyClaudeModels(t *testing.T) {
+	payload := []byte(`{"model":"claude-sonnet-4-5-20250929","temperature":0.2,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if got := gjson.GetBytes(out, "temperature").Float(); got != 0.2 {
+		t.Fatalf("temperature = %v, want 0.2; out=%s", got, string(out))
+	}
+}
+
 func TestRepairClaudeRequestShape_NormalizesInvalidToolUseIDs(t *testing.T) {
 	payload := []byte(`{"messages":[
 		{"role":"assistant","content":[
