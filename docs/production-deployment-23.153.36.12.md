@@ -171,6 +171,13 @@ F:\GO语言\bin\go.exe build -o ..\.codex_tmp\prod-deploy\CLIProxyAPI-linux-amd6
 Get-FileHash -Algorithm SHA256 F:\claude反代\.codex_tmp\prod-deploy\CLIProxyAPI-linux-amd64
 ```
 
+上传前先压缩后端二进制，避免直接传输大文件时因网络抖动产生残缺文件：
+
+```powershell
+tar -czf F:\claude反代\.codex_tmp\prod-deploy\CLIProxyAPI-linux-amd64.tgz -C F:\claude反代\.codex_tmp\prod-deploy CLIProxyAPI-linux-amd64
+Get-FileHash -Algorithm SHA256 F:\claude反代\.codex_tmp\prod-deploy\CLIProxyAPI-linux-amd64.tgz
+```
+
 ### 3. 本地构建前端
 
 ```powershell
@@ -200,7 +207,7 @@ Windows 本机路径包含中文时，部分 Python/PowerShell 上传脚本可�
 ```powershell
 $stage = 'C:\tmp\cpa-prod-deploy'
 New-Item -ItemType Directory -Path $stage -Force | Out-Null
-Copy-Item -LiteralPath 'F:\claude反代\.codex_tmp\prod-deploy\CLIProxyAPI-linux-amd64' -Destination (Join-Path $stage 'CLIProxyAPI-linux-amd64') -Force
+Copy-Item -LiteralPath 'F:\claude反代\.codex_tmp\prod-deploy\CLIProxyAPI-linux-amd64.tgz' -Destination (Join-Path $stage 'CLIProxyAPI-linux-amd64.tgz') -Force
 Copy-Item -LiteralPath 'F:\claude反代\Cli-Proxy-API-Management-Center\dist\index.html' -Destination (Join-Path $stage 'management.html') -Force
 ```
 
@@ -214,7 +221,7 @@ mkdir -p /tmp/cpa-claude-stage
 
 上传文件：
 
-- 后端：`/tmp/cpa-claude-stage/CLIProxyAPI`
+- 后端压缩包：`/tmp/cpa-claude-stage/CLIProxyAPI-linux-amd64.tgz`
 - 前端：`/tmp/cpa-claude-stage/management.html`
 
 ### 6. 在服务器上备份账号数据
@@ -235,19 +242,31 @@ tar --exclude='auths/logs' -czf /opt/cpa-claude-proxy-backups/auths-$(date +%Y%m
 前后端都更新时：
 
 ```bash
-install -m 0755 /tmp/cpa-claude-stage/CLIProxyAPI /opt/cpa-claude-proxy/runtime/CLIProxyAPI
+cd /tmp/cpa-claude-stage
+rm -f CLIProxyAPI-linux-amd64
+tar -xzf CLIProxyAPI-linux-amd64.tgz
+chmod 0755 CLIProxyAPI-linux-amd64
+sha256sum CLIProxyAPI-linux-amd64
+install -m 0755 /tmp/cpa-claude-stage/CLIProxyAPI-linux-amd64 /opt/cpa-claude-proxy/runtime/CLIProxyAPI
 install -m 0644 /tmp/cpa-claude-stage/management.html /opt/cpa-claude-proxy/static/management.html
 cd /opt/cpa-claude-proxy
 docker compose up -d
 docker compose restart cpa-claude-proxy
 ```
 
+`sha256sum` 必须与本地未压缩二进制的 SHA256 一致；不一致时停止部署，重新上传压缩包。
+
 注意：只执行 `docker compose up -d` 可能不会重启已经运行的容器；覆盖二进制后必须显式重启或使用 `docker compose up -d --force-recreate`，否则新产物可能不会生效。
 
 只更新后端时，不要覆盖 `management.html`：
 
 ```bash
-install -m 0755 /tmp/cpa-claude-stage/CLIProxyAPI /opt/cpa-claude-proxy/runtime/CLIProxyAPI
+cd /tmp/cpa-claude-stage
+rm -f CLIProxyAPI-linux-amd64
+tar -xzf CLIProxyAPI-linux-amd64.tgz
+chmod 0755 CLIProxyAPI-linux-amd64
+sha256sum CLIProxyAPI-linux-amd64
+install -m 0755 /tmp/cpa-claude-stage/CLIProxyAPI-linux-amd64 /opt/cpa-claude-proxy/runtime/CLIProxyAPI
 cd /opt/cpa-claude-proxy
 docker compose up -d
 docker compose restart cpa-claude-proxy
