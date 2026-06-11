@@ -1260,7 +1260,14 @@ func TestIsRequestInvalidError_ClaudeMessageShapeBadRequests(t *testing.T) {
 		`status_code=400, role 'system' is not supported on this model`,
 		`status_code=400, This model does not support assistant message prefill. The conversation must end with a user message.`,
 		`status_code=400, ` + "`temperature`" + ` is deprecated for this model.`,
+		`status_code=400, ` + "`top_p`" + ` is deprecated for this model.`,
 		`status_code=400, messages: text content blocks must be non-empty`,
+		`status_code=400, messages: text content blocks must contain non-whitespace text`,
+		`status_code=400, This model does not support the effort parameter.`,
+		`status_code=400, tool_choice forces tool use is not compatible with this model.`,
+		`status_code=400, tool_choice: Input should be an object`,
+		`status_code=400, messages: Unexpected role "tool". Allowed roles are "user" or "assistant".`,
+		`status_code=400, tools.0: Input tag 'function' found using 'type' does not match any of the expected tags`,
 	}
 
 	for _, message := range tests {

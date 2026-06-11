@@ -3046,7 +3046,29 @@ func isClientRequestInvalidMessage(message string) bool {
 	if strings.Contains(lower, "temperature") && strings.Contains(lower, "deprecated for this model") {
 		return true
 	}
+	if strings.Contains(lower, "top_p") && strings.Contains(lower, "deprecated for this model") {
+		return true
+	}
 	if strings.Contains(lower, "text content blocks must be non-empty") {
+		return true
+	}
+	if strings.Contains(lower, "text content blocks must contain non-whitespace text") {
+		return true
+	}
+	if strings.Contains(lower, "does not support the effort parameter") {
+		return true
+	}
+	if strings.Contains(lower, "effort level") && strings.Contains(lower, "supported levels:") {
+		return true
+	}
+	if strings.Contains(lower, "tool_choice") &&
+		(strings.Contains(lower, "forces tool use is not compatible") || strings.Contains(lower, "input should be an object")) {
+		return true
+	}
+	if strings.Contains(lower, "unexpected role") && strings.Contains(lower, "allowed roles") {
+		return true
+	}
+	if strings.Contains(lower, "input tag 'function'") && strings.Contains(lower, "does not match any of the expected tags") {
 		return true
 	}
 	if strings.Contains(lower, "unknown level:") {

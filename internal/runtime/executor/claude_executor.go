@@ -1395,14 +1395,17 @@ func repairClaudeRequestShape(body []byte) []byte {
 	body = repairClaudeContextManagement(body)
 	body = repairClaudeAssistantPrefill(body)
 	body = repairClaudeDeprecatedTemperature(body)
+	body = repairClaudeToolChoice(body)
 	return body
 }
 
 func repairClaudeRequestShapeBeforeThinking(body []byte) []byte {
 	body = repairClaudeSystemRoleMessages(body)
+	body = repairClaudeToolRoleMessages(body)
 	body = repairClaudeAdaptiveEffort(body)
 	body = repairClaudeThinkingBudget(body)
 	body = repairClaudeMessageContent(body)
+	body = repairClaudeFunctionTools(body)
 	body = repairClaudeToolUseIDs(body)
 	return body
 }
@@ -1438,23 +1441,118 @@ func normalizeClaudeModelName(model string) string {
 	return strings.TrimSuffix(model, "-thinking")
 }
 
-const claudeEmptyTextPlaceholder = " "
+const claudeEmptyTextPlaceholder = "."
 
 func repairClaudeAdaptiveEffort(body []byte) []byte {
+	effortResult := gjson.GetBytes(body, "output_config.effort")
+	if !effortResult.Exists() || effortResult.Type != gjson.String {
+		return body
+	}
+	effort := strings.ToLower(strings.TrimSpace(effortResult.String()))
+	if effort == "" {
+		return deleteClaudeOutputConfigEffort(body)
+	}
+
 	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
-	if thinkingType != "enabled" && thinkingType != "adaptive" && thinkingType != "auto" {
-		return body
-	}
-	effort := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "output_config.effort").String()))
-	if effort != "xhigh" {
-		return body
-	}
+	activeThinking := thinkingType == "enabled" || thinkingType == "adaptive" || thinkingType == "auto"
 	modelInfo := registry.LookupModelInfo(gjson.GetBytes(body, "model").String(), "claude")
-	if modelInfo != nil && modelInfo.Thinking != nil && thinking.HasLevel(modelInfo.Thinking.Levels, effort) {
+	if modelInfo == nil || modelInfo.Thinking == nil {
+		if activeThinking && effort == "xhigh" {
+			body, _ = sjson.SetBytes(body, "output_config.effort", "high")
+		}
 		return body
 	}
-	body, _ = sjson.SetBytes(body, "output_config.effort", "high")
+
+	if len(modelInfo.Thinking.Levels) > 0 {
+		if thinking.HasLevel(modelInfo.Thinking.Levels, effort) {
+			return body
+		}
+		if mapped, ok := claudeNearestSupportedEffort(effort, modelInfo.Thinking.Levels); ok {
+			body, _ = sjson.SetBytes(body, "output_config.effort", mapped)
+		}
+		return body
+	}
+
+	budget, ok := thinking.ConvertLevelToBudget(effort)
+	if !ok {
+		return body
+	}
+	if budget <= 0 {
+		if budget == 0 {
+			body, _ = sjson.SetBytes(body, "thinking.type", "disabled")
+			body, _ = sjson.DeleteBytes(body, "thinking.budget_tokens")
+		}
+		return deleteClaudeOutputConfigEffort(body)
+	}
+	if minBudget := modelInfo.Thinking.Min; minBudget > 0 && budget < minBudget {
+		budget = minBudget
+	}
+	if maxBudget := modelInfo.Thinking.Max; maxBudget > 0 && budget > maxBudget {
+		budget = maxBudget
+	}
+	if maxTokens := gjson.GetBytes(body, "max_tokens"); maxTokens.Exists() && maxTokens.Type == gjson.Number && maxTokens.Int() > 0 && int(maxTokens.Int()) <= budget {
+		adjusted := int(maxTokens.Int()) - 1
+		if minBudget := modelInfo.Thinking.Min; minBudget <= 0 || adjusted >= minBudget {
+			budget = adjusted
+		}
+	}
+	body, _ = sjson.SetBytes(body, "thinking.type", "enabled")
+	body, _ = sjson.SetBytes(body, "thinking.budget_tokens", budget)
+	body = deleteClaudeOutputConfigEffort(body)
 	return body
+}
+
+func deleteClaudeOutputConfigEffort(body []byte) []byte {
+	body, _ = sjson.DeleteBytes(body, "output_config.effort")
+	if oc := gjson.GetBytes(body, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
+		body, _ = sjson.DeleteBytes(body, "output_config")
+	}
+	return body
+}
+
+func claudeNearestSupportedEffort(effort string, supported []string) (string, bool) {
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	if effort == "auto" {
+		effort = "high"
+	}
+	targetIdx := claudeEffortIndex(effort)
+	if targetIdx < 0 {
+		return "", false
+	}
+	best := ""
+	bestIdx := -1
+	bestDist := len(claudeEffortOrder) + 1
+	for _, level := range supported {
+		level = strings.ToLower(strings.TrimSpace(level))
+		idx := claudeEffortIndex(level)
+		if idx < 0 {
+			continue
+		}
+		dist := idx - targetIdx
+		if dist < 0 {
+			dist = -dist
+		}
+		if dist < bestDist || (dist == bestDist && (bestIdx < 0 || idx < bestIdx)) {
+			best = level
+			bestIdx = idx
+			bestDist = dist
+		}
+	}
+	if best == "" {
+		return "", false
+	}
+	return best, true
+}
+
+var claudeEffortOrder = []string{"minimal", "low", "medium", "high", "xhigh", "max"}
+
+func claudeEffortIndex(level string) int {
+	for i, candidate := range claudeEffortOrder {
+		if strings.EqualFold(level, candidate) {
+			return i
+		}
+	}
+	return -1
 }
 
 func repairClaudeThinkingBudget(body []byte) []byte {
@@ -1538,7 +1636,7 @@ func repairClaudeMessageContent(body []byte) []byte {
 			return true
 		}
 		if content.Type == gjson.String {
-			if content.String() == "" {
+			if strings.TrimSpace(content.String()) == "" {
 				body, _ = sjson.SetBytes(body, fmt.Sprintf("messages.%d.content", messageIndex.Int()), claudeEmptyTextPlaceholder)
 			}
 			return true
@@ -1549,7 +1647,7 @@ func repairClaudeMessageContent(body []byte) []byte {
 		cleaned := make([]any, 0, len(content.Array()))
 		removed := false
 		content.ForEach(func(_, block gjson.Result) bool {
-			if block.IsObject() && block.Get("type").String() == "text" && block.Get("text").Exists() && block.Get("text").String() == "" {
+			if block.IsObject() && block.Get("type").String() == "text" && block.Get("text").Exists() && strings.TrimSpace(block.Get("text").String()) == "" {
 				removed = true
 				return true
 			}
@@ -1580,7 +1678,7 @@ func repairClaudeSystemRoleMessages(body []byte) []byte {
 	changed := false
 
 	messages.ForEach(func(_, message gjson.Result) bool {
-		if strings.EqualFold(message.Get("role").String(), "system") {
+		if claudeSystemLikeRole(message.Get("role").String()) {
 			systemBlocks = append(systemBlocks, claudeSystemBlocksFromMessageContent(message.Get("content"))...)
 			changed = true
 			return true
@@ -1605,6 +1703,134 @@ func repairClaudeSystemRoleMessages(body []byte) []byte {
 	}
 	body, _ = sjson.SetBytes(body, "messages", cleanedMessages)
 	return body
+}
+
+func claudeSystemLikeRole(role string) bool {
+	return strings.EqualFold(role, "system") || strings.EqualFold(role, "developer")
+}
+
+func repairClaudeToolRoleMessages(body []byte) []byte {
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return body
+	}
+
+	cleanedMessages := make([]any, 0, len(messages.Array()))
+	changed := false
+	messages.ForEach(func(_, message gjson.Result) bool {
+		if !strings.EqualFold(message.Get("role").String(), "tool") {
+			cleanedMessages = append(cleanedMessages, message.Value())
+			return true
+		}
+		changed = true
+		cleanedMessages = append(cleanedMessages, claudeToolRoleMessageAsUserMessage(message))
+		return true
+	})
+	if changed {
+		body, _ = sjson.SetBytes(body, "messages", cleanedMessages)
+	}
+	return body
+}
+
+func claudeToolRoleMessageAsUserMessage(message gjson.Result) map[string]any {
+	content := message.Get("content")
+	toolUseID := strings.TrimSpace(message.Get("tool_call_id").String())
+	if toolUseID == "" {
+		toolUseID = strings.TrimSpace(message.Get("tool_use_id").String())
+	}
+	if toolUseID == "" && content.IsArray() {
+		content.ForEach(func(_, part gjson.Result) bool {
+			if part.IsObject() && part.Get("type").String() == "tool_result" {
+				toolUseID = strings.TrimSpace(part.Get("tool_use_id").String())
+				return false
+			}
+			return true
+		})
+	}
+
+	if content.IsArray() {
+		parts := content.Array()
+		if len(parts) > 0 {
+			allToolResults := true
+			for _, part := range parts {
+				if !part.IsObject() || part.Get("type").String() != "tool_result" {
+					allToolResults = false
+					break
+				}
+			}
+			if allToolResults {
+				return map[string]any{"role": "user", "content": content.Value()}
+			}
+		}
+	}
+
+	if toolUseID == "" {
+		return map[string]any{"role": "user", "content": claudeMessageContentAsText(content)}
+	}
+	return map[string]any{
+		"role": "user",
+		"content": []any{map[string]any{
+			"type":        "tool_result",
+			"tool_use_id": toolUseID,
+			"content":     claudeToolResultContentValue(content),
+		}},
+	}
+}
+
+func claudeMessageContentAsText(content gjson.Result) string {
+	switch {
+	case !content.Exists():
+		return claudeEmptyTextPlaceholder
+	case content.Type == gjson.String:
+		if strings.TrimSpace(content.String()) == "" {
+			return claudeEmptyTextPlaceholder
+		}
+		return content.String()
+	case content.IsArray():
+		var builder strings.Builder
+		content.ForEach(func(_, part gjson.Result) bool {
+			if part.IsObject() && part.Get("type").String() == "text" {
+				text := part.Get("text").String()
+				if strings.TrimSpace(text) != "" {
+					if builder.Len() > 0 {
+						builder.WriteByte('\n')
+					}
+					builder.WriteString(text)
+				}
+			}
+			return true
+		})
+		if builder.Len() > 0 {
+			return builder.String()
+		}
+	}
+	return claudeEmptyTextPlaceholder
+}
+
+func claudeToolResultContentValue(content gjson.Result) any {
+	if !content.Exists() {
+		return claudeEmptyTextPlaceholder
+	}
+	if content.Type == gjson.String {
+		if strings.TrimSpace(content.String()) == "" {
+			return claudeEmptyTextPlaceholder
+		}
+		return content.String()
+	}
+	if content.IsArray() {
+		parts := make([]any, 0, len(content.Array()))
+		content.ForEach(func(_, part gjson.Result) bool {
+			if part.IsObject() && part.Get("type").String() == "text" && strings.TrimSpace(part.Get("text").String()) == "" {
+				return true
+			}
+			parts = append(parts, part.Value())
+			return true
+		})
+		if len(parts) > 0 {
+			return parts
+		}
+	}
+	return claudeEmptyTextPlaceholder
 }
 
 func collectExistingClaudeSystemBlocks(body []byte) []any {
@@ -1755,6 +1981,164 @@ func claudeModelUsesDeprecatedTemperature(model string) bool {
 		model == "claude-mythos-preview" || strings.HasPrefix(model, "claude-mythos-preview-") ||
 		model == "claude-opus-4-8" || strings.HasPrefix(model, "claude-opus-4-8-") ||
 		model == "claude-opus-4-7" || strings.HasPrefix(model, "claude-opus-4-7-")
+}
+
+func repairClaudeFunctionTools(body []byte) []byte {
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return body
+	}
+
+	cleanedTools := make([]any, 0, len(tools.Array()))
+	changed := false
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		if converted, ok := claudeFunctionToolAsClaudeTool(tool); ok {
+			cleanedTools = append(cleanedTools, converted)
+			changed = true
+			return true
+		}
+		if fixed, ok := claudeToolWithValidInputSchema(tool); ok {
+			cleanedTools = append(cleanedTools, fixed)
+			changed = true
+			return true
+		}
+		cleanedTools = append(cleanedTools, tool.Value())
+		return true
+	})
+	if changed {
+		body, _ = sjson.SetBytes(body, "tools", cleanedTools)
+	}
+	return body
+}
+
+func claudeFunctionToolAsClaudeTool(tool gjson.Result) (map[string]any, bool) {
+	if !tool.IsObject() {
+		return nil, false
+	}
+	toolType := strings.ToLower(strings.TrimSpace(tool.Get("type").String()))
+	function := tool.Get("function")
+	if toolType != "function" && !function.Exists() {
+		return nil, false
+	}
+
+	name := strings.TrimSpace(function.Get("name").String())
+	if name == "" {
+		name = strings.TrimSpace(tool.Get("name").String())
+	}
+	if name == "" {
+		return nil, false
+	}
+	description := function.Get("description").String()
+	if description == "" {
+		description = tool.Get("description").String()
+	}
+
+	converted := map[string]any{
+		"name":         name,
+		"description":  description,
+		"input_schema": claudeToolInputSchemaFromFunction(tool, function),
+	}
+	return converted, true
+}
+
+func claudeToolInputSchemaFromFunction(tool, function gjson.Result) any {
+	for _, candidate := range []gjson.Result{
+		function.Get("parameters"),
+		function.Get("parametersJsonSchema"),
+		function.Get("input_schema"),
+		tool.Get("parameters"),
+		tool.Get("parametersJsonSchema"),
+		tool.Get("input_schema"),
+	} {
+		if candidate.Exists() && candidate.IsObject() {
+			return claudeEnsureInputSchemaType(candidate)
+		}
+	}
+	return map[string]any{"type": "object", "properties": map[string]any{}}
+}
+
+func claudeToolWithValidInputSchema(tool gjson.Result) (map[string]any, bool) {
+	if !tool.IsObject() || !tool.Get("name").Exists() {
+		return nil, false
+	}
+	toolType := strings.ToLower(strings.TrimSpace(tool.Get("type").String()))
+	if toolType != "" && toolType != "custom" {
+		return nil, false
+	}
+	inputSchema := tool.Get("input_schema")
+	if inputSchema.Exists() && inputSchema.IsObject() && inputSchema.Get("type").String() != "" {
+		return nil, false
+	}
+	converted := map[string]any{}
+	for key, value := range tool.Map() {
+		converted[key] = value.Value()
+	}
+	if inputSchema.Exists() && inputSchema.IsObject() {
+		converted["input_schema"] = claudeEnsureInputSchemaType(inputSchema)
+	} else {
+		converted["input_schema"] = map[string]any{"type": "object", "properties": map[string]any{}}
+	}
+	return converted, true
+}
+
+func claudeEnsureInputSchemaType(schema gjson.Result) any {
+	converted := map[string]any{}
+	for key, value := range schema.Map() {
+		converted[key] = value.Value()
+	}
+	if strings.TrimSpace(schema.Get("type").String()) == "" {
+		converted["type"] = "object"
+	}
+	return converted
+}
+
+func repairClaudeToolChoice(body []byte) []byte {
+	toolChoice := gjson.GetBytes(body, "tool_choice")
+	if !toolChoice.Exists() {
+		return body
+	}
+
+	model := gjson.GetBytes(body, "model").String()
+	if toolChoice.Type == gjson.String {
+		return repairClaudeStringToolChoice(body, model, strings.ToLower(strings.TrimSpace(toolChoice.String())))
+	}
+	if !toolChoice.IsObject() {
+		return body
+	}
+
+	choiceType := strings.ToLower(strings.TrimSpace(toolChoice.Get("type").String()))
+	if claudeModelUsesAlwaysAdaptiveThinking(model) && (choiceType == "any" || choiceType == "tool" || choiceType == "function") {
+		body, _ = sjson.SetRawBytes(body, "tool_choice", []byte(`{"type":"auto"}`))
+		return body
+	}
+	if choiceType == "function" {
+		name := toolChoice.Get("function.name").String()
+		if name == "" {
+			name = toolChoice.Get("name").String()
+		}
+		if strings.TrimSpace(name) != "" {
+			body, _ = sjson.SetBytes(body, "tool_choice.type", "tool")
+			body, _ = sjson.DeleteBytes(body, "tool_choice.function")
+			body, _ = sjson.SetBytes(body, "tool_choice.name", name)
+		}
+	}
+	return body
+}
+
+func repairClaudeStringToolChoice(body []byte, model, choice string) []byte {
+	switch choice {
+	case "auto":
+		body, _ = sjson.SetRawBytes(body, "tool_choice", []byte(`{"type":"auto"}`))
+	case "none":
+		body, _ = sjson.SetRawBytes(body, "tool_choice", []byte(`{"type":"none"}`))
+	case "any", "required":
+		if claudeModelUsesAlwaysAdaptiveThinking(model) {
+			body, _ = sjson.SetRawBytes(body, "tool_choice", []byte(`{"type":"auto"}`))
+		} else {
+			body, _ = sjson.SetRawBytes(body, "tool_choice", []byte(`{"type":"any"}`))
+		}
+	}
+	return body
 }
 
 func repairClaudeToolUseIDs(body []byte) []byte {

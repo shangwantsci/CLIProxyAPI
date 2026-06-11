@@ -3072,6 +3072,30 @@ func TestRepairClaudeRequestShape_ClampsAdaptiveEffort(t *testing.T) {
 	}
 }
 
+func TestRepairClaudeRequestShape_ClampsSonnetMaxAdaptiveEffort(t *testing.T) {
+	payload := []byte(`{"model":"claude-sonnet-4-6","thinking":{"type":"adaptive"},"output_config":{"effort":"max"},"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if got := gjson.GetBytes(out, "output_config.effort").String(); got != "high" {
+		t.Fatalf("output_config.effort = %q, want high; out=%s", got, string(out))
+	}
+}
+
+func TestRepairClaudeRequestShape_ConvertsHaikuAdaptiveEffortToBudget(t *testing.T) {
+	payload := []byte(`{"model":"claude-haiku-4-5-20251001","thinking":{"type":"adaptive"},"output_config":{"effort":"high"},"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if got := gjson.GetBytes(out, "thinking.type").String(); got != "enabled" {
+		t.Fatalf("thinking.type = %q, want enabled; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "thinking.budget_tokens").Int(); got != 24576 {
+		t.Fatalf("thinking.budget_tokens = %d, want 24576; out=%s", got, string(out))
+	}
+	if gjson.GetBytes(out, "output_config.effort").Exists() {
+		t.Fatalf("output_config.effort should be removed for budget-only Claude models; out=%s", string(out))
+	}
+}
+
 func TestRepairClaudeRequestShape_PreservesFableXHighAdaptiveEffort(t *testing.T) {
 	payload := []byte(`{"model":"claude-fable-5","thinking":{"type":"adaptive"},"output_config":{"effort":"xhigh"},"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
 	out := repairClaudeRequestShape(payload)
@@ -3139,8 +3163,17 @@ func TestRepairClaudeRequestShape_ReplacesOnlyEmptyTextBlockWithPlaceholder(t *t
 	if got := gjson.GetBytes(out, "messages.0.content.0.type").String(); got != "text" {
 		t.Fatalf("content.0.type = %q, want text; out=%s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "messages.0.content.0.text").String(); got != " " {
-		t.Fatalf("content.0.text = %q, want single-space placeholder; out=%s", got, string(out))
+	if got := gjson.GetBytes(out, "messages.0.content.0.text").String(); got != "." {
+		t.Fatalf("content.0.text = %q, want non-whitespace placeholder; out=%s", got, string(out))
+	}
+}
+
+func TestRepairClaudeRequestShape_ReplacesWhitespaceOnlyTextWithNonWhitespacePlaceholder(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":" \n\t "}]}]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if got := gjson.GetBytes(out, "messages.0.content.0.text").String(); got != "." {
+		t.Fatalf("content.0.text = %q, want non-whitespace placeholder; out=%s", got, string(out))
 	}
 }
 
@@ -3148,8 +3181,41 @@ func TestRepairClaudeRequestShape_ReplacesEmptyStringContentWithPlaceholder(t *t
 	payload := []byte(`{"messages":[{"role":"user","content":""}]}`)
 	out := repairClaudeRequestShape(payload)
 
-	if got := gjson.GetBytes(out, "messages.0.content").String(); got != " " {
-		t.Fatalf("content = %q, want single-space placeholder; out=%s", got, string(out))
+	if got := gjson.GetBytes(out, "messages.0.content").String(); got != "." {
+		t.Fatalf("content = %q, want non-whitespace placeholder; out=%s", got, string(out))
+	}
+}
+
+func TestRepairClaudeRequestShape_MovesDeveloperRoleMessagesToTopLevelSystem(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"developer","content":"developer rules"},{"role":"user","content":"hi"}]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if got := gjson.GetBytes(out, `messages.#(role=="developer")#`).Int(); got != 0 {
+		t.Fatalf("developer role messages count = %d, want 0; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "system.0.text").String(); got != "developer rules" {
+		t.Fatalf("system.0.text = %q, want developer rules; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.role").String(); got != "user" {
+		t.Fatalf("messages.0.role = %q, want user; out=%s", got, string(out))
+	}
+}
+
+func TestRepairClaudeRequestShape_ConvertsToolRoleMessageToToolResult(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"lookup","input":{}}]},{"role":"tool","tool_call_id":"call_1","content":"tool ok"}]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if got := gjson.GetBytes(out, "messages.1.role").String(); got != "user" {
+		t.Fatalf("messages.1.role = %q, want user; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.type").String(); got != "tool_result" {
+		t.Fatalf("tool result type = %q, want tool_result; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.tool_use_id").String(); got != "call_1" {
+		t.Fatalf("tool_use_id = %q, want call_1; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.content").String(); got != "tool ok" {
+		t.Fatalf("tool result content = %q, want tool ok; out=%s", got, string(out))
 	}
 }
 
@@ -3209,8 +3275,8 @@ func TestRepairClaudeRequestShape_AddsUserTurnAfterFableAssistantTextPrefill(t *
 	if got := gjson.GetBytes(out, "messages.2.role").String(); got != "user" {
 		t.Fatalf("messages.2.role = %q, want user; out=%s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "messages.2.content.0.text").String(); got != " " {
-		t.Fatalf("messages.2.content.0.text = %q, want single-space fallback", got)
+	if got := gjson.GetBytes(out, "messages.2.content.0.text").String(); got != "." {
+		t.Fatalf("messages.2.content.0.text = %q, want non-whitespace fallback", got)
 	}
 }
 
@@ -3276,6 +3342,39 @@ func TestRepairClaudeRequestShape_KeepsTemperatureForLegacyClaudeModels(t *testi
 
 	if got := gjson.GetBytes(out, "temperature").Float(); got != 0.2 {
 		t.Fatalf("temperature = %v, want 0.2; out=%s", got, string(out))
+	}
+}
+
+func TestRepairClaudeRequestShape_ConvertsFunctionToolsToClaudeSchema(t *testing.T) {
+	payload := []byte(`{"model":"claude-fable-5","tools":[{"type":"function","function":{"name":"lookup","description":"Lookup data","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}}],"messages":[{"role":"user","content":"hi"}]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if gjson.GetBytes(out, "tools.0.type").Exists() {
+		t.Fatalf("tools.0.type should be removed for Claude tool schema; out=%s", string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "lookup" {
+		t.Fatalf("tools.0.name = %q, want lookup; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.input_schema.type").String(); got != "object" {
+		t.Fatalf("tools.0.input_schema.type = %q, want object; out=%s", got, string(out))
+	}
+}
+
+func TestRepairClaudeRequestShape_DoesNotAddInputSchemaToClaudeBuiltinTools(t *testing.T) {
+	payload := []byte(`{"tools":[{"type":"bash_20250124","name":"Bash"}],"messages":[{"role":"user","content":"hi"}]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if gjson.GetBytes(out, "tools.0.input_schema").Exists() {
+		t.Fatalf("builtin tool should not receive custom input_schema; out=%s", string(out))
+	}
+}
+
+func TestRepairClaudeRequestShape_DowngradesForcedToolChoiceForFable(t *testing.T) {
+	payload := []byte(`{"model":"claude-fable-5","tool_choice":{"type":"any"},"messages":[{"role":"user","content":"hi"}]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if got := gjson.GetBytes(out, "tool_choice.type").String(); got != "auto" {
+		t.Fatalf("tool_choice.type = %q, want auto; out=%s", got, string(out))
 	}
 }
 
