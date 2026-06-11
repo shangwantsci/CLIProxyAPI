@@ -1400,6 +1400,7 @@ func repairClaudeRequestShapeBeforeThinking(body []byte) []byte {
 	body = repairClaudeAdaptiveEffort(body)
 	body = repairClaudeThinkingBudget(body)
 	body = repairClaudeMessageContent(body)
+	body = repairClaudeToolUseIDs(body)
 	return body
 }
 
@@ -1543,6 +1544,97 @@ func repairClaudeMessageContent(body []byte) []byte {
 		return true
 	})
 	return body
+}
+
+func repairClaudeToolUseIDs(body []byte) []byte {
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return body
+	}
+
+	usedIDs := make(map[string]bool)
+	messages.ForEach(func(_, message gjson.Result) bool {
+		content := message.Get("content")
+		if !content.Exists() || !content.IsArray() {
+			return true
+		}
+		content.ForEach(func(_, block gjson.Result) bool {
+			if block.IsObject() && block.Get("type").String() == "tool_use" {
+				if id := block.Get("id").String(); isValidClaudeToolUseID(id) {
+					usedIDs[id] = true
+				}
+			}
+			return true
+		})
+		return true
+	})
+
+	idMap := make(map[string]string)
+	messages.ForEach(func(messageIndex, message gjson.Result) bool {
+		content := message.Get("content")
+		if !content.Exists() || !content.IsArray() {
+			return true
+		}
+		content.ForEach(func(contentIndex, block gjson.Result) bool {
+			if !block.IsObject() {
+				return true
+			}
+			blockType := block.Get("type").String()
+			switch blockType {
+			case "tool_use":
+				id := block.Get("id").String()
+				if isValidClaudeToolUseID(id) {
+					return true
+				}
+				normalized := normalizedClaudeToolUseID(id, fmt.Sprintf("%d.%d", messageIndex.Int(), contentIndex.Int()), idMap, usedIDs)
+				body, _ = sjson.SetBytes(body, fmt.Sprintf("messages.%d.content.%d.id", messageIndex.Int(), contentIndex.Int()), normalized)
+			case "tool_result":
+				id := block.Get("tool_use_id").String()
+				if isValidClaudeToolUseID(id) {
+					return true
+				}
+				normalized := normalizedClaudeToolUseID(id, fmt.Sprintf("%d.%d", messageIndex.Int(), contentIndex.Int()), idMap, usedIDs)
+				body, _ = sjson.SetBytes(body, fmt.Sprintf("messages.%d.content.%d.tool_use_id", messageIndex.Int(), contentIndex.Int()), normalized)
+			}
+			return true
+		})
+		return true
+	})
+
+	return body
+}
+
+func isValidClaudeToolUseID(id string) bool {
+	if id == "" {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func normalizedClaudeToolUseID(id, fallbackSeed string, idMap map[string]string, usedIDs map[string]bool) string {
+	if mapped, ok := idMap[id]; ok {
+		return mapped
+	}
+	seed := id
+	if seed == "" {
+		seed = "empty:" + fallbackSeed
+	}
+	sum := sha256.Sum256([]byte(seed))
+	base := "toolu_" + hex.EncodeToString(sum[:])[:16]
+	normalized := base
+	for i := 2; usedIDs[normalized]; i++ {
+		normalized = fmt.Sprintf("%s_%d", base, i)
+	}
+	usedIDs[normalized] = true
+	idMap[id] = normalized
+	return normalized
 }
 
 func inferClaudeBetasFromBody(body []byte, betas []string) []string {

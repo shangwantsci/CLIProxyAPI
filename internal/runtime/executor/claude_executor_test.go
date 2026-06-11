@@ -3129,6 +3129,38 @@ func TestRepairClaudeRequestShape_RemovesEmptyTextBlocks(t *testing.T) {
 	}
 }
 
+func TestRepairClaudeRequestShape_NormalizesInvalidToolUseIDs(t *testing.T) {
+	payload := []byte(`{"messages":[
+		{"role":"assistant","content":[
+			{"type":"tool_use","id":"call.invalid:1","name":"Bash","input":{}},
+			{"type":"tool_use","id":"toolu_valid-2","name":"Read","input":{}}
+		]},
+		{"role":"user","content":[
+			{"type":"tool_result","tool_use_id":"call.invalid:1","content":"ok"},
+			{"type":"tool_result","tool_use_id":"toolu_valid-2","content":"ok"}
+		]}
+	]}`)
+	out := repairClaudeRequestShape(payload)
+
+	toolUseID := gjson.GetBytes(out, "messages.0.content.0.id").String()
+	toolResultID := gjson.GetBytes(out, "messages.1.content.0.tool_use_id").String()
+	if toolUseID == "call.invalid:1" {
+		t.Fatalf("invalid tool_use id was not normalized: %s", string(out))
+	}
+	if toolUseID != toolResultID {
+		t.Fatalf("tool_use id %q and tool_result id %q should stay paired; out=%s", toolUseID, toolResultID, string(out))
+	}
+	if !regexp.MustCompile(`^[a-zA-Z0-9_-]+$`).MatchString(toolUseID) {
+		t.Fatalf("normalized tool_use id %q does not match Claude pattern", toolUseID)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.1.id").String(); got != "toolu_valid-2" {
+		t.Fatalf("valid tool_use id = %q, want toolu_valid-2", got)
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.1.tool_use_id").String(); got != "toolu_valid-2" {
+		t.Fatalf("valid tool_result id = %q, want toolu_valid-2", got)
+	}
+}
+
 func TestInferClaudeBetasFromBody_AddsContextManagementBeta(t *testing.T) {
 	payload := []byte(`{"context_management":{"edits":[{"type":"clear_thinking_20251015"}]},"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
 	betas := inferClaudeBetasFromBody(payload, nil)
