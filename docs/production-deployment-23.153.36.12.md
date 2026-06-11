@@ -58,16 +58,25 @@ Traefik 动态路由：
 
 ## 当前部署版本
 
-- 后端提交：`ab437822`（适配 Claude 新式模型请求形态：system role、assistant prefill、deprecated temperature）
+- 后端提交：`eb5ad9fe`（清洗 Claude 空 text content block，避免上游 non-empty 400）
 - 前端提交：`d5a90440`（未变；本轮仅后端部署）
-- 最近一次按本文档部署时间：`2026-06-11T04:19:25+00:00`
-- 本次部署后端二进制 sha256：`2504a94042d33093da1180ce424484e8d4cd22a8019f7179cea9fe4dfa012cbf`
-- 部署前运行版本 backend=`fe34c944`，binary sha256 `672acf2e713464980c27464a21342dd71822bf339a4cda4e7068eccaa22d5bbb`
-- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260611-041922.bak`（可回滚到 `fe34c944`）
-- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260611-041922.tgz`
+- 最近一次按本文档部署时间：`2026-06-11T04:55:53+00:00`
+- 本次部署后端二进制 sha256：`214326b555edc5a6eb126352c92b5381d7094bb47287bdacef805b686bac010a`
+- 部署前运行版本 backend=`ab437822`，binary sha256 `2504a94042d33093da1180ce424484e8d4cd22a8019f7179cea9fe4dfa012cbf`
+- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260611-045550.bak`（可回滚到 `ab437822`）
+- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260611-045550.tgz`
 - 部署后账号数：1257 个 json（账号增删由晓宇手动管理）
 
-### 本轮变更说明（ab437822）
+### 本轮变更说明（eb5ad9fe）
+
+仅后端部署。本轮修复 Claude 上游 `messages: text content blocks must be non-empty`：
+
+1. `messages[*].content` 中空字符串 text block 会删除；如果该消息只剩空 text，改为单空格占位。
+2. `messages[*].content` 本身是空字符串时，改为单空格占位。
+3. system-only fallback 与 assistant-prefill fallback 的空 user turn 也改为单空格占位，避免号池自己生成上游不接受的空 text。
+4. `text content blocks must be non-empty` 这类 400 归类为客户端请求形态问题，不污染账号健康、不触发全池账号惩罚。
+
+### 上一轮变更说明（ab437822，已被 eb5ad9fe 取代）
 
 仅后端部署。本轮修复 Claude 新式模型请求形态兼容问题：
 
