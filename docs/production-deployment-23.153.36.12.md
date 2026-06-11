@@ -58,16 +58,25 @@ Traefik 动态路由：
 
 ## 当前部署版本
 
-- 后端提交：`fe34c944`（规范化 Claude `tool_use.id` / `tool_result.tool_use_id`，避免客户端非法工具调用 ID 触发上游 400）
+- 后端提交：`ab437822`（适配 Claude 新式模型请求形态：system role、assistant prefill、deprecated temperature）
 - 前端提交：`d5a90440`（未变；本轮仅后端部署）
-- 最近一次按本文档部署时间：`2026-06-11T00:03:33+00:00`
-- 本次部署后端二进制 sha256：`672acf2e713464980c27464a21342dd71822bf339a4cda4e7068eccaa22d5bbb`
-- 部署前运行版本 backend=`4cde9eaa`，binary sha256 `76835d8b3b4da4c352bd5ce8b6811035e21c68683107b4b6611052a1c99d387f`
-- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260611-000331.bak`（可回滚到 `4cde9eaa`）
-- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260611-000331.tgz`
-- 部署后账号数：1284 个 json（账号增删由晓宇手动管理）
+- 最近一次按本文档部署时间：`2026-06-11T04:19:25+00:00`
+- 本次部署后端二进制 sha256：`2504a94042d33093da1180ce424484e8d4cd22a8019f7179cea9fe4dfa012cbf`
+- 部署前运行版本 backend=`fe34c944`，binary sha256 `672acf2e713464980c27464a21342dd71822bf339a4cda4e7068eccaa22d5bbb`
+- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260611-041922.bak`（可回滚到 `fe34c944`）
+- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260611-041922.tgz`
+- 部署后账号数：1257 个 json（账号增删由晓宇手动管理）
 
-### 本轮变更说明（fe34c944）
+### 本轮变更说明（ab437822）
+
+仅后端部署。本轮修复 Claude 新式模型请求形态兼容问题：
+
+1. `messages[*].role="system"` 送上游前提升为顶层 `system` 文本块，并从 `messages` 删除；system-only 请求会补空 user fallback，避免上游返回 `role 'system' is not supported on this model`。
+2. 新式 adaptive-only / always-adaptive 模型（当前覆盖 `claude-fable-5`、`claude-mythos-5`、`claude-mythos-preview`、`claude-opus-4-8`、`claude-opus-4-7`）的 text-only assistant prefill 会追加空 user turn；任何显式 `thinking.type=enabled/adaptive/auto` 的请求也按同样规则处理，避免 `conversation must end with a user message`。
+3. 上述新式模型出站前删除 `temperature`，避免上游返回 ``temperature` is deprecated for this model`；旧模型保持客户端 `temperature` 原值，带 active thinking 的旧模型仍按既有规则归一到 `1`。
+4. `role system`、`assistant prefill`、`temperature deprecated` 这类 400 归类为客户端请求形态问题，不污染账号健康、不触发全池账号惩罚。
+
+### 上一轮变更说明（fe34c944，已被 ab437822 取代）
 
 仅后端部署。本轮修复客户端历史消息里非法 Claude 工具调用 ID 导致的上游 400：
 
