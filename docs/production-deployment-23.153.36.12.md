@@ -58,16 +58,28 @@ Traefik 动态路由：
 
 ## 当前部署版本
 
-- 后端提交：`eb5ad9fe`（清洗 Claude 空 text content block，避免上游 non-empty 400）
+- 后端提交：`63739474`（降低 Claude 上游高频 400：thinking/effort、空白 text、OpenAI 工具形态、Fable tool_choice）
 - 前端提交：`d5a90440`（未变；本轮仅后端部署）
-- 最近一次按本文档部署时间：`2026-06-11T04:55:53+00:00`
-- 本次部署后端二进制 sha256：`214326b555edc5a6eb126352c92b5381d7094bb47287bdacef805b686bac010a`
-- 部署前运行版本 backend=`ab437822`，binary sha256 `2504a94042d33093da1180ce424484e8d4cd22a8019f7179cea9fe4dfa012cbf`
-- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260611-045550.bak`（可回滚到 `ab437822`）
-- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260611-045550.tgz`
-- 部署后账号数：1257 个 json（账号增删由晓宇手动管理）
+- 最近一次按本文档部署时间：`2026-06-11T12:47:20+00:00`
+- 本次部署后端二进制 sha256：`527caf48a41be360fb304cc7400232e28dbf278c7a0305f9800eeba957bf0082`
+- 部署前运行版本 backend=`eb5ad9fe`，binary sha256 `214326b555edc5a6eb126352c92b5381d7094bb47287bdacef805b686bac010a`
+- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260611-124718.bak`（可回滚到 `eb5ad9fe`）
+- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260611-124718.tgz`
+- 部署后账号数：1066 个 json（账号增删由晓宇手动管理）
 
-### 本轮变更说明（eb5ad9fe）
+### 本轮变更说明（63739474）
+
+仅后端部署。本轮基于 NewAPI 使用日志中最新高频 Claude 上游 400 做出站兼容与错误分类修复：
+
+1. `claude-sonnet-4-6` 收到 `output_config.effort=max` 时降级为 `high`，避免 `level "max" not supported`。
+2. `claude-haiku-4-5-20251001` 收到 `output_config.effort` 时转成 `thinking.budget_tokens`，不再向 budget-only 模型透传 effort 参数。
+3. 空 text block、空字符串 content、纯空白 text 会改成非空白占位 `"."`，避免 `text content blocks must contain non-whitespace text`。
+4. Claude 出站前会把 `developer` role 提升为顶层 `system`，把 OpenAI 风格 `tool` role 转成 `user` + `tool_result`。
+5. OpenAI 风格 `tools[].type=function` 会转成 Claude custom tool schema；仅 custom/function 工具补 `input_schema.type`，不改 Claude 内置工具。
+6. `claude-fable-5` 的强制 `tool_choice`（`any` / `tool` / `function`）会降级为 `auto`，避免 Fable + always-adaptive thinking 下被上游拒绝。
+7. 新增这些 400 到客户端请求形态分类：`top_p deprecated`、non-whitespace text、effort parameter、tool_choice、unexpected role、function tool tag；不污染账号健康、不触发全池账号惩罚。
+
+### 上一轮变更说明（eb5ad9fe，已被 63739474 取代）
 
 仅后端部署。本轮修复 Claude 上游 `messages: text content blocks must be non-empty`：
 
