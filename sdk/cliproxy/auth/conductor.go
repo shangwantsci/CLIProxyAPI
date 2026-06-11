@@ -3046,6 +3046,9 @@ func isClientRequestInvalidMessage(message string) bool {
 	if strings.Contains(lower, "temperature") && strings.Contains(lower, "deprecated for this model") {
 		return true
 	}
+	if strings.Contains(lower, "text content blocks must be non-empty") {
+		return true
+	}
 	if strings.Contains(lower, "unknown level:") {
 		return true
 	}

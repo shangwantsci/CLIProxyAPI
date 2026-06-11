@@ -1256,9 +1256,11 @@ func TestIsRequestInvalidError_ClaudeMessageShapeBadRequests(t *testing.T) {
 		`{"type":"error","error":{"type":"invalid_request_error","message":"role 'system' is not supported on this model"}}`,
 		`{"type":"error","error":{"type":"invalid_request_error","message":"This model does not support assistant message prefill. The conversation must end with a user message."}}`,
 		`{"type":"error","error":{"type":"invalid_request_error","message":"` + "`temperature`" + ` is deprecated for this model."}}`,
+		`{"type":"error","error":{"type":"invalid_request_error","message":"messages: text content blocks must be non-empty"}}`,
 		`status_code=400, role 'system' is not supported on this model`,
 		`status_code=400, This model does not support assistant message prefill. The conversation must end with a user message.`,
 		`status_code=400, ` + "`temperature`" + ` is deprecated for this model.`,
+		`status_code=400, messages: text content blocks must be non-empty`,
 	}
 
 	for _, message := range tests {

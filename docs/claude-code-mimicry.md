@@ -243,7 +243,7 @@ advisor-tool-2026-03-01
 - `thinking.type` 为 `enabled`、`adaptive` 或 `auto` 时，若当前模型不声明支持 `output_config.effort=xhigh`，会把 `xhigh` 降级为 `high`。这是按 2026-05-29 生产日志中上游明确拒绝 Opus 旧路径 `xhigh`，且真实 Opus 4.8 OAuth 抓包使用 `high` 校准。
 - `claude-fable-5` 是 always-adaptive 模型：默认请求补 `thinking.type=adaptive` 与 `output_config.effort=high`，但显式 `low/high/xhigh/max` 都应保留。`(none)` 或显式 `thinking.type=disabled` 不会向 Fable 发送 `disabled`，因为该模型不支持关闭 thinking。
 - `thinking.budget_tokens` 超出已知模型 `thinking.min/max` 时会 clamp 到模型范围内；如请求同时设置 `max_tokens`，会尽量保持 `budget_tokens < max_tokens`。
-- `messages[*].content` 中空字符串 text block 会删除；如果非空 text block 带 `cache_control`，该字段必须保留。
+- `messages[*].content` 中空字符串 text block 会删除；如果该消息只剩空 text 或 `content` 本身是空字符串，会改为单空格占位，避免上游返回 `messages: text content blocks must be non-empty`；如果非空 text block 带 `cache_control`，该字段必须保留。
 - `messages[*].content[*].tool_use.id` 与对应 `tool_result.tool_use_id` 会在送上游前规范化为 Claude 允许的 `^[a-zA-Z0-9_-]+$` 形态；客户端传入点号、冒号、斜杠、空格或非 ASCII 字符时，号池会用原始 ID 的稳定短哈希生成合法 ID，并保持同一请求内 tool_use/tool_result 配对，避免上游 400。
 - `messages[*].role="system"` 会在送上游前提升为顶层 `system` 文本块并从 `messages` 删除；如果请求只剩 system 指令，会补一个空 user fallback，避免新模型拒绝 `system` role。
 - 新式 adaptive-only / always-adaptive 模型（当前覆盖 `claude-fable-5`、`claude-mythos-5`、`claude-mythos-preview`、`claude-opus-4-8`、`claude-opus-4-7`）不透传 `temperature`，避免上游返回 ``temperature` is deprecated for this model`。旧模型保持客户端 `temperature` 原值；带 active thinking 的旧模型仍按既有规则把 `temperature` 归一到 `1`。

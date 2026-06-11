@@ -1438,6 +1438,8 @@ func normalizeClaudeModelName(model string) string {
 	return strings.TrimSuffix(model, "-thinking")
 }
 
+const claudeEmptyTextPlaceholder = " "
+
 func repairClaudeAdaptiveEffort(body []byte) []byte {
 	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
 	if thinkingType != "enabled" && thinkingType != "adaptive" && thinkingType != "auto" {
@@ -1532,7 +1534,16 @@ func repairClaudeMessageContent(body []byte) []byte {
 
 	messages.ForEach(func(messageIndex, message gjson.Result) bool {
 		content := message.Get("content")
-		if !content.Exists() || !content.IsArray() {
+		if !content.Exists() {
+			return true
+		}
+		if content.Type == gjson.String {
+			if content.String() == "" {
+				body, _ = sjson.SetBytes(body, fmt.Sprintf("messages.%d.content", messageIndex.Int()), claudeEmptyTextPlaceholder)
+			}
+			return true
+		}
+		if !content.IsArray() {
 			return true
 		}
 		cleaned := make([]any, 0, len(content.Array()))
@@ -1545,8 +1556,13 @@ func repairClaudeMessageContent(body []byte) []byte {
 			cleaned = append(cleaned, block.Value())
 			return true
 		})
-		if removed && len(cleaned) > 0 {
-			body, _ = sjson.SetBytes(body, fmt.Sprintf("messages.%d.content", messageIndex.Int()), cleaned)
+		if removed {
+			path := fmt.Sprintf("messages.%d.content", messageIndex.Int())
+			if len(cleaned) > 0 {
+				body, _ = sjson.SetBytes(body, path, cleaned)
+			} else {
+				body, _ = sjson.SetBytes(body, path, []any{map[string]any{"type": "text", "text": claudeEmptyTextPlaceholder}})
+			}
 		}
 		return true
 	})
@@ -1584,7 +1600,7 @@ func repairClaudeSystemRoleMessages(body []byte) []byte {
 	if len(cleanedMessages) == 0 {
 		cleanedMessages = append(cleanedMessages, map[string]any{
 			"role":    "user",
-			"content": []any{map[string]any{"type": "text", "text": ""}},
+			"content": []any{map[string]any{"type": "text", "text": claudeEmptyTextPlaceholder}},
 		})
 	}
 	body, _ = sjson.SetBytes(body, "messages", cleanedMessages)
@@ -1673,7 +1689,7 @@ func repairClaudeAssistantPrefill(body []byte) []byte {
 	}
 	fallback := map[string]any{
 		"role":    "user",
-		"content": []any{map[string]any{"type": "text", "text": ""}},
+		"content": []any{map[string]any{"type": "text", "text": claudeEmptyTextPlaceholder}},
 	}
 	body, _ = sjson.SetBytes(body, "messages.-1", fallback)
 	return body

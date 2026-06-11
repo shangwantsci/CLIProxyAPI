@@ -3129,6 +3129,30 @@ func TestRepairClaudeRequestShape_RemovesEmptyTextBlocks(t *testing.T) {
 	}
 }
 
+func TestRepairClaudeRequestShape_ReplacesOnlyEmptyTextBlockWithPlaceholder(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":""}]}]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if got := gjson.GetBytes(out, "messages.0.content.#").Int(); got != 1 {
+		t.Fatalf("content count = %d, want 1; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.type").String(); got != "text" {
+		t.Fatalf("content.0.type = %q, want text; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.text").String(); got != " " {
+		t.Fatalf("content.0.text = %q, want single-space placeholder; out=%s", got, string(out))
+	}
+}
+
+func TestRepairClaudeRequestShape_ReplacesEmptyStringContentWithPlaceholder(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"user","content":""}]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if got := gjson.GetBytes(out, "messages.0.content").String(); got != " " {
+		t.Fatalf("content = %q, want single-space placeholder; out=%s", got, string(out))
+	}
+}
+
 func TestRepairClaudeRequestShape_MovesSystemRoleMessagesToTopLevelSystem(t *testing.T) {
 	payload := []byte(`{"system":[{"type":"text","text":"top","cache_control":{"type":"ephemeral"}}],"messages":[
 		{"role":"system","content":"first rule"},
@@ -3185,8 +3209,8 @@ func TestRepairClaudeRequestShape_AddsUserTurnAfterFableAssistantTextPrefill(t *
 	if got := gjson.GetBytes(out, "messages.2.role").String(); got != "user" {
 		t.Fatalf("messages.2.role = %q, want user; out=%s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "messages.2.content.0.text").String(); got != "" {
-		t.Fatalf("messages.2.content.0.text = %q, want empty fallback", got)
+	if got := gjson.GetBytes(out, "messages.2.content.0.text").String(); got != " " {
+		t.Fatalf("messages.2.content.0.text = %q, want single-space fallback", got)
 	}
 }
 
