@@ -33,7 +33,7 @@
 - CPA 本机健康检查：`http://127.0.0.1:8318/healthz`
 - SSH：`root@154.29.158.193:56260`
 - 当前生产版本摘要见 `docs/production-deployment-23.153.36.12.md` 的“当前部署版本”。
-- 截至 `2026-06-11`，生产后端二进制部署提交为 `4cde9eaa`，前端部署提交为 `d5a90440`。
+- 截至 `2026-06-11`，生产后端二进制部署提交为 `fe34c944`，前端部署提交为 `d5a90440`。
 - 后端仓库本地 HEAD 可能是部署后的文档提交；生产实际运行的二进制仍以服务器 `/opt/cpa-claude-proxy/DEPLOYED_COMMITS` 为准。
 - 最近一次账号备份以生产部署文档记录为准；部署前必须重新备份 `/opt/cpa-claude-proxy/auths`。
 - 最近一次网络入口收口备份：`/root/openstaryu-hardening-20260528-113201`
@@ -119,6 +119,11 @@ cat /opt/cpa-claude-proxy/DEPLOYED_COMMITS
   - OAuth/Claude Code 账号请求会在上游前剥离 `context-1m-2025-08-07`，避免 1M beta 与 OAuth 鉴权形态不兼容；API Key 形态仍允许显式 1M beta。
   - `500/529 Overloaded` 按临时上游过载处理，不永久污染账号健康；客户端请求形态错误仍不扫全池重试。
   - 已部署到生产服务器，生产后端二进制提交为 `4cde9eaa`（同次文档提交更新生产主机为 `154.29.158.193:56260`），前端仍为 `d5a90440`。
+- `fe34c944 fix: normalize Claude tool use ids`
+  - 修复客户历史消息中 `tool_use.id` 含点号、冒号、斜杠、空格或非 ASCII 字符时，被 Claude 上游以 `String should match pattern '^[a-zA-Z0-9_-]+$'` 拒绝的问题。
+  - 请求送上游前统一规范化 `tool_use.id` 与对应 `tool_result.tool_use_id`，同一请求内保持配对；合法 ID 原样保留。
+  - 该类错误属于客户端请求形态问题，不会标记账号永久不可用。
+  - 已部署到生产服务器，生产后端二进制提交为 `fe34c944`，前端仍为 `d5a90440`。
 
 ## 最近关键运维改动
 

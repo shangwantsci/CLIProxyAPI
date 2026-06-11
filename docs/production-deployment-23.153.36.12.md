@@ -58,16 +58,25 @@ Traefik 动态路由：
 
 ## 当前部署版本
 
-- 后端提交：`4cde9eaa`（包含 `834a9200` 的 Claude 上游错误分类修复；同次文档将当前生产主机统一为 `154.29.158.193:56260`）
+- 后端提交：`fe34c944`（规范化 Claude `tool_use.id` / `tool_result.tool_use_id`，避免客户端非法工具调用 ID 触发上游 400）
 - 前端提交：`d5a90440`（未变；本轮仅后端部署）
-- 最近一次按本文档部署时间：`2026-06-10T20:06:05+00:00`
-- 本次部署后端二进制 sha256：`76835d8b3b4da4c352bd5ce8b6811035e21c68683107b4b6611052a1c99d387f`
-- 部署前运行版本 backend=`4f619fce`，binary sha256 `beb44f031a9fe9cce4fccb37375faa05a46a284fc11b09369651b13c4edc0aed`
-- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260610-200603.bak`（可回滚到 `4f619fce`）
-- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260610-200603.tgz`
-- 部署后账号数：1230 个 json（账号增删由晓宇手动管理）
+- 最近一次按本文档部署时间：`2026-06-11T00:03:33+00:00`
+- 本次部署后端二进制 sha256：`672acf2e713464980c27464a21342dd71822bf339a4cda4e7068eccaa22d5bbb`
+- 部署前运行版本 backend=`4cde9eaa`，binary sha256 `76835d8b3b4da4c352bd5ce8b6811035e21c68683107b4b6611052a1c99d387f`
+- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260611-000331.bak`（可回滚到 `4cde9eaa`）
+- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260611-000331.tgz`
+- 部署后账号数：1284 个 json（账号增删由晓宇手动管理）
 
-### 本轮变更说明（4cde9eaa，逻辑改动 834a9200）
+### 本轮变更说明（fe34c944）
+
+仅后端部署。本轮修复客户端历史消息里非法 Claude 工具调用 ID 导致的上游 400：
+
+1. `messages[*].content[*].tool_use.id` 送上游前会统一规范化为 Claude 允许的 `^[a-zA-Z0-9_-]+$` 形态。
+2. 对应 `tool_result.tool_use_id` 使用同一映射同步改写，保持同一请求内工具调用和工具结果配对。
+3. 合法 ID 原样保留；非法 ID 使用原始 ID 的稳定短哈希生成 `toolu_<hash>`，避免暴露客户端特殊字符形态。
+4. 该类错误仍属于客户端请求形态问题，不会标记账号永久不可用，也不参与全池账号污染。
+
+### 上一轮变更说明（4cde9eaa，逻辑改动 834a9200，已被 fe34c944 取代）
 
 仅后端部署。本轮重点是 Claude 上游错误分类，不做全局 400 重试：
 
