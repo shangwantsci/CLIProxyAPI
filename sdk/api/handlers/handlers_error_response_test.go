@@ -7,12 +7,25 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
+
+func TestStreamingKeepAliveIntervalDefaultsToFifteenSeconds(t *testing.T) {
+	if got := StreamingKeepAliveInterval(nil); got != 15*time.Second {
+		t.Fatalf("StreamingKeepAliveInterval(nil) = %s, want 15s", got)
+	}
+	if got := StreamingKeepAliveInterval(&sdkconfig.SDKConfig{}); got != 15*time.Second {
+		t.Fatalf("StreamingKeepAliveInterval(empty config) = %s, want 15s", got)
+	}
+	if got := StreamingKeepAliveInterval(&sdkconfig.SDKConfig{Streaming: sdkconfig.StreamingConfig{KeepAliveSeconds: -1}}); got != 0 {
+		t.Fatalf("StreamingKeepAliveInterval(disabled) = %s, want 0", got)
+	}
+}
 
 func TestWriteErrorResponse_AddonHeadersDisabledByDefault(t *testing.T) {
 	gin.SetMode(gin.TestMode)

@@ -48,7 +48,7 @@ type ErrorDetail struct {
 const idempotencyKeyMetadataKey = "idempotency_key"
 
 const (
-	defaultStreamingKeepAliveSeconds = 0
+	defaultStreamingKeepAliveSeconds = 15
 	defaultStreamingBootstrapRetries = 0
 )
 
@@ -151,10 +151,10 @@ func BuildErrorResponseBody(status int, errText string) []byte {
 }
 
 // StreamingKeepAliveInterval returns the SSE keep-alive interval for this server.
-// Returning 0 disables keep-alives (default when unset).
+// A zero config value uses the default; negative values disable keep-alives.
 func StreamingKeepAliveInterval(cfg *config.SDKConfig) time.Duration {
 	seconds := defaultStreamingKeepAliveSeconds
-	if cfg != nil {
+	if cfg != nil && cfg.Streaming.KeepAliveSeconds != 0 {
 		seconds = cfg.Streaming.KeepAliveSeconds
 	}
 	if seconds <= 0 {

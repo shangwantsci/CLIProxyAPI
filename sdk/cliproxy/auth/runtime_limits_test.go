@@ -203,6 +203,44 @@ func TestManagerFiltersSessionFullClaudeAuthBeforeSelector(t *testing.T) {
 	}
 }
 
+func TestManagerPickNextMixedForRuntimeReservesSessionBeforeReturn(t *testing.T) {
+	selector := &runtimeLimitCandidateSelector{}
+	manager := NewManager(nil, selector, nil)
+	exec := &runtimeLimitExecutor{}
+	manager.RegisterExecutor(exec)
+	registerClaudeRuntimeLimitAuth(t, manager, "auth-a", map[string]string{"max_sessions": "1"})
+	registerClaudeRuntimeLimitAuth(t, manager, "auth-b", map[string]string{"max_sessions": "1"})
+	model := "claude-sonnet-4-5"
+	registerSchedulerModels(t, "claude", model, "auth-a", "auth-b")
+
+	auth, _, _, err := manager.pickNextMixedForRuntime(context.Background(), []string{"claude"}, model, cliproxyexecutor.Options{
+		Headers: http.Header{"X-Session-Id": []string{"session-1"}},
+	}, nil, "header:session-1")
+	if err != nil {
+		t.Fatalf("first pickNextMixedForRuntime returned error: %v", err)
+	}
+	if auth.ID != "auth-a" {
+		t.Fatalf("first pickNextMixedForRuntime auth = %s, want auth-a", auth.ID)
+	}
+	gotAuth, ok := manager.GetByID("auth-a")
+	if !ok {
+		t.Fatalf("GetByID(auth-a) returned ok=false")
+	}
+	if got := gotAuth.RuntimeUsageStats(time.Now()).ActiveSessions; got != 1 {
+		t.Fatalf("auth-a active sessions after first pick = %d, want 1", got)
+	}
+
+	auth, _, _, err = manager.pickNextMixedForRuntime(context.Background(), []string{"claude"}, model, cliproxyexecutor.Options{
+		Headers: http.Header{"X-Session-Id": []string{"session-2"}},
+	}, nil, "header:session-2")
+	if err != nil {
+		t.Fatalf("second pickNextMixedForRuntime returned error: %v", err)
+	}
+	if auth.ID != "auth-b" {
+		t.Fatalf("second pickNextMixedForRuntime auth = %s, want auth-b", auth.ID)
+	}
+}
+
 func TestManagerDoesNotCountMessageHashFallbackTowardMaxSessions(t *testing.T) {
 	manager := NewManager(nil, &FillFirstSelector{}, nil)
 	exec := &runtimeLimitExecutor{}

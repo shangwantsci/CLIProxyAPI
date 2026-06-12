@@ -633,6 +633,15 @@ func (m *Manager) preparedExecutionModels(auth *Auth, routeModel string) ([]stri
 	return m.filterExecutionModels(auth, routeModel, candidates, pooled), pooled
 }
 
+func (m *Manager) preparedExecutionModelsForReservedAuth(auth *Auth, routeModel string) ([]string, bool) {
+	if auth == nil {
+		return nil, false
+	}
+	filterAuth := auth.Clone()
+	filterAuth.runtimeUsage.RequestTimes = nil
+	return m.preparedExecutionModels(filterAuth, routeModel)
+}
+
 func (m *Manager) prepareExecutionModels(auth *Auth, routeModel string) []string {
 	models, _ := m.preparedExecutionModels(auth, routeModel)
 	return models
@@ -1379,21 +1388,24 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			return cliproxyexecutor.Response{}, errPick
 		}
 
-		models, pooled := m.preparedExecutionModels(auth, routeModel)
+		models, pooled := m.preparedExecutionModelsForReservedAuth(auth, routeModel)
+		if homeMode {
+			models, pooled = m.preparedExecutionModels(auth, routeModel)
+		}
 		if len(models) == 0 {
 			tried[auth.ID] = struct{}{}
 			continue
 		}
-		reservedAuth, errReserve := m.reservePickedAuthRuntime(ctx, auth, req, opts)
-		if errReserve != nil {
-			tried[auth.ID] = struct{}{}
-			lastErr = errReserve
-			if homeMode {
+		if homeMode {
+			reservedAuth, errReserve := m.reservePickedAuthRuntime(ctx, auth, req, opts)
+			if errReserve != nil {
+				tried[auth.ID] = struct{}{}
+				lastErr = errReserve
 				homeAuthCount++
+				continue
 			}
-			continue
+			auth = reservedAuth
 		}
-		auth = reservedAuth
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
@@ -1484,21 +1496,24 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			return cliproxyexecutor.Response{}, errPick
 		}
 
-		models, pooled := m.preparedExecutionModels(auth, routeModel)
+		models, pooled := m.preparedExecutionModelsForReservedAuth(auth, routeModel)
+		if homeMode {
+			models, pooled = m.preparedExecutionModels(auth, routeModel)
+		}
 		if len(models) == 0 {
 			tried[auth.ID] = struct{}{}
 			continue
 		}
-		reservedAuth, errReserve := m.reservePickedAuthRuntime(ctx, auth, req, opts)
-		if errReserve != nil {
-			tried[auth.ID] = struct{}{}
-			lastErr = errReserve
-			if homeMode {
+		if homeMode {
+			reservedAuth, errReserve := m.reservePickedAuthRuntime(ctx, auth, req, opts)
+			if errReserve != nil {
+				tried[auth.ID] = struct{}{}
+				lastErr = errReserve
 				homeAuthCount++
+				continue
 			}
-			continue
+			auth = reservedAuth
 		}
-		auth = reservedAuth
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
@@ -1589,21 +1604,24 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			return nil, errPick
 		}
 
-		models, pooled := m.preparedExecutionModels(auth, routeModel)
+		models, pooled := m.preparedExecutionModelsForReservedAuth(auth, routeModel)
+		if homeMode {
+			models, pooled = m.preparedExecutionModels(auth, routeModel)
+		}
 		if len(models) == 0 {
 			tried[auth.ID] = struct{}{}
 			continue
 		}
-		reservedAuth, errReserve := m.reservePickedAuthRuntime(ctx, auth, req, opts)
-		if errReserve != nil {
-			tried[auth.ID] = struct{}{}
-			lastErr = errReserve
-			if homeMode {
+		if homeMode {
+			reservedAuth, errReserve := m.reservePickedAuthRuntime(ctx, auth, req, opts)
+			if errReserve != nil {
+				tried[auth.ID] = struct{}{}
+				lastErr = errReserve
 				homeAuthCount++
+				continue
 			}
-			continue
+			auth = reservedAuth
 		}
-		auth = reservedAuth
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
@@ -1699,6 +1717,33 @@ func (m *Manager) reservePickedAuthRuntime(ctx context.Context, auth *Auth, req 
 		return nil, accountRuntimeLimitError(auth.ID, reason, resetAt)
 	}
 	return snapshot, nil
+}
+
+func (m *Manager) reserveRuntimeSlotLocked(authID string, now time.Time, sessionID string, sessionTTL time.Duration) (*Auth, bool, string, time.Time) {
+	if m == nil || strings.TrimSpace(authID) == "" {
+		return nil, false, "unknown", time.Time{}
+	}
+	current := m.auths[authID]
+	if current == nil {
+		return nil, false, "unknown", time.Time{}
+	}
+	if !current.indexAssigned {
+		current.EnsureIndex()
+	}
+	allowed, reason, resetAt := current.reserveRuntimeSlot(now, sessionID, sessionTTL)
+	return current.Clone(), allowed, reason, resetAt
+}
+
+func markAuthTried(tried map[string]struct{}, authID string) map[string]struct{} {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return tried
+	}
+	if tried == nil {
+		tried = make(map[string]struct{})
+	}
+	tried[authID] = struct{}{}
+	return tried
 }
 
 func runtimeSessionIDForRequest(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) string {
@@ -4165,8 +4210,6 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		return nil, nil, "", &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 
-	m.mu.RLock()
-	candidates := make([]*Auth, 0, len(m.auths))
 	modelKey := strings.TrimSpace(model)
 	// Always use base model name (without thinking suffix) for auth matching.
 	if modelKey != "" {
@@ -4176,83 +4219,105 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		}
 	}
 	registryRef := registry.GetGlobalRegistry()
-	now := time.Now()
 	sessionTTL := m.accountSessionTTL()
-	runtimeLimitedCount := 0
-	var runtimeResetAt time.Time
-	for _, candidate := range m.auths {
-		if candidate == nil || candidate.Disabled {
-			continue
-		}
-		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
-			continue
-		}
-		if disallowFreeAuth && isFreeCodexAuth(candidate) {
-			continue
-		}
-		providerKey := strings.TrimSpace(strings.ToLower(candidate.Provider))
-		if providerKey == "" {
-			continue
-		}
-		if _, ok := providerSet[providerKey]; !ok {
-			continue
-		}
-		if _, used := tried[candidate.ID]; used {
-			continue
-		}
-		if _, ok := m.executors[providerKey]; !ok {
-			continue
-		}
-		if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
-			continue
-		}
-		if okSession, resetAt := candidate.runtimeSessionAvailable(now, runtimeSessionID, sessionTTL); !okSession {
-			runtimeLimitedCount++
-			if !resetAt.IsZero() && (runtimeResetAt.IsZero() || resetAt.Before(runtimeResetAt)) {
-				runtimeResetAt = resetAt
-			}
-			continue
-		}
-		candidates = append(candidates, candidate)
-	}
-	if len(candidates) == 0 {
-		m.mu.RUnlock()
-		if runtimeLimitedCount > 0 {
-			return nil, nil, "", accountRuntimeLimitError("", "session", runtimeResetAt)
-		}
-		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
-	}
-	available, errAvailable := m.availableAuthsForRouteModel(candidates, "mixed", model, time.Now())
-	if errAvailable != nil {
-		m.mu.RUnlock()
-		return nil, nil, "", errAvailable
-	}
-	selected, errPick := m.selector.Pick(ctx, "mixed", selectionArgForSelector(m.selector, model), opts, available)
-	if errPick != nil {
-		m.mu.RUnlock()
-		return nil, nil, "", errPick
-	}
-	if selected == nil {
-		m.mu.RUnlock()
-		return nil, nil, "", &Error{Code: "auth_not_found", Message: "selector returned no auth"}
-	}
-	providerKey := strings.TrimSpace(strings.ToLower(selected.Provider))
-	executor, okExecutor := m.executors[providerKey]
-	if !okExecutor {
-		m.mu.RUnlock()
-		return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
-	}
-	authCopy := selected.Clone()
-	m.mu.RUnlock()
-	if !selected.indexAssigned {
+	var lastRuntimeErr error
+
+	for {
 		m.mu.Lock()
-		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
-			current.EnsureIndex()
-			authCopy = current.Clone()
+		candidates := make([]*Auth, 0, len(m.auths))
+		now := time.Now()
+		runtimeLimitedCount := 0
+		var runtimeResetAt time.Time
+		for _, candidate := range m.auths {
+			if candidate == nil || candidate.Disabled {
+				continue
+			}
+			if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
+				continue
+			}
+			if disallowFreeAuth && isFreeCodexAuth(candidate) {
+				continue
+			}
+			providerKey := strings.TrimSpace(strings.ToLower(candidate.Provider))
+			if providerKey == "" {
+				continue
+			}
+			if _, ok := providerSet[providerKey]; !ok {
+				continue
+			}
+			if _, used := tried[candidate.ID]; used {
+				continue
+			}
+			if _, ok := m.executors[providerKey]; !ok {
+				continue
+			}
+			if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
+				continue
+			}
+			if okSession, resetAt := candidate.runtimeSessionAvailable(now, runtimeSessionID, sessionTTL); !okSession {
+				runtimeLimitedCount++
+				if !resetAt.IsZero() && (runtimeResetAt.IsZero() || resetAt.Before(runtimeResetAt)) {
+					runtimeResetAt = resetAt
+				}
+				continue
+			}
+			candidates = append(candidates, candidate)
 		}
+		if len(candidates) == 0 {
+			m.mu.Unlock()
+			if lastRuntimeErr != nil {
+				return nil, nil, "", lastRuntimeErr
+			}
+			if runtimeLimitedCount > 0 {
+				return nil, nil, "", accountRuntimeLimitError("", "session", runtimeResetAt)
+			}
+			return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+		}
+		available, errAvailable := m.availableAuthsForRouteModel(candidates, "mixed", model, now)
+		if errAvailable != nil {
+			m.mu.Unlock()
+			return nil, nil, "", errAvailable
+		}
+		selected, errPick := m.selector.Pick(ctx, "mixed", selectionArgForSelector(m.selector, model), opts, available)
+		if errPick != nil {
+			m.mu.Unlock()
+			return nil, nil, "", errPick
+		}
+		if selected == nil {
+			m.mu.Unlock()
+			return nil, nil, "", &Error{Code: "auth_not_found", Message: "selector returned no auth"}
+		}
+		current := m.auths[strings.TrimSpace(selected.ID)]
+		if current == nil {
+			m.mu.Unlock()
+			tried = markAuthTried(tried, selected.ID)
+			lastRuntimeErr = &Error{Code: "auth_not_found", Message: "auth no longer available"}
+			continue
+		}
+		providerKey := strings.TrimSpace(strings.ToLower(current.Provider))
+		executor, okExecutor := m.executors[providerKey]
+		if !okExecutor {
+			m.mu.Unlock()
+			return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
+		}
+		selectedID := current.ID
+		authCopy, allowed, reason, resetAt := m.reserveRuntimeSlotLocked(selectedID, now, runtimeSessionID, sessionTTL)
 		m.mu.Unlock()
+		if authCopy != nil && m.scheduler != nil {
+			m.scheduler.upsertAuth(authCopy)
+		}
+		if authCopy == nil {
+			tried = markAuthTried(tried, selectedID)
+			lastRuntimeErr = &Error{Code: "auth_not_found", Message: "auth no longer available"}
+			continue
+		}
+		if !allowed {
+			tried = markAuthTried(tried, selectedID)
+			lastRuntimeErr = accountRuntimeLimitError(selectedID, reason, resetAt)
+			continue
+		}
+		return authCopy, executor, providerKey, nil
 	}
-	return authCopy, executor, providerKey, nil
 }
 
 func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
@@ -4313,6 +4378,7 @@ func (m *Manager) pickNextMixedForRuntime(ctx context.Context, providers []strin
 
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
 	sessionTTL := m.accountSessionTTL()
+	var lastRuntimeErr error
 	for {
 		selected, providerKey, errPick := m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
 		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
@@ -4320,6 +4386,9 @@ func (m *Manager) pickNextMixedForRuntime(ctx context.Context, providers []strin
 			selected, providerKey, errPick = m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
 		}
 		if errPick != nil {
+			if lastRuntimeErr != nil && shouldRetrySchedulerPick(errPick) {
+				return nil, nil, "", lastRuntimeErr
+			}
 			return nil, nil, "", errPick
 		}
 		if selected == nil {
@@ -4332,25 +4401,33 @@ func (m *Manager) pickNextMixedForRuntime(ctx context.Context, providers []strin
 			tried[selected.ID] = struct{}{}
 			continue
 		}
-		if okSession, _ := selected.runtimeSessionAvailable(time.Now(), runtimeSessionID, sessionTTL); !okSession {
-			if tried == nil {
-				tried = make(map[string]struct{})
-			}
-			tried[selected.ID] = struct{}{}
-			continue
-		}
 		executor, okExecutor := m.Executor(providerKey)
 		if !okExecutor {
 			return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
 		}
-		authCopy := selected.Clone()
-		if !selected.indexAssigned {
-			m.mu.Lock()
-			if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
-				current.EnsureIndex()
-				authCopy = current.Clone()
-			}
+		now := time.Now()
+		m.mu.Lock()
+		current := m.auths[strings.TrimSpace(selected.ID)]
+		if current == nil {
 			m.mu.Unlock()
+			tried = markAuthTried(tried, selected.ID)
+			lastRuntimeErr = &Error{Code: "auth_not_found", Message: "auth no longer available"}
+			continue
+		}
+		authCopy, allowed, reason, resetAt := m.reserveRuntimeSlotLocked(current.ID, now, runtimeSessionID, sessionTTL)
+		m.mu.Unlock()
+		if authCopy != nil && m.scheduler != nil {
+			m.scheduler.upsertAuth(authCopy)
+		}
+		if authCopy == nil {
+			tried = markAuthTried(tried, selected.ID)
+			lastRuntimeErr = &Error{Code: "auth_not_found", Message: "auth no longer available"}
+			continue
+		}
+		if !allowed {
+			tried = markAuthTried(tried, authCopy.ID)
+			lastRuntimeErr = accountRuntimeLimitError(authCopy.ID, reason, resetAt)
+			continue
 		}
 		return authCopy, executor, providerKey, nil
 	}
