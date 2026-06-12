@@ -58,16 +58,31 @@ Traefik 动态路由：
 
 ## 当前部署版本
 
-- 后端提交：`63739474`（降低 Claude 上游高频 400：thinking/effort、空白 text、OpenAI 工具形态、Fable tool_choice）
-- 前端提交：`d5a90440`（未变；本轮仅后端部署）
-- 最近一次按本文档部署时间：`2026-06-11T12:47:20+00:00`
-- 本次部署后端二进制 sha256：`527caf48a41be360fb304cc7400232e28dbf278c7a0305f9800eeba957bf0082`
-- 部署前运行版本 backend=`eb5ad9fe`，binary sha256 `214326b555edc5a6eb126352c92b5381d7094bb47287bdacef805b686bac010a`
-- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260611-124718.bak`（可回滚到 `eb5ad9fe`）
-- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260611-124718.tgz`
-- 部署后账号数：1066 个 json（账号增删由晓宇手动管理）
+- 后端提交：`e2eced84`（降低首字抖动：会话满账号调度前过滤、默认会话上限 10、运行态清会话；补全 assistant prefill 400 修复）
+- 前端提交：`f819c3e`（管理面板新增清会话入口，并把默认会话上限对齐为 10）
+- 最近一次按本文档部署时间：`2026-06-12T09:41:38+00:00`
+- 本次部署后端二进制 sha256：`f34960632f213d48e23f4b092ba5d405d93233dba227632fc97da609d5d57630`
+- 本次部署后端压缩包 sha256：`6066543e1c651ded2c0bc45ef56684e1fc011aab62554a306ce34b334e827349`
+- 本次部署前端 management.html sha256：`c251642a1e153348df79a706c8b647c5e8975fd9ed9f2de1adb6697a7c986dfe`
+- 部署前运行版本 backend=`63739474`，frontend=`d5a90440`
+- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260612-094017.bak`（可回滚到 `63739474`）
+- 部署前管理页备份：`/opt/cpa-claude-proxy-backups/management-before-deploy-20260612-094017.html`（可回滚到 `d5a90440`）
+- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260612-094017.tgz`
+- 部署后账号数：1057 个 auth entries，`auths` 目录下 1058 个 json（含 `proxy_pool.json`；账号增删由晓宇手动管理）
 
-### 本轮变更说明（63739474）
+### 本轮变更说明（e2eced84 / f819c3e）
+
+前后端均部署。本轮重点解决客户高并发下首字时快时慢，以及 NewAPI 日志中仍存在的 Claude assistant prefill 400：
+
+1. Claude 默认 `max_sessions` 从 5 提高到 10；管理面板单账号/批量策略默认值和占位提示同步为 10，后端字段保存后通过 `authManager.Update` 热加载到调度器，无需重启。
+2. 调度选账号前会过滤“新会话已满”的账号；已有真实会话仍可继续复用同一账号，无会话 ID 请求仍不占用会话槽，避免新请求先选到满账号再失败重试导致首字抖动。
+3. 新增运行态清会话接口 `POST /auth-files/runtime-sessions/clear`，支持清全部或指定账号的本地会话占用；只释放内存中的会话槽，不删除账号、不改认证文件。
+4. 管理面板生产首页账号池新增“清会话”和“清选中会话”入口；旧通用授权页也保留同类入口。
+5. `assistant prefill` 修复范围扩大：`claude-sonnet-4-6`、`claude-opus-4-6` 加入不支持 prefill 的模型名单；命中模型或 active thinking 请求只要最终以 `role:"assistant"` 收尾，就追加空 user turn，不再限定 assistant content 必须全是 text block。`thinking`、`redacted_thinking`、`tool_use`、混合 content 都会被修复。
+6. 本地验证：`go test ./sdk/cliproxy/auth ./internal/api/handlers/management ./internal/api -count=1`、`go test ./internal/runtime/executor -run 'Claude|TestRepairClaudeRequestShape' -count=1`、`go build -o /private/tmp/cpa-cli-proxy-api-test ./cmd/server`、前端 `npm run type-check`、`npm run lint`、`npm run build` 均通过；`rg -n -i "claude|anthropic" dist` 无输出。
+7. 部署后验证：容器 `cpa-claude-proxy` 为 Up，`8318` 仍只监听 `127.0.0.1`，本机 `healthz 200`、`management 200`，公网 `https://api.openstaryu.com/` 与 `https://admin.openstaryu.com/management.html` 均为 200。
+
+### 上一轮变更说明（63739474）
 
 仅后端部署。本轮基于 NewAPI 使用日志中最新高频 Claude 上游 400 做出站兼容与错误分类修复：
 
