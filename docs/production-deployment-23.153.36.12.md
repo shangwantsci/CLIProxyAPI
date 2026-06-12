@@ -58,19 +58,30 @@ Traefik 动态路由：
 
 ## 当前部署版本
 
-- 后端提交：`e2eced84`（降低首字抖动：会话满账号调度前过滤、默认会话上限 10、运行态清会话；补全 assistant prefill 400 修复）
+- 后端提交：`10c06c12`（高并发下 pick/reserve 原子化，OpenAI 兼容流式首包前 SSE keepalive 默认开启）
 - 前端提交：`f819c3e`（管理面板新增清会话入口，并把默认会话上限对齐为 10）
-- 最近一次按本文档部署时间：`2026-06-12T09:41:38+00:00`
-- 本次部署后端二进制 sha256：`f34960632f213d48e23f4b092ba5d405d93233dba227632fc97da609d5d57630`
-- 本次部署后端压缩包 sha256：`6066543e1c651ded2c0bc45ef56684e1fc011aab62554a306ce34b334e827349`
-- 本次部署前端 management.html sha256：`c251642a1e153348df79a706c8b647c5e8975fd9ed9f2de1adb6697a7c986dfe`
-- 部署前运行版本 backend=`63739474`，frontend=`d5a90440`
-- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260612-094017.bak`（可回滚到 `63739474`）
-- 部署前管理页备份：`/opt/cpa-claude-proxy-backups/management-before-deploy-20260612-094017.html`（可回滚到 `d5a90440`）
-- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260612-094017.tgz`
-- 部署后账号数：1057 个 auth entries，`auths` 目录下 1058 个 json（含 `proxy_pool.json`；账号增删由晓宇手动管理）
+- 最近一次按本文档部署时间：`2026-06-12T11:20:45+00:00`
+- 本次部署后端二进制 sha256：`60fbb13f7acbf95ec2ab12af57e9cef794f3b7eebb079a341c9028994903afd5`
+- 本次部署后端压缩包 sha256：`9a08d65f9abbcacba94e6a54300a1ed47ae15c71f485fc84fa029bad86ea5885`
+- 本次部署前端 management.html sha256：未变，沿用 `c251642a1e153348df79a706c8b647c5e8975fd9ed9f2de1adb6697a7c986dfe`
+- 部署前运行版本 backend=`e2eced84`，frontend=`f819c3e`
+- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260612-112041.bak`（可回滚到 `e2eced84`）
+- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260612-112041.tgz`
+- 部署后账号数：1024 个 auth entries，`auths` 目录下 1025 个文件（含 `proxy_pool.json`；账号增删由晓宇手动管理）
 
-### 本轮变更说明（e2eced84 / f819c3e）
+### 本轮变更说明（10c06c12 / f819c3e）
+
+仅后端部署。本轮继续针对客户高并发首字慢和 NewAPI `client_gone/context canceled` 激增做号池侧止血：
+
+1. 本地混合 provider 路径的账号选择从“先 pick 后 reserve”改为在同一把 manager 锁内完成候选过滤、选择器挑选和 runtime slot 预占，避免多个并发请求同时选中同一满号后再失败重选。
+2. 非 streaming、streaming、count tokens 三条混合执行链路都使用已预占账号；Home 控制面模式仍保留原外层 reserve 行为。
+3. 已预占账号准备执行模型时忽略当前请求刚写入的 runtime RPM 计数，避免请求把自己误判为已 RPM 满；模型禁用/冷却等状态仍按原逻辑过滤。
+4. OpenAI Chat Completions 与 Completions 流式入口在等待上游首个 payload 前也会按 `streaming.keepalive-seconds` 刷 SSE `: keep-alive` 注释，避免首包前连接完全静默。
+5. 流式 keepalive 默认从关闭改为 15 秒；`keepalive-seconds: 0` 使用默认值，`< 0` 才关闭。
+6. 本地验证：`go test ./sdk/cliproxy/auth -count=1 -timeout 30s`、`go test ./sdk/api/handlers ./sdk/api/handlers/openai -run 'TestStreamingKeepAliveIntervalDefaultsToFifteenSeconds|TestChatCompletionsStreamingEmitsKeepAliveBeforeFirstPayload|TestForwardResponsesStreamSeparatesDataOnlySSEChunks|TestForwardResponsesStreamRepairsEmptyCompletedOutputFromDoneItems' -count=1`、`go test ./internal/runtime/executor -run 'TestRepairClaudeRequestShape_AddsUserTurnAfter(FableAssistantTextPrefill|Opus48AssistantTextPrefill|AssistantPrefillForNewClaude46Models|ThinkingAssistantTextPrefill|NonTextAssistantPrefill)|TestRepairClaudeRequestShape_KeepsAssistantPrefillForLegacyClaudeModels' -count=1`、`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o ... ./cmd/server` 均通过。
+7. 部署后验证：容器 `cpa-claude-proxy` 为 Up，运行二进制 sha256 与本地一致，`8318` 仍只监听 `127.0.0.1`，本机 `healthz 200`、`management 200`，公网 `https://api.openstaryu.com/` 与 `https://admin.openstaryu.com/management.html` 均为 200。
+
+### 上一轮变更说明（e2eced84 / f819c3e）
 
 前后端均部署。本轮重点解决客户高并发下首字时快时慢，以及 NewAPI 日志中仍存在的 Claude assistant prefill 400：
 
