@@ -124,6 +124,9 @@ func TestPatchAuthFileFields_MergeHeadersAndDeleteEmptyValues(t *testing.T) {
 	if got := updated.Attributes["max_sessions"]; got != "7" {
 		t.Fatalf("attrs max_sessions = %q, want 7", got)
 	}
+	if got := updated.EffectiveMaxSessions(); got != 7 {
+		t.Fatalf("EffectiveMaxSessions() = %d, want 7", got)
+	}
 	if got, _ := updated.Metadata["cloak_mode"].(string); got != "always" {
 		t.Fatalf("metadata.cloak_mode = %q, want always", got)
 	}

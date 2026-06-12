@@ -710,6 +710,7 @@ func (s *Server) registerManagementRoutes() {
 
 		mgmt.GET("/auth-files", s.mgmt.ListAuthFiles)
 		mgmt.GET("/auth-files/claude-health", s.mgmt.ListClaudeAuthHealth)
+		mgmt.POST("/auth-files/runtime-sessions/clear", s.mgmt.ClearAuthRuntimeSessions)
 		mgmt.GET("/auth-files/models", s.mgmt.GetAuthFileModels)
 		mgmt.GET("/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)
 		mgmt.GET("/auth-files/download", s.mgmt.DownloadAuthFile)

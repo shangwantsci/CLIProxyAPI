@@ -1354,6 +1354,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	}
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	runtimeSessionID := runtimeSessionIDForRequest(req, opts)
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
@@ -1370,7 +1371,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		if homeMode {
 			pickOpts = withHomeAuthCount(opts, homeAuthCount)
 		}
-		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
+		auth, executor, provider, errPick := m.pickNextMixedForRuntime(ctx, providers, routeModel, pickOpts, tried, runtimeSessionID)
 		if errPick != nil {
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
 				return cliproxyexecutor.Response{}, lastErr
@@ -1458,6 +1459,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	}
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	runtimeSessionID := runtimeSessionIDForRequest(req, opts)
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
@@ -1474,7 +1476,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		if homeMode {
 			pickOpts = withHomeAuthCount(opts, homeAuthCount)
 		}
-		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
+		auth, executor, provider, errPick := m.pickNextMixedForRuntime(ctx, providers, routeModel, pickOpts, tried, runtimeSessionID)
 		if errPick != nil {
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
 				return cliproxyexecutor.Response{}, lastErr
@@ -1562,6 +1564,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	}
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	runtimeSessionID := runtimeSessionIDForRequest(req, opts)
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
@@ -1578,7 +1581,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		if homeMode {
 			pickOpts = withHomeAuthCount(opts, homeAuthCount)
 		}
-		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
+		auth, executor, provider, errPick := m.pickNextMixedForRuntime(ctx, providers, routeModel, pickOpts, tried, runtimeSessionID)
 		if errPick != nil {
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
 				return nil, lastErr
@@ -1669,14 +1672,7 @@ func (m *Manager) reservePickedAuthRuntime(ctx context.Context, auth *Auth, req 
 	if auth == nil || strings.TrimSpace(auth.ID) == "" {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	payload := opts.OriginalRequest
-	if len(payload) == 0 {
-		payload = req.Payload
-	}
-	sessionID, fallbackID := extractSessionIDs(opts.Headers, payload, opts.Metadata)
-	if sessionID == "" {
-		sessionID = fallbackID
-	}
+	sessionID := runtimeSessionIDForRequest(req, opts)
 	now := time.Now()
 	sessionTTL := m.accountSessionTTL()
 
@@ -1703,6 +1699,18 @@ func (m *Manager) reservePickedAuthRuntime(ctx context.Context, auth *Auth, req 
 		return nil, accountRuntimeLimitError(auth.ID, reason, resetAt)
 	}
 	return snapshot, nil
+}
+
+func runtimeSessionIDForRequest(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) string {
+	payload := opts.OriginalRequest
+	if len(payload) == 0 {
+		payload = req.Payload
+	}
+	sessionID, fallbackID := extractSessionIDs(opts.Headers, payload, opts.Metadata)
+	if sessionID == "" {
+		sessionID = fallbackID
+	}
+	return sessionID
 }
 
 func (m *Manager) accountSessionTTL() time.Duration {
@@ -3841,6 +3849,53 @@ func (m *Manager) List() []*Auth {
 	return list
 }
 
+func (m *Manager) ClearRuntimeSessions(opts RuntimeSessionClearOptions) RuntimeSessionClearResult {
+	if m == nil {
+		return RuntimeSessionClearResult{}
+	}
+	provider := strings.TrimSpace(strings.ToLower(opts.Provider))
+	authIDSet := make(map[string]struct{}, len(opts.AuthIDs))
+	for _, id := range opts.AuthIDs {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			authIDSet[id] = struct{}{}
+		}
+	}
+
+	now := time.Now()
+	result := RuntimeSessionClearResult{}
+	snapshots := make([]*Auth, 0)
+	m.mu.Lock()
+	for _, auth := range m.auths {
+		if auth == nil {
+			continue
+		}
+		if provider != "" && strings.TrimSpace(strings.ToLower(auth.Provider)) != provider {
+			continue
+		}
+		if len(authIDSet) > 0 {
+			if _, ok := authIDSet[auth.ID]; !ok {
+				continue
+			}
+		}
+		cleared := auth.clearRuntimeSessions(now)
+		if cleared == 0 {
+			continue
+		}
+		result.ClearedAccounts++
+		result.ClearedSessions += cleared
+		snapshots = append(snapshots, auth.Clone())
+	}
+	m.mu.Unlock()
+
+	if m.scheduler != nil {
+		for _, snapshot := range snapshots {
+			m.scheduler.upsertAuth(snapshot)
+		}
+	}
+	return result
+}
+
 // GetByID retrieves an auth entry by its ID.
 
 func (m *Manager) GetByID(id string) (*Auth, bool) {
@@ -4090,7 +4145,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	}
 }
 
-func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, runtimeSessionID string) (*Auth, ProviderExecutor, string, error) {
 	if m.HomeEnabled() {
 		return m.pickNextViaHome(ctx, model, opts, tried)
 	}
@@ -4121,6 +4176,10 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		}
 	}
 	registryRef := registry.GetGlobalRegistry()
+	now := time.Now()
+	sessionTTL := m.accountSessionTTL()
+	runtimeLimitedCount := 0
+	var runtimeResetAt time.Time
 	for _, candidate := range m.auths {
 		if candidate == nil || candidate.Disabled {
 			continue
@@ -4147,10 +4206,20 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
 			continue
 		}
+		if okSession, resetAt := candidate.runtimeSessionAvailable(now, runtimeSessionID, sessionTTL); !okSession {
+			runtimeLimitedCount++
+			if !resetAt.IsZero() && (runtimeResetAt.IsZero() || resetAt.Before(runtimeResetAt)) {
+				runtimeResetAt = resetAt
+			}
+			continue
+		}
 		candidates = append(candidates, candidate)
 	}
 	if len(candidates) == 0 {
 		m.mu.RUnlock()
+		if runtimeLimitedCount > 0 {
+			return nil, nil, "", accountRuntimeLimitError("", "session", runtimeResetAt)
+		}
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	available, errAvailable := m.availableAuthsForRouteModel(candidates, "mixed", model, time.Now())
@@ -4187,12 +4256,16 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 }
 
 func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+	return m.pickNextMixedForRuntime(ctx, providers, model, opts, tried, "")
+}
+
+func (m *Manager) pickNextMixedForRuntime(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, runtimeSessionID string) (*Auth, ProviderExecutor, string, error) {
 	if m.HomeEnabled() {
 		return m.pickNextViaHome(ctx, model, opts, tried)
 	}
 
 	if !m.useSchedulerFastPath() {
-		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
+		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried, runtimeSessionID)
 	}
 
 	eligibleProviders := make([]string, 0, len(providers))
@@ -4232,13 +4305,14 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 			}
 			if m.routeAwareSelectionRequired(candidate, model) {
 				m.mu.RUnlock()
-				return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
+				return m.pickNextMixedLegacy(ctx, providers, model, opts, tried, runtimeSessionID)
 			}
 		}
 		m.mu.RUnlock()
 	}
 
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
+	sessionTTL := m.accountSessionTTL()
 	for {
 		selected, providerKey, errPick := m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
 		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
@@ -4252,6 +4326,13 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 			return nil, nil, "", &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 		}
 		if disallowFreeAuth && isFreeCodexAuth(selected) {
+			if tried == nil {
+				tried = make(map[string]struct{})
+			}
+			tried[selected.ID] = struct{}{}
+			continue
+		}
+		if okSession, _ := selected.runtimeSessionAvailable(time.Now(), runtimeSessionID, sessionTTL); !okSession {
 			if tried == nil {
 				tried = make(map[string]struct{})
 			}

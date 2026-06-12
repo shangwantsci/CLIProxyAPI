@@ -49,6 +49,35 @@ func (e *runtimeLimitExecutor) snapshotCalls() []string {
 	return append([]string(nil), e.calls...)
 }
 
+type runtimeLimitCandidateSelector struct {
+	mu         sync.Mutex
+	candidates [][]string
+}
+
+func (s *runtimeLimitCandidateSelector) Pick(_ context.Context, _ string, _ string, _ cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ids := make([]string, 0, len(auths))
+	for _, auth := range auths {
+		ids = append(ids, auth.ID)
+	}
+	s.candidates = append(s.candidates, ids)
+	if len(auths) == 0 {
+		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
+	}
+	return auths[0], nil
+}
+
+func (s *runtimeLimitCandidateSelector) snapshotCandidates() [][]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([][]string, len(s.candidates))
+	for i := range s.candidates {
+		out[i] = append([]string(nil), s.candidates[i]...)
+	}
+	return out
+}
+
 func registerClaudeRuntimeLimitAuth(t *testing.T, manager *Manager, id string, attrs map[string]string) {
 	t.Helper()
 	if attrs == nil {
@@ -65,6 +94,14 @@ func registerClaudeRuntimeLimitAuth(t *testing.T, manager *Manager, id string, a
 		},
 	}); err != nil {
 		t.Fatalf("Register(%s) returned error: %v", id, err)
+	}
+}
+
+func TestClaudeDefaultMaxSessionsIsTen(t *testing.T) {
+	auth := &Auth{Provider: "claude"}
+
+	if got := auth.EffectiveMaxSessions(); got != 10 {
+		t.Fatalf("EffectiveMaxSessions() = %d, want 10", got)
 	}
 }
 
@@ -125,6 +162,43 @@ func TestManagerSkipsClaudeAuthWhenNewSessionWouldExceedMax(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("executor calls = %#v, want %#v", got, want)
+		}
+	}
+}
+
+func TestManagerFiltersSessionFullClaudeAuthBeforeSelector(t *testing.T) {
+	selector := &runtimeLimitCandidateSelector{}
+	manager := NewManager(nil, selector, nil)
+	exec := &runtimeLimitExecutor{}
+	manager.RegisterExecutor(exec)
+	registerClaudeRuntimeLimitAuth(t, manager, "auth-a", map[string]string{"max_sessions": "1"})
+	registerClaudeRuntimeLimitAuth(t, manager, "auth-b", map[string]string{"max_sessions": "1"})
+	model := "claude-sonnet-4-5"
+	registerSchedulerModels(t, "claude", model, "auth-a", "auth-b")
+
+	req := cliproxyexecutor.Request{Model: model, Payload: []byte(`{"messages":[{"role":"user","content":"hello"}]}`)}
+	if _, err := manager.Execute(context.Background(), []string{"claude"}, req, cliproxyexecutor.Options{
+		Headers: http.Header{"X-Session-Id": []string{"session-1"}},
+	}); err != nil {
+		t.Fatalf("first Execute returned error: %v", err)
+	}
+	if _, err := manager.Execute(context.Background(), []string{"claude"}, req, cliproxyexecutor.Options{
+		Headers: http.Header{"X-Session-Id": []string{"session-2"}},
+	}); err != nil {
+		t.Fatalf("second Execute returned error: %v", err)
+	}
+
+	got := selector.snapshotCandidates()
+	wantSecondPick := []string{"auth-b"}
+	if len(got) < 2 {
+		t.Fatalf("selector candidates = %#v, want at least two picks", got)
+	}
+	if len(got[1]) != len(wantSecondPick) {
+		t.Fatalf("second pick candidates = %#v, want %#v", got[1], wantSecondPick)
+	}
+	for i := range wantSecondPick {
+		if got[1][i] != wantSecondPick[i] {
+			t.Fatalf("second pick candidates = %#v, want %#v", got[1], wantSecondPick)
 		}
 	}
 }
@@ -199,6 +273,33 @@ func TestManagerAllowsExistingRealSessionWhenMaxSessionsReached(t *testing.T) {
 
 	if got := exec.snapshotCalls(); len(got) != 2 {
 		t.Fatalf("executor calls = %#v, want first and existing-session calls only", got)
+	}
+}
+
+func TestManagerClearRuntimeSessionsReleasesSessionCapacity(t *testing.T) {
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	exec := &runtimeLimitExecutor{}
+	manager.RegisterExecutor(exec)
+	registerClaudeRuntimeLimitAuth(t, manager, "auth-a", map[string]string{"max_sessions": "1"})
+	model := "claude-sonnet-4-5"
+	registerSchedulerModels(t, "claude", model, "auth-a")
+	req := cliproxyexecutor.Request{Model: model, Payload: []byte(`{"messages":[{"role":"user","content":"hello"}]}`)}
+	sessionOne := cliproxyexecutor.Options{Headers: http.Header{"X-Session-Id": []string{"session-1"}}}
+	sessionTwo := cliproxyexecutor.Options{Headers: http.Header{"X-Session-Id": []string{"session-2"}}}
+
+	if _, err := manager.Execute(context.Background(), []string{"claude"}, req, sessionOne); err != nil {
+		t.Fatalf("first Execute returned error: %v", err)
+	}
+	if _, err := manager.Execute(context.Background(), []string{"claude"}, req, sessionTwo); err == nil {
+		t.Fatalf("second Execute with new session returned nil error, want session limit error")
+	}
+
+	result := manager.ClearRuntimeSessions(RuntimeSessionClearOptions{Provider: "claude"})
+	if result.ClearedAccounts != 1 || result.ClearedSessions != 1 {
+		t.Fatalf("ClearRuntimeSessions result = %#v, want one account and one session", result)
+	}
+	if _, err := manager.Execute(context.Background(), []string{"claude"}, req, sessionTwo); err != nil {
+		t.Fatalf("Execute after ClearRuntimeSessions returned error: %v", err)
 	}
 }
 

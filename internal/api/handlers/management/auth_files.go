@@ -302,6 +302,88 @@ func (h *Handler) ListClaudeAuthHealth(c *gin.Context) {
 	c.JSON(200, gin.H{"accounts": accounts})
 }
 
+func (h *Handler) ClearAuthRuntimeSessions(c *gin.Context) {
+	if h == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler not initialized"})
+		return
+	}
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+
+	var req struct {
+		Provider string   `json:"provider"`
+		Names    []string `json:"names"`
+		AuthIDs  []string `json:"auth_ids"`
+	}
+	if c.Request != nil && c.Request.Body != nil {
+		if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+			return
+		}
+	}
+
+	provider := strings.TrimSpace(strings.ToLower(req.Provider))
+	if provider == "" {
+		provider = "claude"
+	}
+	names := append([]string{}, req.AuthIDs...)
+	names = append(names, req.Names...)
+	authIDs := resolveRuntimeSessionClearAuthIDs(h.authManager, names)
+	result := h.authManager.ClearRuntimeSessions(coreauth.RuntimeSessionClearOptions{
+		Provider: provider,
+		AuthIDs:  authIDs,
+	})
+	c.JSON(http.StatusOK, gin.H{
+		"status":           "ok",
+		"provider":         provider,
+		"cleared_accounts": result.ClearedAccounts,
+		"cleared_sessions": result.ClearedSessions,
+	})
+}
+
+func resolveRuntimeSessionClearAuthIDs(manager *coreauth.Manager, names []string) []string {
+	if manager == nil || len(names) == 0 {
+		return nil
+	}
+	wanted := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			wanted[name] = struct{}{}
+		}
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+	authIDs := make([]string, 0, len(wanted))
+	seen := make(map[string]struct{}, len(wanted))
+	for _, auth := range manager.List() {
+		if auth == nil {
+			continue
+		}
+		_, idWanted := wanted[auth.ID]
+		_, fileWanted := wanted[auth.FileName]
+		if !idWanted && !fileWanted {
+			continue
+		}
+		if _, ok := seen[auth.ID]; ok {
+			continue
+		}
+		seen[auth.ID] = struct{}{}
+		authIDs = append(authIDs, auth.ID)
+	}
+	for name := range wanted {
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		authIDs = append(authIDs, name)
+	}
+	return authIDs
+}
+
 // GetAuthFileModels returns the models supported by a specific auth file
 func (h *Handler) GetAuthFileModels(c *gin.Context) {
 	name := c.Query("name")

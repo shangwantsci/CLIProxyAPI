@@ -112,7 +112,7 @@ const (
 	quality24hBucketCount         = 24
 
 	defaultClaudeRPMLimit    = 60
-	defaultClaudeMaxSessions = 5
+	defaultClaudeMaxSessions = 10
 	accountRPMWindow         = time.Minute
 )
 
@@ -163,6 +163,16 @@ type AuthRuntimeUsageStats struct {
 	MaxSessions    int       `json:"max_sessions"`
 	ActiveSessions int       `json:"active_sessions"`
 	SessionResetAt time.Time `json:"session_reset_at,omitempty"`
+}
+
+type RuntimeSessionClearOptions struct {
+	Provider string
+	AuthIDs  []string
+}
+
+type RuntimeSessionClearResult struct {
+	ClearedAccounts int `json:"cleared_accounts"`
+	ClearedSessions int `json:"cleared_sessions"`
 }
 
 // QuotaState contains limiter tracking data for a credential.
@@ -521,6 +531,40 @@ func isCountedRuntimeSessionID(sessionID string) bool {
 		}
 	}
 	return false
+}
+
+func (a *Auth) runtimeSessionAvailable(now time.Time, sessionID string, sessionTTL time.Duration) (bool, time.Time) {
+	if a == nil {
+		return false, time.Time{}
+	}
+	maxSessions := a.EffectiveMaxSessions()
+	if maxSessions <= 0 || !isCountedRuntimeSessionID(sessionID) {
+		return true, time.Time{}
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return true, time.Time{}
+	}
+	if expiresAt, ok := a.runtimeUsage.Sessions[sessionID]; ok && expiresAt.After(now) {
+		return true, time.Time{}
+	}
+	if a.runtimeUsage.activeSessionCount(now) < maxSessions {
+		return true, time.Time{}
+	}
+	resetAt := a.runtimeUsage.sessionResetAt(now)
+	if resetAt.IsZero() || resetAt.Before(now) {
+		resetAt = now.Add(sessionTTL)
+	}
+	return false, resetAt
+}
+
+func (a *Auth) clearRuntimeSessions(now time.Time) int {
+	if a == nil || len(a.runtimeUsage.Sessions) == 0 {
+		return 0
+	}
+	cleared := a.runtimeUsage.activeSessionCount(now)
+	a.runtimeUsage.Sessions = nil
+	return cleared
 }
 
 func (a *Auth) reserveRuntimeSlot(now time.Time, sessionID string, sessionTTL time.Duration) (bool, string, time.Time) {

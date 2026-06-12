@@ -1910,7 +1910,7 @@ func repairClaudeAssistantPrefill(body []byte) []byte {
 	}
 	lastIndex := len(messages.Array()) - 1
 	last := messages.Get(strconv.Itoa(lastIndex))
-	if last.Get("role").String() != "assistant" || !claudeAssistantMessageIsTextOnly(last) {
+	if last.Get("role").String() != "assistant" {
 		return body
 	}
 	fallback := map[string]any{
@@ -1927,7 +1927,9 @@ func claudeModelDisallowsAssistantPrefill(model string) bool {
 		model == "claude-mythos-5" || strings.HasPrefix(model, "claude-mythos-5-") ||
 		model == "claude-mythos-preview" || strings.HasPrefix(model, "claude-mythos-preview-") ||
 		model == "claude-opus-4-8" || strings.HasPrefix(model, "claude-opus-4-8-") ||
-		model == "claude-opus-4-7" || strings.HasPrefix(model, "claude-opus-4-7-")
+		model == "claude-opus-4-7" || strings.HasPrefix(model, "claude-opus-4-7-") ||
+		model == "claude-opus-4-6" || strings.HasPrefix(model, "claude-opus-4-6-") ||
+		model == "claude-sonnet-4-6" || strings.HasPrefix(model, "claude-sonnet-4-6-")
 }
 
 func claudeRequestUsesActiveThinking(body []byte) bool {
@@ -1937,30 +1939,6 @@ func claudeRequestUsesActiveThinking(body []byte) bool {
 	default:
 		return false
 	}
-}
-
-func claudeAssistantMessageIsTextOnly(message gjson.Result) bool {
-	content := message.Get("content")
-	if !content.Exists() {
-		return false
-	}
-	if content.Type == gjson.String {
-		return true
-	}
-	if !content.IsArray() || len(content.Array()) == 0 {
-		return false
-	}
-	textBlocks := 0
-	onlyText := true
-	content.ForEach(func(_, block gjson.Result) bool {
-		if !block.IsObject() || block.Get("type").String() != "text" {
-			onlyText = false
-			return false
-		}
-		textBlocks++
-		return true
-	})
-	return onlyText && textBlocks > 0
 }
 
 func repairClaudeDeprecatedTemperature(body []byte) []byte {

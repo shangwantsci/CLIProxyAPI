@@ -3292,6 +3292,27 @@ func TestRepairClaudeRequestShape_AddsUserTurnAfterOpus48AssistantTextPrefill(t 
 	}
 }
 
+func TestRepairClaudeRequestShape_AddsUserTurnAfterAssistantPrefillForNewClaude46Models(t *testing.T) {
+	tests := []string{
+		"claude-sonnet-4-6",
+		"claude-opus-4-6",
+	}
+
+	for _, model := range tests {
+		t.Run(model, func(t *testing.T) {
+			payload := []byte(`{"model":"` + model + `","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]},{"role":"assistant","content":[{"type":"text","text":"prefill"}]}]}`)
+			out := repairClaudeRequestShape(payload)
+
+			if got := gjson.GetBytes(out, "messages.#").Int(); got != 3 {
+				t.Fatalf("messages count = %d, want 3; out=%s", got, string(out))
+			}
+			if got := gjson.GetBytes(out, "messages.2.role").String(); got != "user" {
+				t.Fatalf("messages.2.role = %q, want user; out=%s", got, string(out))
+			}
+		})
+	}
+}
+
 func TestRepairClaudeRequestShape_AddsUserTurnAfterThinkingAssistantTextPrefill(t *testing.T) {
 	payload := []byte(`{"model":"claude-sonnet-4-6","thinking":{"type":"adaptive"},"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]},{"role":"assistant","content":[{"type":"text","text":"prefill"}]}]}`)
 	out := repairClaudeRequestShape(payload)
@@ -3301,6 +3322,28 @@ func TestRepairClaudeRequestShape_AddsUserTurnAfterThinkingAssistantTextPrefill(
 	}
 	if got := gjson.GetBytes(out, "messages.2.role").String(); got != "user" {
 		t.Fatalf("messages.2.role = %q, want user; out=%s", got, string(out))
+	}
+}
+
+func TestRepairClaudeRequestShape_AddsUserTurnAfterNonTextAssistantPrefill(t *testing.T) {
+	tests := map[string][]byte{
+		"thinking_block":                []byte(`{"model":"claude-fable-5","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]},{"role":"assistant","content":[{"type":"thinking","thinking":"plan","signature":"sig"},{"type":"text","text":"prefill"}]}]}`),
+		"redacted_thinking_block":       []byte(`{"model":"claude-fable-5","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]},{"role":"assistant","content":[{"type":"redacted_thinking","data":"opaque"},{"type":"text","text":"prefill"}]}]}`),
+		"tool_use_block":                []byte(`{"model":"claude-fable-5","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"lookup","input":{}}]}]}`),
+		"active_thinking_mixed_content": []byte(`{"model":"claude-sonnet-4-5","thinking":{"type":"enabled"},"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]},{"role":"assistant","content":[{"type":"thinking","thinking":"plan","signature":"sig"},{"type":"tool_use","id":"toolu_1","name":"lookup","input":{}}]}]}`),
+	}
+
+	for name, payload := range tests {
+		t.Run(name, func(t *testing.T) {
+			out := repairClaudeRequestShape(payload)
+
+			if got := gjson.GetBytes(out, "messages.#").Int(); got != 3 {
+				t.Fatalf("messages count = %d, want 3; out=%s", got, string(out))
+			}
+			if got := gjson.GetBytes(out, "messages.2.role").String(); got != "user" {
+				t.Fatalf("messages.2.role = %q, want user; out=%s", got, string(out))
+			}
+		})
 	}
 }
 
