@@ -58,18 +58,31 @@ Traefik 动态路由：
 
 ## 当前部署版本
 
-- 后端提交：`6987d860`（下架并本地拦截已不可用的 Claude Fable 5）
+- 后端提交：`e774bd53`（Claude prompt too long 本地拦截、1M 上下文修正、缺失 text 字段修复）
 - 前端提交：`f819c3e`（未变）
-- 最近一次按本文档部署时间：`2026-06-13T03:04:05+00:00`
-- 本次部署后端二进制 sha256：`6dd2607452582379733386b45e2230dc1c6d5c71c3bdb850196514aeb9fc949d`
-- 本次部署后端压缩包 sha256：`29d20022ac9333d5d1f18008271077946bc1d618520996240f4a3812db5a5ee4`
+- 最近一次按本文档部署时间：`2026-06-13T03:53:03+00:00`
+- 本次部署后端二进制 sha256：`324cb5b5a489e0c458b73978c9c9eaf3e5bf8eefd36878573adff58db033eda9`
+- 本次部署后端压缩包 sha256：`5fe498c16d60c8aea1bd55dfc8ddc34ae654645391647c5e562e9caf82f8ed18`
 - 本次部署前端 management.html sha256：未变，沿用 `c251642a1e153348df79a706c8b647c5e8975fd9ed9f2de1adb6697a7c986dfe`
-- 部署前运行版本 backend=`a827ab9d`，frontend=`f819c3e`
-- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260613-030402.bak`（可回滚到 `a827ab9d`）
-- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260613-030402.tgz`
-- 部署后 `auths` 目录下 1217 个文件（含 `proxy_pool.json`；账号增删由晓宇手动管理）
+- 部署前运行版本 backend=`6987d860`，frontend=`f819c3e`
+- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260613-035300.bak`（可回滚到 `6987d860`）
+- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260613-035300.tgz`
+- 部署后 `auths` 目录下 1192 个文件（含 `proxy_pool.json`；账号增删由晓宇手动管理）
 
-### 本轮变更说明（6987d860 / f819c3e）
+### 本轮变更说明（e774bd53 / f819c3e）
+
+仅后端部署。本轮合并两次 Claude 客户端请求兼容修复：一类是超上下文 `prompt is too long`，另一类是缺失 `text` 字段导致的 `Field required`。
+
+1. 更新 Claude 静态模型能力：`claude-sonnet-4-6` 的 `context_length` 从 `200000` 修正为 `1000000`，和官方当前 1M 上下文能力一致。
+2. Claude 非流式、流式生成请求在发往上游前增加本地 prompt token 上限检查；明显超过模型上下文窗口时返回本地 400，不再打 Anthropic 官方，也不污染账号健康。
+3. `context-1m-2025-08-07` 不再作为 1M 的唯一判断，只作为兼容旧模型能力的提升信号；Sonnet 4.6 即使不带 beta 也按 1M 处理。
+4. 新增本地错误码 `claude_prompt_too_long` 并纳入本地 request guard；上游纯文本 `prompt is too long: ... tokens > ... maximum` 400 也归类为客户端请求格式问题，不写账号 `LastError`、不标记账号不可用。
+5. Claude 出站前清理非法 text block：`{"type":"text"}`、`{"type":"text","text":null}`、空字符串和纯空白 text 会被移除；如果 content 数组清空则补 `{"type":"text","text":"."}`。
+6. text block 修复覆盖 `messages[*].content[*]`、`system[*]` 以及 `tool_result.content[*]` 等嵌套 content 数组；上游兜底返回的 `... .text: Field required` 400 也归类为客户端请求格式问题。
+7. 本地验证：`git diff --check`、`go test ./sdk/cliproxy/auth -count=1`、`go test ./internal/registry -skip TestCodexFreeModelsExcludeGPT55 -count=1`、`go test ./internal/runtime/executor -skip 'TestEnsureAccessToken_WarmTokenLoadsCreditsHint|TestUpdateAntigravityCreditsBalance_LoadCodeAssistUserAgent' -count=1`、`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o ... ./cmd/server` 均通过。`TestCodexFreeModelsExcludeGPT55` 仍为既存 Codex free tier 断言失败，和本轮 Claude 变更无关。
+8. 部署后验证：容器 `cpa-claude-proxy` 为 Up，运行二进制 sha256 与本地一致，`8318` 仍只监听 `127.0.0.1`，本机 `healthz 200`、`management 200`，公网 `https://api.openstaryu.com/` 与 `https://admin.openstaryu.com/management.html` 均为 200。
+
+### 上一轮变更说明（6987d860 / f819c3e）
 
 仅后端部署。本轮处理 Anthropic 已下架 `claude-fable-5` 后仍有客户缓存/手写旧模型名继续请求的问题：
 
