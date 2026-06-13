@@ -36,21 +36,19 @@ func TestCodexStaticModelsIncludeGPT55(t *testing.T) {
 	assertGPT55ModelInfo(t, "lookup", model)
 }
 
-func TestClaudeStaticModelsIncludeFable5(t *testing.T) {
+func TestClaudeStaticModelsExcludeFable5(t *testing.T) {
 	model := findModelInfo(GetClaudeModels(), "claude-fable-5")
-	if model == nil {
-		t.Fatal("expected claude static models to include claude-fable-5")
+	if model != nil {
+		t.Fatal("expected claude static models to exclude claude-fable-5")
 	}
-	assertClaudeFable5ModelInfo(t, "claude", model)
 
 	model = LookupStaticModelInfo("claude-fable-5")
-	if model == nil {
-		t.Fatal("expected LookupStaticModelInfo to find claude-fable-5")
+	if model != nil {
+		t.Fatal("expected LookupStaticModelInfo to exclude claude-fable-5")
 	}
-	assertClaudeFable5ModelInfo(t, "lookup", model)
 }
 
-func TestClaudeBuiltinsRetainFable5WhenRemoteCatalogOmitsIt(t *testing.T) {
+func TestClaudeModelsFilterFable5FromStaleRemoteCatalog(t *testing.T) {
 	t.Cleanup(func() {
 		if err := loadModelsFromBytes(embeddedModelsJSON, "test cleanup"); err != nil {
 			t.Fatalf("cleanup load embedded models: %v", err)
@@ -58,12 +56,20 @@ func TestClaudeBuiltinsRetainFable5WhenRemoteCatalogOmitsIt(t *testing.T) {
 	})
 
 	data := validTestModelsCatalog()
-	data.Claude = []*ModelInfo{{
-		ID:      "claude-sonnet-4-6",
-		Object:  "model",
-		OwnedBy: "anthropic",
-		Type:    "claude",
-	}}
+	data.Claude = []*ModelInfo{
+		{
+			ID:      "claude-fable-5",
+			Object:  "model",
+			OwnedBy: "anthropic",
+			Type:    "claude",
+		},
+		{
+			ID:      "claude-sonnet-4-6",
+			Object:  "model",
+			OwnedBy: "anthropic",
+			Type:    "claude",
+		},
+	}
 	raw, err := marshalStaticModelsForTest(data)
 	if err != nil {
 		t.Fatalf("marshal test catalog: %v", err)
@@ -73,10 +79,16 @@ func TestClaudeBuiltinsRetainFable5WhenRemoteCatalogOmitsIt(t *testing.T) {
 	}
 
 	model := findModelInfo(GetClaudeModels(), "claude-fable-5")
-	if model == nil {
-		t.Fatal("expected claude builtins to retain claude-fable-5 when remote catalog omits it")
+	if model != nil {
+		t.Fatal("expected stale remote claude-fable-5 to be filtered")
 	}
-	assertClaudeFable5ModelInfo(t, "remote override", model)
+	model = findModelInfo(GetClaudeModels(), "claude-sonnet-4-6")
+	if model == nil {
+		t.Fatal("expected non-deprecated Claude model to remain")
+	}
+	if model = LookupStaticModelInfo("claude-fable-5"); model != nil {
+		t.Fatal("expected LookupStaticModelInfo to filter stale claude-fable-5")
+	}
 }
 
 func TestWithXAIBuiltinsAddsVideoModel(t *testing.T) {
@@ -142,48 +154,6 @@ func findModelInfo(models []*ModelInfo, id string) *ModelInfo {
 		}
 	}
 	return nil
-}
-
-func assertClaudeFable5ModelInfo(t *testing.T, source string, model *ModelInfo) {
-	t.Helper()
-
-	if model.ID != "claude-fable-5" {
-		t.Fatalf("%s id mismatch: got %q", source, model.ID)
-	}
-	if model.Object != "model" {
-		t.Fatalf("%s object mismatch: got %q", source, model.Object)
-	}
-	if model.Created != 1780963200 {
-		t.Fatalf("%s created timestamp mismatch: got %d", source, model.Created)
-	}
-	if model.OwnedBy != "anthropic" {
-		t.Fatalf("%s owned_by mismatch: got %q", source, model.OwnedBy)
-	}
-	if model.Type != "claude" {
-		t.Fatalf("%s type mismatch: got %q", source, model.Type)
-	}
-	if model.DisplayName != "Claude Fable 5" {
-		t.Fatalf("%s display name mismatch: got %q", source, model.DisplayName)
-	}
-	if model.ContextLength != 1000000 {
-		t.Fatalf("%s context length mismatch: got %d", source, model.ContextLength)
-	}
-	if model.MaxCompletionTokens != 64000 {
-		t.Fatalf("%s max completion tokens mismatch: got %d", source, model.MaxCompletionTokens)
-	}
-	if model.Thinking == nil {
-		t.Fatalf("%s missing thinking support", source)
-	}
-
-	want := []string{"low", "medium", "high", "xhigh", "max"}
-	if len(model.Thinking.Levels) != len(want) {
-		t.Fatalf("%s thinking level count mismatch: got %d, want %d", source, len(model.Thinking.Levels), len(want))
-	}
-	for i, level := range want {
-		if model.Thinking.Levels[i] != level {
-			t.Fatalf("%s thinking level %d mismatch: got %q, want %q", source, i, model.Thinking.Levels[i], level)
-		}
-	}
 }
 
 func assertGPT55ModelInfo(t *testing.T, source string, model *ModelInfo) {

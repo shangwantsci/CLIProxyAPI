@@ -9,6 +9,11 @@ const LocalRequestGuardErrorCode = "claude_mimicry_guard_blocked"
 // wrongly mark healthy accounts as request-error.
 const LocalRequestTooLargeErrorCode = "claude_request_too_large"
 
+// LocalUnavailableModelErrorCode marks a request rejected locally because the
+// requested model is known to be unavailable upstream. The request never reaches
+// upstream, so account health must not be changed.
+const LocalUnavailableModelErrorCode = "claude_model_unavailable"
+
 // Error describes an authentication related failure in a provider agnostic format.
 type Error struct {
 	// Code is a short machine readable identifier.

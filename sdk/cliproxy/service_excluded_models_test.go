@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	internalregistry "github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -27,7 +28,7 @@ func TestRegisterModelsForAuth_UsesPreMergedExcludedModelsAttribute(t *testing.T
 		},
 	}
 
-	registry := GlobalModelRegistry()
+	registry := internalregistry.GetGlobalRegistry()
 	registry.UnregisterClient(auth.ID)
 	t.Cleanup(func() {
 		registry.UnregisterClient(auth.ID)
@@ -62,6 +63,47 @@ func TestRegisterModelsForAuth_UsesPreMergedExcludedModelsAttribute(t *testing.T
 	}
 	if !seenGlobalExcluded {
 		t.Fatal("expected global excluded model to be present when attribute override is set")
+	}
+}
+
+func TestRegisterModelsForAuth_FiltersUnavailableClaudeFableFromConfiguredModels(t *testing.T) {
+	service := &Service{
+		cfg: &config.Config{
+			ClaudeKey: []config.ClaudeKey{
+				{
+					APIKey: "key-claude-config-models",
+					Models: []internalconfig.ClaudeModel{
+						{Name: "claude-fable-5"},
+						{Name: "claude-opus-4-8"},
+					},
+				},
+			},
+		},
+	}
+	auth := &coreauth.Auth{
+		ID:       "auth-claude-config-models",
+		Provider: "claude",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind": "api_key",
+			"api_key":   "key-claude-config-models",
+		},
+	}
+
+	registry := internalregistry.GetGlobalRegistry()
+	registry.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		registry.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(auth)
+
+	models := registry.GetModelsForClient(auth.ID)
+	if findModelInfoForServiceTest(models, "claude-fable-5") != nil {
+		t.Fatal("expected configured claude-fable-5 to be filtered from registered models")
+	}
+	if findModelInfoForServiceTest(models, "claude-opus-4-8") == nil {
+		t.Fatal("expected non-deprecated configured Claude model to remain registered")
 	}
 }
 
@@ -131,4 +173,13 @@ func TestRegisterModelsForAuth_OpenAICompatibilityImageModelType(t *testing.T) {
 	if chatModel.Thinking == nil {
 		t.Fatal("expected chat model to keep default thinking support")
 	}
+}
+
+func findModelInfoForServiceTest(models []*internalregistry.ModelInfo, id string) *internalregistry.ModelInfo {
+	for _, model := range models {
+		if model != nil && strings.EqualFold(strings.TrimSpace(model.ID), id) {
+			return model
+		}
+	}
+	return nil
 }

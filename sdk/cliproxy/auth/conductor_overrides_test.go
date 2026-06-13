@@ -925,6 +925,57 @@ func TestManager_Execute_LocalRequestTooLargeErrorDoesNotMarkAuthUnhealthy(t *te
 	}
 }
 
+func TestManager_Execute_LocalUnavailableModelErrorDoesNotMarkAuthUnhealthy(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"auth-fable-unavailable": &Error{
+				Code:       LocalUnavailableModelErrorCode,
+				HTTPStatus: http.StatusNotFound,
+				Message:    "Claude Fable 5 is not available. Please use Opus 4.8.",
+				Retryable:  false,
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	auth := &Auth{ID: "auth-fable-unavailable", Provider: "claude"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "claude-fable-5"
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+	_, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatal("expected unavailable-model error")
+	}
+	if statusCodeFromError(errExecute) != http.StatusNotFound {
+		t.Fatalf("execute status = %d, want %d", statusCodeFromError(errExecute), http.StatusNotFound)
+	}
+
+	updated, ok := m.GetByID("auth-fable-unavailable")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to remain registered")
+	}
+	if updated.Unavailable {
+		t.Fatalf("auth.Unavailable = true, want false: unavailable model was blocked locally, account is healthy")
+	}
+	if updated.Status == StatusError {
+		t.Fatalf("auth.Status = StatusError, want healthy: local unavailable model must not mark the account as request-error")
+	}
+	if updated.LastError != nil {
+		t.Fatalf("auth.LastError = %#v, want nil: local unavailable model must not be recorded on the account", updated.LastError)
+	}
+	if state := updated.ModelStates[model]; state != nil && state.Unavailable {
+		t.Fatalf("model state should not be cooled down by local unavailable-model block: %#v", state)
+	}
+}
+
 func TestManager_Execute_DisableCooling_RetriesAfter429RetryAfter(t *testing.T) {
 	prev := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)

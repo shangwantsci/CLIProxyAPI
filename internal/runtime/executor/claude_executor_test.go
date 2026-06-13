@@ -2191,44 +2191,132 @@ func TestClaudeExecutor_Execute_Opus48MatchesClaudeCode214RequestShape(t *testin
 	}
 }
 
-func TestClaudeExecutor_Execute_FableDefaultThinkingMatchesClaudeCode2170(t *testing.T) {
-	var gotBody []byte
+func TestClaudeExecutor_Execute_BlocksUnavailableFableBeforeUpstream(t *testing.T) {
+	var upstreamHits int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var err error
-		gotBody, err = io.ReadAll(r.Body)
-		if err != nil {
-			t.Fatalf("read body: %v", err)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-fable-5","role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+		upstreamHits++
+		t.Fatalf("unavailable Fable request should be blocked before upstream, got %s", r.URL.Path)
 	}))
 	defer server.Close()
 
 	executor := NewClaudeExecutor(&config.Config{})
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"api_key":  "key-fable-default-thinking",
-		"base_url": server.URL,
-	}}
-	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
-
-	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-fable-unavailable",
+		Provider: "claude",
+		Attributes: map[string]string{
+			"api_key":  "key-fable-unavailable",
+			"base_url": server.URL,
+		},
+	}
+	req := cliproxyexecutor.Request{
 		Model:   "claude-fable-5",
-		Payload: payload,
-	}, cliproxyexecutor.Options{
-		SourceFormat: sdktranslator.FromString("claude"),
-	})
-	if err != nil {
-		t.Fatalf("Execute error: %v", err)
+		Payload: []byte(`{"model":"claude-fable-5","messages":[{"role":"user","content":"hi"}]}`),
 	}
 
-	if got := gjson.GetBytes(gotBody, "thinking.type").String(); got != "adaptive" {
-		t.Fatalf("thinking.type = %q, want adaptive; body=%s", got, string(gotBody))
+	_, err := executor.Execute(context.Background(), auth, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err == nil {
+		t.Fatal("expected unavailable model error")
 	}
-	if got := gjson.GetBytes(gotBody, "output_config.effort").String(); got != "high" {
-		t.Fatalf("output_config.effort = %q, want high; body=%s", got, string(gotBody))
+	var authErr *cliproxyauth.Error
+	if !errors.As(err, &authErr) {
+		t.Fatalf("error = %T %v, want cliproxyauth.Error", err, err)
 	}
-	if got := gjson.GetBytes(gotBody, "max_tokens").Int(); got != 64000 {
-		t.Fatalf("max_tokens = %d, want 64000; body=%s", got, string(gotBody))
+	if authErr.Code != cliproxyauth.LocalUnavailableModelErrorCode {
+		t.Fatalf("code = %q, want %q", authErr.Code, cliproxyauth.LocalUnavailableModelErrorCode)
+	}
+	if authErr.HTTPStatus != http.StatusNotFound {
+		t.Fatalf("HTTPStatus = %d, want %d", authErr.HTTPStatus, http.StatusNotFound)
+	}
+	if authErr.Retryable {
+		t.Fatalf("Retryable = true, want false")
+	}
+	if !strings.Contains(authErr.Message, "Claude Fable 5 is not available") {
+		t.Fatalf("message = %q, want Fable unavailable guidance", authErr.Message)
+	}
+	if upstreamHits != 0 {
+		t.Fatalf("upstream hits = %d, want 0", upstreamHits)
+	}
+}
+
+func TestClaudeExecutor_ExecuteStream_BlocksUnavailableFableBeforeUpstream(t *testing.T) {
+	var upstreamHits int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits++
+		t.Fatalf("unavailable Fable stream request should be blocked before upstream, got %s", r.URL.Path)
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-fable-stream-unavailable",
+		Provider: "claude",
+		Attributes: map[string]string{
+			"api_key":  "key-fable-stream-unavailable",
+			"base_url": server.URL,
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "claude-fable-5",
+		Payload: []byte(`{"model":"claude-fable-5","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+	}
+
+	_, err := executor.ExecuteStream(context.Background(), auth, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err == nil {
+		t.Fatal("expected unavailable model error")
+	}
+	var authErr *cliproxyauth.Error
+	if !errors.As(err, &authErr) {
+		t.Fatalf("error = %T %v, want cliproxyauth.Error", err, err)
+	}
+	if authErr.Code != cliproxyauth.LocalUnavailableModelErrorCode {
+		t.Fatalf("code = %q, want %q", authErr.Code, cliproxyauth.LocalUnavailableModelErrorCode)
+	}
+	if authErr.HTTPStatus != http.StatusNotFound {
+		t.Fatalf("HTTPStatus = %d, want %d", authErr.HTTPStatus, http.StatusNotFound)
+	}
+	if upstreamHits != 0 {
+		t.Fatalf("upstream hits = %d, want 0", upstreamHits)
+	}
+}
+
+func TestClaudeExecutor_CountTokens_BlocksUnavailableFableBeforeUpstream(t *testing.T) {
+	var upstreamHits int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits++
+		t.Fatalf("unavailable Fable count_tokens request should be blocked before upstream, got %s", r.URL.Path)
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-fable-count-unavailable",
+		Provider: "claude",
+		Attributes: map[string]string{
+			"api_key":  "key-fable-count-unavailable",
+			"base_url": server.URL,
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "claude-fable-5",
+		Payload: []byte(`{"model":"claude-fable-5","messages":[{"role":"user","content":"hi"}]}`),
+	}
+
+	_, err := executor.CountTokens(context.Background(), auth, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err == nil {
+		t.Fatal("expected unavailable model error")
+	}
+	var authErr *cliproxyauth.Error
+	if !errors.As(err, &authErr) {
+		t.Fatalf("error = %T %v, want cliproxyauth.Error", err, err)
+	}
+	if authErr.Code != cliproxyauth.LocalUnavailableModelErrorCode {
+		t.Fatalf("code = %q, want %q", authErr.Code, cliproxyauth.LocalUnavailableModelErrorCode)
+	}
+	if authErr.HTTPStatus != http.StatusNotFound {
+		t.Fatalf("HTTPStatus = %d, want %d", authErr.HTTPStatus, http.StatusNotFound)
+	}
+	if upstreamHits != 0 {
+		t.Fatalf("upstream hits = %d, want 0", upstreamHits)
 	}
 }
 
@@ -3096,8 +3184,8 @@ func TestRepairClaudeRequestShape_ConvertsHaikuAdaptiveEffortToBudget(t *testing
 	}
 }
 
-func TestRepairClaudeRequestShape_PreservesFableXHighAdaptiveEffort(t *testing.T) {
-	payload := []byte(`{"model":"claude-fable-5","thinking":{"type":"adaptive"},"output_config":{"effort":"xhigh"},"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+func TestRepairClaudeRequestShape_PreservesOpus48XHighAdaptiveEffort(t *testing.T) {
+	payload := []byte(`{"model":"claude-opus-4-8","thinking":{"type":"adaptive"},"output_config":{"effort":"xhigh"},"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
 	out := repairClaudeRequestShape(payload)
 
 	if got := gjson.GetBytes(out, "output_config.effort").String(); got != "xhigh" {

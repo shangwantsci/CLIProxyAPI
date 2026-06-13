@@ -1132,6 +1132,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 			}
 		}
 		models = applyExcludedModels(models, excluded)
+		models = registry.FilterUnavailableClaudeModels(models)
 	case "codex":
 		codexPlanType := ""
 		if a.Attributes != nil {

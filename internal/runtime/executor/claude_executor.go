@@ -242,6 +242,20 @@ func claudeConcurrencyLimitError() error {
 	}
 }
 
+func claudeUnavailableModelError(model string) error {
+	return &cliproxyauth.Error{
+		Code:       cliproxyauth.LocalUnavailableModelErrorCode,
+		Message:    fmt.Sprintf("Claude Fable 5 is not available. Please use Opus 4.8. Requested model: %s", strings.TrimSpace(model)),
+		Retryable:  false,
+		HTTPStatus: http.StatusNotFound,
+	}
+}
+
+func claudeModelUnavailableUpstream(model string) bool {
+	model = normalizeClaudeModelName(model)
+	return model == "claude-fable-5" || strings.HasPrefix(model, "claude-fable-5-")
+}
+
 func (e *ClaudeExecutor) Identifier() string { return "claude" }
 
 // PrepareRequest injects Claude credentials into the outgoing HTTP request.
@@ -291,6 +305,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	if claudeModelUnavailableUpstream(baseModel) {
+		return resp, claudeUnavailableModelError(baseModel)
+	}
 
 	apiKey, baseURL := claudeCreds(auth)
 	if baseURL == "" {
@@ -505,6 +522,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	if claudeModelUnavailableUpstream(baseModel) {
+		return nil, claudeUnavailableModelError(baseModel)
+	}
 
 	apiKey, baseURL := claudeCreds(auth)
 	if baseURL == "" {
@@ -837,6 +857,9 @@ func validateClaudeStreamingResponse(data []byte) error {
 
 func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	if claudeModelUnavailableUpstream(baseModel) {
+		return cliproxyexecutor.Response{}, claudeUnavailableModelError(baseModel)
+	}
 
 	apiKey, baseURL := claudeCreds(auth)
 	if baseURL == "" {

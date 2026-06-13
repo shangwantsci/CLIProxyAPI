@@ -8,7 +8,6 @@ import (
 
 const (
 	codexBuiltinImageModelID      = "gpt-image-2"
-	claudeBuiltinFable5ModelID    = "claude-fable-5"
 	xaiBuiltinImageModelID        = "grok-imagine-image"
 	xaiBuiltinImageQualityModelID = "grok-imagine-image-quality"
 	xaiBuiltinVideoModelID        = "grok-imagine-video"
@@ -32,7 +31,7 @@ type staticModelsJSON struct {
 
 // GetClaudeModels returns the standard Claude model definitions.
 func GetClaudeModels() []*ModelInfo {
-	return WithClaudeBuiltins(cloneModelInfos(getModels().Claude))
+	return FilterUnavailableClaudeModels(cloneModelInfos(getModels().Claude))
 }
 
 // GetGeminiModels returns the standard Gemini model definitions.
@@ -97,12 +96,6 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(models, codexBuiltinImageModelInfo())
 }
 
-// WithClaudeBuiltins injects hard-coded Claude model definitions that should
-// not depend on remote models.json updates.
-func WithClaudeBuiltins(models []*ModelInfo) []*ModelInfo {
-	return upsertModelInfos(models, claudeBuiltinFable5ModelInfo())
-}
-
 // WithXAIBuiltins injects hard-coded xAI image/video model definitions that should
 // not depend on remote models.json updates.
 func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
@@ -118,24 +111,6 @@ func codexBuiltinImageModelInfo() *ModelInfo {
 		Type:        "openai",
 		DisplayName: "GPT Image 2",
 		Version:     codexBuiltinImageModelID,
-	}
-}
-
-func claudeBuiltinFable5ModelInfo() *ModelInfo {
-	return &ModelInfo{
-		ID:                  claudeBuiltinFable5ModelID,
-		Object:              "model",
-		Created:             1780963200, // 2026-06-09
-		OwnedBy:             "anthropic",
-		Type:                "claude",
-		DisplayName:         "Claude Fable 5",
-		Description:         "Most capable generally available Claude model with always-on adaptive thinking.",
-		ContextLength:       1000000,
-		MaxCompletionTokens: 64000,
-		Thinking: &ThinkingSupport{
-			DynamicAllowed: true,
-			Levels:         []string{"low", "medium", "high", "xhigh", "max"},
-		},
 	}
 }
 
@@ -224,6 +199,31 @@ func upsertModelInfos(models []*ModelInfo, extras ...*ModelInfo) []*ModelInfo {
 	return filtered
 }
 
+// FilterUnavailableClaudeModels removes Claude models that are known to have
+// been withdrawn upstream but may still appear in stale static or configured
+// catalogs.
+func FilterUnavailableClaudeModels(models []*ModelInfo) []*ModelInfo {
+	if len(models) == 0 {
+		return models
+	}
+	filtered := make([]*ModelInfo, 0, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		if isUnavailableClaudeModelID(model.ID) {
+			continue
+		}
+		filtered = append(filtered, model)
+	}
+	return filtered
+}
+
+func isUnavailableClaudeModelID(modelID string) bool {
+	modelID = strings.ToLower(strings.TrimSpace(modelID))
+	return modelID == "claude-fable-5" || strings.HasPrefix(modelID, "claude-fable-5-")
+}
+
 // cloneModelInfos returns a shallow copy of the slice with each element deep-cloned.
 func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 	if len(models) == 0 {
@@ -296,6 +296,9 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 	}
 	for _, models := range allModels {
 		for _, m := range models {
+			if m != nil && isUnavailableClaudeModelID(m.ID) {
+				continue
+			}
 			if m != nil && m.ID == modelID {
 				return cloneModelInfo(m)
 			}
