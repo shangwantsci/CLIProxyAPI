@@ -58,18 +58,29 @@ Traefik 动态路由：
 
 ## 当前部署版本
 
-- 后端提交：`a827ab9d`（修复 Claude `tool_use/tool_result` 邻接 400 与采样参数互斥 400）
+- 后端提交：`6987d860`（下架并本地拦截已不可用的 Claude Fable 5）
 - 前端提交：`f819c3e`（未变）
-- 最近一次按本文档部署时间：`2026-06-13T00:35:15+00:00`
-- 本次部署后端二进制 sha256：`ac36d5064e8371702f29133072d897422f38600b179276c05da351b394022006`
-- 本次部署后端压缩包 sha256：`97a2dbbdec060ce50b35ab1bbfdcf20a9680d543a719283eb7a2d3bea9af86f5`
+- 最近一次按本文档部署时间：`2026-06-13T03:04:05+00:00`
+- 本次部署后端二进制 sha256：`6dd2607452582379733386b45e2230dc1c6d5c71c3bdb850196514aeb9fc949d`
+- 本次部署后端压缩包 sha256：`29d20022ac9333d5d1f18008271077946bc1d618520996240f4a3812db5a5ee4`
 - 本次部署前端 management.html sha256：未变，沿用 `c251642a1e153348df79a706c8b647c5e8975fd9ed9f2de1adb6697a7c986dfe`
-- 部署前运行版本 backend=`10c06c12`，frontend=`f819c3e`
-- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260613-003512.bak`（可回滚到 `10c06c12`）
-- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260613-003512.tgz`
+- 部署前运行版本 backend=`a827ab9d`，frontend=`f819c3e`
+- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260613-030402.bak`（可回滚到 `a827ab9d`）
+- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260613-030402.tgz`
 - 部署后 `auths` 目录下 1217 个文件（含 `proxy_pool.json`；账号增删由晓宇手动管理）
 
-### 本轮变更说明（a827ab9d / f819c3e）
+### 本轮变更说明（6987d860 / f819c3e）
+
+仅后端部署。本轮处理 Anthropic 已下架 `claude-fable-5` 后仍有客户缓存/手写旧模型名继续请求的问题：
+
+1. 从嵌入式 Claude 模型目录移除 `claude-fable-5`，并在静态/远程/配置模型注册时统一过滤 `claude-fable-5` 与 `claude-fable-5-*`，避免号池 `/v1/models` 继续暴露已下架模型。
+2. Claude 非流式、流式、count tokens 三条 executor 入口在发往上游前本地拦截 `claude-fable-5` / `claude-fable-5-*`，返回 404 和 `Claude Fable 5 is not available. Please use Opus 4.8.`，不再打 Anthropic 官方。
+3. 新增本地错误码 `claude_model_unavailable` 并纳入本地请求 guard 分类；调度器收到该错误会直接返回客户端，不写账号 `LastError`、不标记账号不可用、不触发模型冷却。
+4. 旧的 Fable 专属 thinking 能力测试迁移到动态 Mythos 测试，保留 always-adaptive thinking 逻辑覆盖，但不再要求静态目录保留 Fable 元数据。
+5. 本地验证：`git diff --check`、`go test ./internal/registry -run 'TestClaudeStaticModelsExcludeFable5|TestClaudeModelsFilterFable5FromStaleRemoteCatalog' -count=1`、`go test ./internal/thinking ./sdk/cliproxy ./sdk/cliproxy/auth -count=1`、`go test ./internal/runtime/executor -skip 'TestEnsureAccessToken_WarmTokenLoadsCreditsHint|TestUpdateAntigravityCreditsBalance_LoadCodeAssistUserAgent' -count=1`、`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o ... ./cmd/server` 均通过。`go test ./internal/registry -run TestCodexFreeModelsExcludeGPT55 -count=1` 仍有既存 Codex free tier 断言失败，和本轮 Claude/Fable 变更无关。
+6. 部署后验证：容器 `cpa-claude-proxy` 为 Up，运行二进制 sha256 与本地一致，`8318` 仍只监听 `127.0.0.1`，本机 `healthz 200`、`management 200`，公网 `https://api.openstaryu.com/` 与 `https://admin.openstaryu.com/management.html` 均为 200。
+
+### 上一轮变更说明（a827ab9d / f819c3e）
 
 仅后端部署。本轮修复客户常见的两类 Claude 上游 400：
 
