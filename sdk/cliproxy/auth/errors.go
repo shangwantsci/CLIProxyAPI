@@ -14,6 +14,11 @@ const LocalRequestTooLargeErrorCode = "claude_request_too_large"
 // upstream, so account health must not be changed.
 const LocalUnavailableModelErrorCode = "claude_model_unavailable"
 
+// LocalPromptTooLongErrorCode marks a request rejected locally because the
+// estimated Claude prompt tokens exceed the model context window. The request
+// never reaches upstream, so account health must not be changed.
+const LocalPromptTooLongErrorCode = "claude_prompt_too_long"
+
 // Error describes an authentication related failure in a provider agnostic format.
 type Error struct {
 	// Code is a short machine readable identifier.

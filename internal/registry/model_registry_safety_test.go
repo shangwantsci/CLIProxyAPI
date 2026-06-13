@@ -140,6 +140,9 @@ func TestLookupModelInfoReturnsCloneForStaticDefinitions(t *testing.T) {
 	if first == nil || first.Thinking == nil || len(first.Thinking.Levels) == 0 {
 		t.Fatalf("expected static model with thinking levels, got %+v", first)
 	}
+	if first.ContextLength != 1000000 {
+		t.Fatalf("claude-sonnet-4-6 ContextLength = %d, want 1000000", first.ContextLength)
+	}
 	first.Thinking.Levels[0] = "mutated"
 
 	second := LookupModelInfo("claude-sonnet-4-6")

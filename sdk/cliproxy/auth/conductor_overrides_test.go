@@ -1314,6 +1314,8 @@ func TestIsRequestInvalidError_ClaudeMessageShapeBadRequests(t *testing.T) {
 		`status_code=400, ` + "`top_p`" + ` is deprecated for this model.`,
 		`status_code=400, messages: text content blocks must be non-empty`,
 		`status_code=400, messages: text content blocks must contain non-whitespace text`,
+		`status_code=400, messages.0.content.0.text: Field required`,
+		`status_code=400, prompt is too long: 1001594 tokens > 1000000 maximum`,
 		`status_code=400, This model does not support the effort parameter.`,
 		`status_code=400, tool_choice forces tool use is not compatible with this model.`,
 		`status_code=400, tool_choice: Input should be an object`,

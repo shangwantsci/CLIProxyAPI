@@ -197,6 +197,8 @@ func (m *oauthToolReverseMap) recordProperty(original, renamed string) {
 // omit max_tokens. Prefer registered model metadata before using a fallback.
 const defaultModelMaxTokens = 1024
 
+const claudeOneMillionContextTokens int64 = 1_000_000
+
 func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor {
 	return &ClaudeExecutor{cfg: cfg}
 }
@@ -384,6 +386,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Claude Code always computes cch; missing or invalid cch is a detectable fingerprint.
 	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
 		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
+	}
+
+	if err = checkClaudePromptTokenLimit(bodyForUpstream, baseModel, extraBetas); err != nil {
+		return resp, err
 	}
 
 	if err = checkClaudeUpstreamBodySize(bodyForUpstream, e.cfg.ClaudeMaxRequestBytes); err != nil {
@@ -595,6 +601,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// Enable cch signing by default for OAuth tokens (not just experimental flag).
 	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
 		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
+	}
+
+	if err = checkClaudePromptTokenLimit(bodyForUpstream, baseModel, extraBetas); err != nil {
+		return nil, err
 	}
 
 	if err = checkClaudeUpstreamBodySize(bodyForUpstream, e.cfg.ClaudeMaxRequestBytes); err != nil {
@@ -1193,6 +1203,46 @@ func checkClaudeUpstreamBodySize(body []byte, limit int) error {
 	return nil
 }
 
+func checkClaudePromptTokenLimit(body []byte, model string, extraBetas []string) error {
+	limit := claudePromptTokenLimit(model, extraBetas)
+	if limit <= 0 {
+		return nil
+	}
+	count := helps.EstimateClaudeBillableInputTokens(model, "claude", body)
+	if count <= 0 || count <= limit {
+		return nil
+	}
+	return &cliproxyauth.Error{
+		Code:       cliproxyauth.LocalPromptTooLongErrorCode,
+		Message:    fmt.Sprintf("prompt is too long: estimated %d tokens > %d maximum; reduce attachments or shorten the conversation history", count, limit),
+		Retryable:  false,
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+func claudePromptTokenLimit(model string, extraBetas []string) int64 {
+	model = strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
+	var limit int64
+	if info := registry.LookupModelInfo(model, "claude"); info != nil && info.ContextLength > 0 {
+		limit = int64(info.ContextLength)
+	}
+	if claudeBetasIncludeContext1M(extraBetas) && limit < claudeOneMillionContextTokens {
+		limit = claudeOneMillionContextTokens
+	}
+	return limit
+}
+
+func claudeBetasIncludeContext1M(extraBetas []string) bool {
+	for _, betaList := range extraBetas {
+		for _, beta := range strings.Split(betaList, ",") {
+			if strings.TrimSpace(beta) == claudeContext1MBeta {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func parseClaudeUpstreamRetryAfter(headers http.Header, now time.Time) *time.Duration {
 	if headers == nil {
 		return nil
@@ -1651,6 +1701,8 @@ func repairClaudeContextManagement(body []byte) []byte {
 }
 
 func repairClaudeMessageContent(body []byte) []byte {
+	body = repairClaudeSystemTextBlocks(body)
+
 	messages := gjson.GetBytes(body, "messages")
 	if !messages.Exists() || !messages.IsArray() {
 		return body
@@ -1670,27 +1722,83 @@ func repairClaudeMessageContent(body []byte) []byte {
 		if !content.IsArray() {
 			return true
 		}
-		cleaned := make([]any, 0, len(content.Array()))
-		removed := false
-		content.ForEach(func(_, block gjson.Result) bool {
-			if block.IsObject() && block.Get("type").String() == "text" && block.Get("text").Exists() && strings.TrimSpace(block.Get("text").String()) == "" {
-				removed = true
-				return true
-			}
-			cleaned = append(cleaned, block.Value())
-			return true
-		})
-		if removed {
+		if cleaned, changed := repairClaudeContentBlockArray(content.Value(), true); changed {
 			path := fmt.Sprintf("messages.%d.content", messageIndex.Int())
-			if len(cleaned) > 0 {
-				body, _ = sjson.SetBytes(body, path, cleaned)
-			} else {
-				body, _ = sjson.SetBytes(body, path, []any{map[string]any{"type": "text", "text": claudeEmptyTextPlaceholder}})
-			}
+			body, _ = sjson.SetBytes(body, path, cleaned)
 		}
 		return true
 	})
 	return body
+}
+
+func repairClaudeSystemTextBlocks(body []byte) []byte {
+	system := gjson.GetBytes(body, "system")
+	if !system.Exists() || !system.IsArray() {
+		return body
+	}
+	if cleaned, changed := repairClaudeContentBlockArray(system.Value(), true); changed {
+		body, _ = sjson.SetBytes(body, "system", cleaned)
+	}
+	return body
+}
+
+func repairClaudeContentBlockArray(value any, fallbackWhenEmpty bool) ([]any, bool) {
+	blocks, ok := value.([]any)
+	if !ok {
+		return nil, false
+	}
+
+	cleaned := make([]any, 0, len(blocks))
+	changed := false
+	for _, block := range blocks {
+		blockObject, ok := block.(map[string]any)
+		if !ok {
+			cleaned = append(cleaned, block)
+			continue
+		}
+		if blockType, _ := blockObject["type"].(string); blockType == "text" && claudeTextBlockNeedsRepair(blockObject) {
+			changed = true
+			continue
+		}
+		if content, exists := blockObject["content"]; exists {
+			if repairedContent, repaired := repairClaudeNestedContentBlocks(content); repaired {
+				copyBlock := make(map[string]any, len(blockObject))
+				for key, val := range blockObject {
+					copyBlock[key] = val
+				}
+				copyBlock["content"] = repairedContent
+				block = copyBlock
+				changed = true
+			}
+		}
+		cleaned = append(cleaned, block)
+	}
+	if changed && len(cleaned) == 0 && fallbackWhenEmpty {
+		cleaned = []any{map[string]any{"type": "text", "text": claudeEmptyTextPlaceholder}}
+	}
+	return cleaned, changed
+}
+
+func repairClaudeNestedContentBlocks(value any) (any, bool) {
+	if blocks, ok := value.([]any); ok {
+		repaired, changed := repairClaudeContentBlockArray(blocks, true)
+		if changed {
+			return repaired, true
+		}
+	}
+	return value, false
+}
+
+func claudeTextBlockNeedsRepair(block map[string]any) bool {
+	rawText, ok := block["text"]
+	if !ok {
+		return true
+	}
+	text, ok := rawText.(string)
+	if !ok {
+		return true
+	}
+	return strings.TrimSpace(text) == ""
 }
 
 func repairClaudeSystemRoleMessages(body []byte) []byte {

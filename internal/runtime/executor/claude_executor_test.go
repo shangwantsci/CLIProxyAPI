@@ -3241,6 +3241,21 @@ func TestRepairClaudeRequestShape_RemovesEmptyTextBlocks(t *testing.T) {
 	}
 }
 
+func TestRepairClaudeRequestShape_RemovesTextBlocksMissingText(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text"},{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if got := gjson.GetBytes(out, "messages.0.content.#").Int(); got != 1 {
+		t.Fatalf("content count = %d, want 1; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.text").String(); got != "hi" {
+		t.Fatalf("remaining text = %q, want hi; out=%s", got, string(out))
+	}
+	if gjson.GetBytes(out, "messages.0.content.0.text").Type != gjson.String {
+		t.Fatalf("remaining text must be a string; out=%s", string(out))
+	}
+}
+
 func TestRepairClaudeRequestShape_ReplacesOnlyEmptyTextBlockWithPlaceholder(t *testing.T) {
 	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":""}]}]}`)
 	out := repairClaudeRequestShape(payload)
@@ -3256,12 +3271,60 @@ func TestRepairClaudeRequestShape_ReplacesOnlyEmptyTextBlockWithPlaceholder(t *t
 	}
 }
 
+func TestRepairClaudeRequestShape_ReplacesOnlyTextBlockMissingTextWithPlaceholder(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text"}]}]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if got := gjson.GetBytes(out, "messages.0.content.#").Int(); got != 1 {
+		t.Fatalf("content count = %d, want 1; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.type").String(); got != "text" {
+		t.Fatalf("content.0.type = %q, want text; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.text").String(); got != "." {
+		t.Fatalf("content.0.text = %q, want non-whitespace placeholder; out=%s", got, string(out))
+	}
+}
+
+func TestRepairClaudeRequestShape_ReplacesOnlyNullTextBlockWithPlaceholder(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":null}]}]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if got := gjson.GetBytes(out, "messages.0.content.0.text").String(); got != "." {
+		t.Fatalf("content.0.text = %q, want non-whitespace placeholder; out=%s", got, string(out))
+	}
+}
+
 func TestRepairClaudeRequestShape_ReplacesWhitespaceOnlyTextWithNonWhitespacePlaceholder(t *testing.T) {
 	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":" \n\t "}]}]}`)
 	out := repairClaudeRequestShape(payload)
 
 	if got := gjson.GetBytes(out, "messages.0.content.0.text").String(); got != "." {
 		t.Fatalf("content.0.text = %q, want non-whitespace placeholder; out=%s", got, string(out))
+	}
+}
+
+func TestRepairClaudeRequestShape_RepairsNestedToolResultTextBlocks(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"text"},{"type":"text","text":"tool ok"}]}]}]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if got := gjson.GetBytes(out, "messages.0.content.0.content.#").Int(); got != 1 {
+		t.Fatalf("tool_result content count = %d, want 1; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.content.0.text").String(); got != "tool ok" {
+		t.Fatalf("tool_result text = %q, want tool ok; out=%s", got, string(out))
+	}
+}
+
+func TestRepairClaudeRequestShape_RepairsSystemTextBlocksMissingText(t *testing.T) {
+	payload := []byte(`{"system":[{"type":"text"},{"type":"text","text":"system ok"}],"messages":[{"role":"user","content":"hi"}]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if got := gjson.GetBytes(out, "system.#").Int(); got != 1 {
+		t.Fatalf("system block count = %d, want 1; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "system.0.text").String(); got != "system ok" {
+		t.Fatalf("system text = %q, want system ok; out=%s", got, string(out))
 	}
 }
 

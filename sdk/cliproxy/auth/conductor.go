@@ -2768,7 +2768,8 @@ func isLocalRequestGuardError(err error) bool {
 	}
 	return authErr.Code == LocalRequestGuardErrorCode ||
 		authErr.Code == LocalRequestTooLargeErrorCode ||
-		authErr.Code == LocalUnavailableModelErrorCode
+		authErr.Code == LocalUnavailableModelErrorCode ||
+		authErr.Code == LocalPromptTooLongErrorCode
 }
 
 func isUnauthorizedError(err error) bool {
@@ -3113,6 +3114,15 @@ func isClientRequestInvalidMessage(message string) bool {
 		return true
 	}
 	if strings.Contains(lower, "text content blocks must contain non-whitespace text") {
+		return true
+	}
+	if strings.Contains(lower, "field required") &&
+		(strings.Contains(lower, ".text:") || strings.Contains(lower, "text: field required")) {
+		return true
+	}
+	if strings.Contains(lower, "prompt is too long") &&
+		strings.Contains(lower, "tokens") &&
+		strings.Contains(lower, "maximum") {
 		return true
 	}
 	if strings.Contains(lower, "does not support the effort parameter") {
