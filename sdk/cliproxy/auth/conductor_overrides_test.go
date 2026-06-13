@@ -1268,6 +1268,8 @@ func TestIsRequestInvalidError_ClaudeMessageShapeBadRequests(t *testing.T) {
 		`status_code=400, tool_choice: Input should be an object`,
 		`status_code=400, messages: Unexpected role "tool". Allowed roles are "user" or "assistant".`,
 		`status_code=400, tools.0: Input tag 'function' found using 'type' does not match any of the expected tags`,
+		`status_code=400, messages.4: tool_use ids were found without tool_result blocks immediately after: toolu_01XjsYQijisKV19Tr7nNKmLH. Each tool_use block must have a corresponding tool_result block in the next message.`,
+		`status_code=400, ` + "`temperature`" + ` and ` + "`top_p`" + ` cannot both be specified for this model. Please use only one.`,
 	}
 
 	for _, message := range tests {

@@ -3102,6 +3102,12 @@ func isClientRequestInvalidMessage(message string) bool {
 	if strings.Contains(lower, "top_p") && strings.Contains(lower, "deprecated for this model") {
 		return true
 	}
+	if strings.Contains(lower, "tool_use ids were found without tool_result blocks immediately after") {
+		return true
+	}
+	if strings.Contains(lower, "temperature") && strings.Contains(lower, "top_p") && strings.Contains(lower, "cannot both be specified") {
+		return true
+	}
 	if strings.Contains(lower, "text content blocks must be non-empty") {
 		return true
 	}

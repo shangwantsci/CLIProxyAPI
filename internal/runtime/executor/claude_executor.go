@@ -1375,13 +1375,15 @@ func disableThinkingIfToolChoiceForced(body []byte) []byte {
 // thinking is enabled. Anthropic rejects temperatures other than 1 when
 // thinking.type is enabled/adaptive/auto.
 func normalizeClaudeTemperatureForThinking(body []byte) []byte {
-	if !gjson.GetBytes(body, "temperature").Exists() {
-		return body
-	}
-
 	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
 	switch thinkingType {
 	case "enabled", "adaptive", "auto":
+		if gjson.GetBytes(body, "top_p").Exists() {
+			body, _ = sjson.DeleteBytes(body, "top_p")
+		}
+		if !gjson.GetBytes(body, "temperature").Exists() {
+			return body
+		}
 		if temp := gjson.GetBytes(body, "temperature"); temp.Exists() && temp.Type == gjson.Number && temp.Float() == 1 {
 			return body
 		}
@@ -1394,7 +1396,7 @@ func repairClaudeRequestShape(body []byte) []byte {
 	body = repairClaudeRequestShapeBeforeThinking(body)
 	body = repairClaudeContextManagement(body)
 	body = repairClaudeAssistantPrefill(body)
-	body = repairClaudeDeprecatedTemperature(body)
+	body = repairClaudeSamplingParameters(body)
 	body = repairClaudeToolChoice(body)
 	return body
 }
@@ -1407,6 +1409,7 @@ func repairClaudeRequestShapeBeforeThinking(body []byte) []byte {
 	body = repairClaudeMessageContent(body)
 	body = repairClaudeFunctionTools(body)
 	body = repairClaudeToolUseIDs(body)
+	body = repairClaudeToolResultAdjacency(body)
 	return body
 }
 
@@ -1941,18 +1944,28 @@ func claudeRequestUsesActiveThinking(body []byte) bool {
 	}
 }
 
-func repairClaudeDeprecatedTemperature(body []byte) []byte {
-	if !gjson.GetBytes(body, "temperature").Exists() {
+func repairClaudeSamplingParameters(body []byte) []byte {
+	if claudeModelUsesDeprecatedSamplingParameters(gjson.GetBytes(body, "model").String()) {
+		body, _ = sjson.DeleteBytes(body, "temperature")
+		body, _ = sjson.DeleteBytes(body, "top_p")
+		body, _ = sjson.DeleteBytes(body, "top_k")
 		return body
 	}
-	if !claudeModelUsesDeprecatedTemperature(gjson.GetBytes(body, "model").String()) {
-		return body
+	if gjson.GetBytes(body, "temperature").Exists() && gjson.GetBytes(body, "top_p").Exists() {
+		body, _ = sjson.DeleteBytes(body, "top_p")
 	}
-	body, _ = sjson.DeleteBytes(body, "temperature")
 	return body
 }
 
+func repairClaudeDeprecatedTemperature(body []byte) []byte {
+	return repairClaudeSamplingParameters(body)
+}
+
 func claudeModelUsesDeprecatedTemperature(model string) bool {
+	return claudeModelUsesDeprecatedSamplingParameters(model)
+}
+
+func claudeModelUsesDeprecatedSamplingParameters(model string) bool {
 	model = normalizeClaudeModelName(model)
 	return model == "claude-fable-5" || strings.HasPrefix(model, "claude-fable-5-") ||
 		model == "claude-mythos-5" || strings.HasPrefix(model, "claude-mythos-5-") ||
@@ -2175,6 +2188,163 @@ func repairClaudeToolUseIDs(body []byte) []byte {
 	})
 
 	return body
+}
+
+func repairClaudeToolResultAdjacency(body []byte) []byte {
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return body
+	}
+
+	source := messages.Array()
+	repaired := make([]any, 0, len(source))
+	changed := false
+	for i := 0; i < len(source); i++ {
+		message := source[i]
+		repaired = append(repaired, message.Value())
+		toolUseIDs := claudeAssistantToolUseIDs(message)
+		if len(toolUseIDs) == 0 {
+			continue
+		}
+		if i+1 < len(source) && strings.EqualFold(source[i+1].Get("role").String(), "user") {
+			next, nextChanged := claudeUserMessageWithToolResultsFirst(source[i+1], toolUseIDs)
+			repaired = append(repaired, next)
+			i++
+			if nextChanged {
+				changed = true
+			}
+			continue
+		}
+		repaired = append(repaired, map[string]any{
+			"role":    "user",
+			"content": claudeSyntheticToolResultBlocks(toolUseIDs),
+		})
+		changed = true
+	}
+
+	if changed {
+		body, _ = sjson.SetBytes(body, "messages", repaired)
+	}
+	return body
+}
+
+func claudeAssistantToolUseIDs(message gjson.Result) []string {
+	if !strings.EqualFold(message.Get("role").String(), "assistant") {
+		return nil
+	}
+	content := message.Get("content")
+	if !content.Exists() || !content.IsArray() {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	ids := make([]string, 0)
+	content.ForEach(func(_, block gjson.Result) bool {
+		if !block.IsObject() || block.Get("type").String() != "tool_use" {
+			return true
+		}
+		id := strings.TrimSpace(block.Get("id").String())
+		if id == "" {
+			return true
+		}
+		if _, ok := seen[id]; ok {
+			return true
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+		return true
+	})
+	return ids
+}
+
+func claudeUserMessageWithToolResultsFirst(message gjson.Result, requiredIDs []string) (any, bool) {
+	content := message.Get("content")
+	required := map[string]struct{}{}
+	for _, id := range requiredIDs {
+		required[id] = struct{}{}
+	}
+
+	existingRequired := map[string]any{}
+	extraToolResults := make([]any, 0)
+	nonToolResults := make([]any, 0)
+	changed := false
+	if content.Exists() && content.IsArray() {
+		blocks := content.Array()
+		seenNonToolResult := false
+		for _, block := range blocks {
+			if block.IsObject() && block.Get("type").String() == "tool_result" {
+				if seenNonToolResult {
+					changed = true
+				}
+				id := strings.TrimSpace(block.Get("tool_use_id").String())
+				if _, ok := required[id]; ok {
+					if _, exists := existingRequired[id]; !exists {
+						existingRequired[id] = block.Value()
+					} else {
+						extraToolResults = append(extraToolResults, block.Value())
+					}
+				} else {
+					extraToolResults = append(extraToolResults, block.Value())
+				}
+				continue
+			}
+			seenNonToolResult = true
+			nonToolResults = append(nonToolResults, block.Value())
+		}
+		for idx, id := range requiredIDs {
+			if idx >= len(blocks) ||
+				!blocks[idx].IsObject() ||
+				blocks[idx].Get("type").String() != "tool_result" ||
+				strings.TrimSpace(blocks[idx].Get("tool_use_id").String()) != id {
+				changed = true
+				break
+			}
+		}
+	} else {
+		changed = true
+		if text := strings.TrimSpace(claudeMessageContentAsText(content)); text != "" && text != claudeEmptyTextPlaceholder {
+			nonToolResults = append(nonToolResults, map[string]any{"type": "text", "text": text})
+		}
+	}
+
+	repairedContent := make([]any, 0, len(requiredIDs)+len(extraToolResults)+len(nonToolResults))
+	for _, id := range requiredIDs {
+		if existing, ok := existingRequired[id]; ok {
+			repairedContent = append(repairedContent, existing)
+			continue
+		}
+		repairedContent = append(repairedContent, claudeSyntheticToolResultBlock(id))
+		changed = true
+	}
+	repairedContent = append(repairedContent, extraToolResults...)
+	repairedContent = append(repairedContent, nonToolResults...)
+	if !changed {
+		return message.Value(), false
+	}
+
+	repaired := map[string]any{}
+	for key, value := range message.Map() {
+		repaired[key] = value.Value()
+	}
+	repaired["role"] = "user"
+	repaired["content"] = repairedContent
+	return repaired, true
+}
+
+func claudeSyntheticToolResultBlocks(ids []string) []any {
+	blocks := make([]any, 0, len(ids))
+	for _, id := range ids {
+		blocks = append(blocks, claudeSyntheticToolResultBlock(id))
+	}
+	return blocks
+}
+
+func claudeSyntheticToolResultBlock(id string) map[string]any {
+	return map[string]any{
+		"type":        "tool_result",
+		"tool_use_id": id,
+		"content":     "Tool result unavailable.",
+		"is_error":    true,
+	}
 }
 
 func isValidClaudeToolUseID(id string) bool {

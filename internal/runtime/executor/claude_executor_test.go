@@ -3453,6 +3453,93 @@ func TestRepairClaudeRequestShape_NormalizesInvalidToolUseIDs(t *testing.T) {
 	}
 }
 
+func TestRepairClaudeRequestShape_InsertsMissingToolResultImmediatelyAfterToolUse(t *testing.T) {
+	payload := []byte(`{"messages":[
+		{"role":"user","content":[{"type":"text","text":"run it"}]},
+		{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01","name":"lookup","input":{"q":"x"}}]},
+		{"role":"assistant","content":[{"type":"text","text":"continuing without result"}]}
+	]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 4 {
+		t.Fatalf("messages count = %d, want inserted tool_result message; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.2.role").String(); got != "user" {
+		t.Fatalf("inserted message role = %q, want user; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.2.content.0.type").String(); got != "tool_result" {
+		t.Fatalf("inserted content type = %q, want tool_result; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.2.content.0.tool_use_id").String(); got != "toolu_01" {
+		t.Fatalf("inserted tool_use_id = %q, want toolu_01; out=%s", got, string(out))
+	}
+	if !gjson.GetBytes(out, "messages.2.content.0.is_error").Bool() {
+		t.Fatalf("inserted tool_result should be marked as an error; out=%s", string(out))
+	}
+}
+
+func TestRepairClaudeRequestShape_ReordersAndCompletesToolResults(t *testing.T) {
+	payload := []byte(`{"messages":[
+		{"role":"assistant","content":[
+			{"type":"tool_use","id":"toolu_01","name":"first","input":{}},
+			{"type":"tool_use","id":"toolu_02","name":"second","input":{}}
+		]},
+		{"role":"user","content":[
+			{"type":"text","text":"Here are the results:"},
+			{"type":"tool_result","tool_use_id":"toolu_02","content":"ok"}
+		]}
+	]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if got := gjson.GetBytes(out, "messages.1.content.0.type").String(); got != "tool_result" {
+		t.Fatalf("content.0.type = %q, want tool_result; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.tool_use_id").String(); got != "toolu_01" {
+		t.Fatalf("content.0.tool_use_id = %q, want missing toolu_01 first; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.1.tool_use_id").String(); got != "toolu_02" {
+		t.Fatalf("content.1.tool_use_id = %q, want existing toolu_02 second; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.2.type").String(); got != "text" {
+		t.Fatalf("content.2.type = %q, want original text after tool_results; out=%s", got, string(out))
+	}
+}
+
+func TestRepairClaudeRequestShape_RemovesDeprecatedSamplingParametersForNewClaudeModels(t *testing.T) {
+	payload := []byte(`{"model":"claude-opus-4-8","temperature":0.2,"top_p":0.5,"top_k":10,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	out := repairClaudeRequestShape(payload)
+
+	for _, field := range []string{"temperature", "top_p", "top_k"} {
+		if gjson.GetBytes(out, field).Exists() {
+			t.Fatalf("%s should be removed for new Claude models; out=%s", field, string(out))
+		}
+	}
+}
+
+func TestRepairClaudeRequestShape_RemovesTopPWhenTemperatureAlsoSpecified(t *testing.T) {
+	payload := []byte(`{"model":"claude-sonnet-4-6","temperature":0.2,"top_p":0.5,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	out := repairClaudeRequestShape(payload)
+
+	if got := gjson.GetBytes(out, "temperature").Float(); got != 0.2 {
+		t.Fatalf("temperature = %v, want 0.2; out=%s", got, string(out))
+	}
+	if gjson.GetBytes(out, "top_p").Exists() {
+		t.Fatalf("top_p should be removed when temperature is also specified; out=%s", string(out))
+	}
+}
+
+func TestNormalizeClaudeTemperatureForThinking_RemovesTopP(t *testing.T) {
+	payload := []byte(`{"model":"claude-sonnet-4-6","thinking":{"type":"adaptive"},"temperature":0.2,"top_p":0.5}`)
+	out := normalizeClaudeTemperatureForThinking(payload)
+
+	if got := gjson.GetBytes(out, "temperature").Float(); got != 1 {
+		t.Fatalf("temperature = %v, want 1; out=%s", got, string(out))
+	}
+	if gjson.GetBytes(out, "top_p").Exists() {
+		t.Fatalf("top_p should be removed for active thinking requests; out=%s", string(out))
+	}
+}
+
 func TestInferClaudeBetasFromBody_AddsContextManagementBeta(t *testing.T) {
 	payload := []byte(`{"context_management":{"edits":[{"type":"clear_thinking_20251015"}]},"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
 	betas := inferClaudeBetasFromBody(payload, nil)
