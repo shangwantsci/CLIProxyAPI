@@ -58,18 +58,30 @@ Traefik 动态路由：
 
 ## 当前部署版本
 
-- 后端提交：`10c06c12`（高并发下 pick/reserve 原子化，OpenAI 兼容流式首包前 SSE keepalive 默认开启）
-- 前端提交：`f819c3e`（管理面板新增清会话入口，并把默认会话上限对齐为 10）
-- 最近一次按本文档部署时间：`2026-06-12T11:20:45+00:00`
-- 本次部署后端二进制 sha256：`60fbb13f7acbf95ec2ab12af57e9cef794f3b7eebb079a341c9028994903afd5`
-- 本次部署后端压缩包 sha256：`9a08d65f9abbcacba94e6a54300a1ed47ae15c71f485fc84fa029bad86ea5885`
+- 后端提交：`a827ab9d`（修复 Claude `tool_use/tool_result` 邻接 400 与采样参数互斥 400）
+- 前端提交：`f819c3e`（未变）
+- 最近一次按本文档部署时间：`2026-06-13T00:35:15+00:00`
+- 本次部署后端二进制 sha256：`ac36d5064e8371702f29133072d897422f38600b179276c05da351b394022006`
+- 本次部署后端压缩包 sha256：`97a2dbbdec060ce50b35ab1bbfdcf20a9680d543a719283eb7a2d3bea9af86f5`
 - 本次部署前端 management.html sha256：未变，沿用 `c251642a1e153348df79a706c8b647c5e8975fd9ed9f2de1adb6697a7c986dfe`
-- 部署前运行版本 backend=`e2eced84`，frontend=`f819c3e`
-- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260612-112041.bak`（可回滚到 `e2eced84`）
-- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260612-112041.tgz`
-- 部署后账号数：1024 个 auth entries，`auths` 目录下 1025 个文件（含 `proxy_pool.json`；账号增删由晓宇手动管理）
+- 部署前运行版本 backend=`10c06c12`，frontend=`f819c3e`
+- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260613-003512.bak`（可回滚到 `10c06c12`）
+- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260613-003512.tgz`
+- 部署后 `auths` 目录下 1217 个文件（含 `proxy_pool.json`；账号增删由晓宇手动管理）
 
-### 本轮变更说明（10c06c12 / f819c3e）
+### 本轮变更说明（a827ab9d / f819c3e）
+
+仅后端部署。本轮修复客户常见的两类 Claude 上游 400：
+
+1. 出站前修复 assistant `tool_use` 历史消息：如果下一条消息不是 user，则立即插入 user `tool_result`；如果下一条 user 缺少部分 `tool_result`，则补齐缺失项；如果 text 排在 `tool_result` 前面，则重排为 `tool_result` 在前、原 text 在后。
+2. 合成的缺失 `tool_result` 使用 `is_error: true` 和 `Tool result unavailable.`，避免伪造成工具成功执行，同时满足 Anthropic 对工具结果邻接和排序的格式要求。
+3. 采样参数归一化：`claude-fable-5`、`claude-mythos-5`、`claude-mythos-preview`、`claude-opus-4-8`、`claude-opus-4-7` 出站前删除 `temperature/top_p/top_k`；其他模型同时带 `temperature` 和 `top_p` 时删除 `top_p`。
+4. active thinking 请求继续把 `temperature` 归一化为 `1`，并同步删除 `top_p`，避免 thinking 限制和采样参数互斥同时触发 400。
+5. 新增 `tool_use ids were found without tool_result blocks immediately after` 与 ``temperature` and `top_p` cannot both be specified` 两类纯文本 400 到客户端请求形态分类，不污染账号健康、不触发全池账号惩罚。
+6. 本地验证：`go test ./internal/runtime/executor -run 'Claude|RepairClaude|NormalizeClaude' -count=1`、`go test ./sdk/cliproxy/auth -count=1`、`go test ./internal/runtime/executor -skip 'TestEnsureAccessToken_WarmTokenLoadsCreditsHint|TestUpdateAntigravityCreditsBalance_LoadCodeAssistUserAgent' -count=1`、`git diff --check`、`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o ... ./cmd/server` 均通过。未跳过的 `go test ./internal/runtime/executor` 仍有两个既存 Antigravity credit mock URL 测试失败，和本轮 Claude 变更无关。
+7. 部署后验证：容器 `cpa-claude-proxy` 为 Up，运行二进制 sha256 与本地一致，`8318` 仍只监听 `127.0.0.1`，本机 `healthz 200`、`management 200`，公网 `https://api.openstaryu.com/` 与 `https://admin.openstaryu.com/management.html` 均为 200。
+
+### 上一轮变更说明（10c06c12 / f819c3e）
 
 仅后端部署。本轮继续针对客户高并发首字慢和 NewAPI `client_gone/context canceled` 激增做号池侧止血：
 
