@@ -93,6 +93,14 @@ func TestClaudePromptTokenLimitUsesStaticSonnet46OneMillion(t *testing.T) {
 	}
 }
 
+func TestClaudePromptTokenLimitKeepsOfficialOneMillionWhenDynamicCatalogIsStale(t *testing.T) {
+	registerClaudeContextLengthModel(t, "claude-sonnet-4-6", 200_000)
+
+	if got := claudePromptTokenLimit("claude-sonnet-4-6", nil); got != 1_000_000 {
+		t.Fatalf("claude-sonnet-4-6 prompt token limit = %d, want 1000000", got)
+	}
+}
+
 func TestCheckClaudePromptTokenLimitSkipsUnknownContextLength(t *testing.T) {
 	body := []byte(`{"model":"test-claude-unknown-context","messages":[{"role":"user","content":"alpha beta gamma delta epsilon zeta"}]}`)
 	if err := checkClaudePromptTokenLimit(body, "test-claude-unknown-context", nil); err != nil {

@@ -1226,10 +1226,31 @@ func claudePromptTokenLimit(model string, extraBetas []string) int64 {
 	if info := registry.LookupModelInfo(model, "claude"); info != nil && info.ContextLength > 0 {
 		limit = int64(info.ContextLength)
 	}
+	if minimum := claudeOfficialMinimumPromptTokenLimit(model); limit < minimum {
+		limit = minimum
+	}
 	if claudeBetasIncludeContext1M(extraBetas) && limit < claudeOneMillionContextTokens {
 		limit = claudeOneMillionContextTokens
 	}
 	return limit
+}
+
+func claudeOfficialMinimumPromptTokenLimit(model string) int64 {
+	model = normalizeClaudeModelName(model)
+	switch {
+	case model == "claude-sonnet-4-6" || strings.HasPrefix(model, "claude-sonnet-4-6-"):
+		return claudeOneMillionContextTokens
+	case model == "claude-opus-4-8" || strings.HasPrefix(model, "claude-opus-4-8-"):
+		return claudeOneMillionContextTokens
+	case model == "claude-opus-4-7" || strings.HasPrefix(model, "claude-opus-4-7-"):
+		return claudeOneMillionContextTokens
+	case model == "claude-opus-4-6" || strings.HasPrefix(model, "claude-opus-4-6-"):
+		return claudeOneMillionContextTokens
+	case model == "claude-mythos-preview" || strings.HasPrefix(model, "claude-mythos-preview-"):
+		return claudeOneMillionContextTokens
+	default:
+		return 0
+	}
 }
 
 func claudeBetasIncludeContext1M(extraBetas []string) bool {
