@@ -58,16 +58,26 @@ Traefik 动态路由：
 
 ## 当前部署版本
 
-- 后端提交：`e774bd53`（Claude prompt too long 本地拦截、1M 上下文修正、缺失 text 字段修复）
+- 后端提交：`18f30ea1`（Claude 1M 上下文官方模型下限保护，防止远端旧模型目录降级为 200k）
 - 前端提交：`f819c3e`（未变）
-- 最近一次按本文档部署时间：`2026-06-13T03:53:03+00:00`
-- 本次部署后端二进制 sha256：`324cb5b5a489e0c458b73978c9c9eaf3e5bf8eefd36878573adff58db033eda9`
-- 本次部署后端压缩包 sha256：`5fe498c16d60c8aea1bd55dfc8ddc34ae654645391647c5e562e9caf82f8ed18`
+- 最近一次按本文档部署时间：`2026-06-14T10:32:47+00:00`
+- 本次部署后端二进制 sha256：`7efb97f2d3ceeffc5b0ada0c09967a00d9cea408b5f06b23014822edaef95aa1`
+- 本次部署后端压缩包 sha256：`25999afea73e71fcc2a080b0309820d6c5eeac3816cb7221804f63669eb8396a`
 - 本次部署前端 management.html sha256：未变，沿用 `c251642a1e153348df79a706c8b647c5e8975fd9ed9f2de1adb6697a7c986dfe`
-- 部署前运行版本 backend=`6987d860`，frontend=`f819c3e`
-- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260613-035300.bak`（可回滚到 `6987d860`）
-- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260613-035300.tgz`
-- 部署后 `auths` 目录下 1192 个文件（含 `proxy_pool.json`；账号增删由晓宇手动管理）
+- 部署前运行版本 backend=`e774bd53`，frontend=`f819c3e`
+- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260614-103157.bak`（可回滚到 `e774bd53`）
+- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260614-103157.tgz`
+- 部署后 `auths` 目录下 1401 个文件（含 `proxy_pool.json`；账号增删由晓宇手动管理）
+
+### 本轮变更说明（18f30ea1 / f819c3e）
+
+仅后端部署。本轮修复 `claude-sonnet-4-6` 官方 1M 上下文模型被远端旧模型目录覆盖成 200k 后，本地 `claude_prompt_too_long` guard 误拦截的问题。
+
+1. Claude prompt token 上限计算在读取动态/静态模型注册表后，额外套用官方 1M 模型下限保护；远端目录即使把 `claude-sonnet-4-6` 写成 `200000`，本地仍按 `1000000` 判断。
+2. 1M 下限保护覆盖 `claude-sonnet-4-6`、`claude-opus-4-6`、`claude-opus-4-7`、`claude-opus-4-8`、`claude-mythos-preview` 及其带后缀模型名；未知模型和自定义模型仍按原注册表逻辑处理。
+3. 新增回归测试，模拟动态模型注册表中 `claude-sonnet-4-6` 被旧目录降级为 `200000`，验证 `claudePromptTokenLimit` 仍返回 `1000000`。
+4. 本地验证：`git diff --check`、`go test ./internal/runtime/executor -run 'Test(CheckClaudeUpstreamBodySize|CheckClaudePromptTokenLimit|ClaudePromptTokenLimit)' -count=1`、`go test ./internal/runtime/executor -skip 'TestEnsureAccessToken_WarmTokenLoadsCreditsHint|TestUpdateAntigravityCreditsBalance_LoadCodeAssistUserAgent' -count=1`、`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o ... ./cmd/server` 均通过。未跳过的 executor 全包仍有两个既存 Antigravity credit mock URL 测试失败，和本轮 Claude 变更无关。
+5. 部署后验证：容器 `cpa-claude-proxy` 为 Up，运行二进制 sha256 与本地一致，`8318` 仍只监听 `127.0.0.1`，本机 `healthz 200`、`management 200`，公网 `https://api.openstaryu.com/` 与 `https://admin.openstaryu.com/management.html` 均为 200。
 
 ### 本轮变更说明（e774bd53 / f819c3e）
 
