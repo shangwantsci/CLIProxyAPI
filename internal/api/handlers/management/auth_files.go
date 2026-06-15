@@ -843,6 +843,10 @@ func claudeAuthHealthStatus(auth *coreauth.Auth, now time.Time) string {
 			return "expiring_soon"
 		}
 	}
+	switch reason {
+	case "rate_limited", "quota_cooldown", "rpm_cooldown", "session_full":
+		return "cooling"
+	}
 	if auth.Unavailable {
 		return "unavailable"
 	}
@@ -870,17 +874,23 @@ func claudeAuthStatusReason(auth *coreauth.Auth, now time.Time) string {
 		switch strings.ToLower(strings.TrimSpace(auth.LastError.Code)) {
 		case "unauthorized", "auth_expired":
 			return "auth_expired"
-		case "rate_limited":
-			return "rate_limited"
 		}
 		if isClaudeUnauthorizedAuthError(auth.LastError) {
 			return "auth_expired"
 		}
-		if auth.LastError.HTTPStatus == http.StatusTooManyRequests {
-			return "rate_limited"
-		}
 		if isClaudeSubscriptionError(auth.LastError) {
 			return "subscription_issue"
+		}
+	}
+	if auth.Quota.Exceeded && (auth.Quota.NextRecoverAt.IsZero() || auth.Quota.NextRecoverAt.After(now)) {
+		return "quota_cooldown"
+	}
+	if auth.LastError != nil {
+		if strings.EqualFold(strings.TrimSpace(auth.LastError.Code), "rate_limited") {
+			return "rate_limited"
+		}
+		if auth.LastError.HTTPStatus == http.StatusTooManyRequests {
+			return "rate_limited"
 		}
 	}
 	if auth.Disabled || auth.Status == coreauth.StatusDisabled {
@@ -891,9 +901,6 @@ func claudeAuthStatusReason(auth *coreauth.Auth, now time.Time) string {
 	}
 	if isClaudeUnauthorizedAuthError(auth.LastError) {
 		return "auth_expired"
-	}
-	if auth.Quota.Exceeded && (auth.Quota.NextRecoverAt.IsZero() || auth.Quota.NextRecoverAt.After(now)) {
-		return "quota_cooldown"
 	}
 	runtimeStats := auth.RuntimeUsageStats(now)
 	if runtimeStats.RPMLimit > 0 && runtimeStats.CurrentRPM >= runtimeStats.RPMLimit {

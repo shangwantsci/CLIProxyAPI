@@ -77,7 +77,7 @@ const (
 	// burn CPU at idle.
 	refreshIneffectiveBackoff = 30 * time.Second
 	quotaBackoffBase          = time.Second
-	quotaBackoffMax           = 30 * time.Minute
+	quotaBackoffMax           = 10 * time.Minute
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -122,6 +122,10 @@ type Selector interface {
 type StoppableSelector interface {
 	Selector
 	Stop()
+}
+
+type authInvalidatingSelector interface {
+	InvalidateAuth(authID string)
 }
 
 // Hook captures lifecycle callbacks for observing auth changes.
@@ -2352,10 +2356,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	clearModelQuota := false
 	setModelQuota := false
 	var authSnapshot *Auth
+	invalidateSelectedAuth := false
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
 		now := time.Now()
+		persistentStateBefore := authHasPersistedRuntimeState(auth)
 		clientRequestError := !result.Success && isClientRequestResultError(result.Error)
 		neutralUpstreamError := !result.Success && isNeutralUpstreamTransientResultError(result.Error)
 		responseHeaders := logging.GetResponseHeaders(ctx)
@@ -2539,12 +2545,22 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 
-		_ = m.persist(ctx, auth)
-		authSnapshot = auth.Clone()
+		if passiveClaudeQuotaHeaders || persistentStateBefore || authHasPersistedRuntimeState(auth) {
+			_ = m.persist(ctx, auth)
+			authSnapshot = auth.Clone()
+		} else if authAvailabilityAffectsRouting(auth) {
+			authSnapshot = auth.Clone()
+		}
+		if authSnapshot != nil && (shouldSuspendModel || authAvailabilityAffectsRouting(authSnapshot)) {
+			invalidateSelectedAuth = true
+		}
 	}
 	m.mu.Unlock()
 	if m.scheduler != nil && authSnapshot != nil {
 		m.scheduler.upsertAuth(authSnapshot)
+	}
+	if invalidateSelectedAuth {
+		m.invalidateSelectorAuth(result.AuthID)
 	}
 	if shouldRefreshAuth && result.AuthID != "" {
 		m.queueRefreshReschedule(result.AuthID)
@@ -2563,6 +2579,50 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	}
 
 	m.hook.OnResult(ctx, result)
+}
+
+func authHasPersistedRuntimeState(auth *Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if auth.Disabled {
+		return true
+	}
+	if auth.Status != "" && auth.Status != StatusActive {
+		return true
+	}
+	if strings.TrimSpace(auth.StatusMessage) != "" {
+		return true
+	}
+	if auth.Unavailable || !auth.NextRetryAfter.IsZero() || !auth.NextRefreshAfter.IsZero() {
+		return true
+	}
+	if auth.Quota.Exceeded || strings.TrimSpace(auth.Quota.Reason) != "" || !auth.Quota.NextRecoverAt.IsZero() || auth.Quota.BackoffLevel != 0 {
+		return true
+	}
+	return auth.LastError != nil
+}
+
+func authAvailabilityAffectsRouting(auth *Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if auth.Disabled || auth.Status == StatusDisabled {
+		return true
+	}
+	return auth.Unavailable && auth.NextRetryAfter.After(time.Now())
+}
+
+func (m *Manager) invalidateSelectorAuth(authID string) {
+	if m == nil || strings.TrimSpace(authID) == "" {
+		return
+	}
+	m.mu.RLock()
+	selector := m.selector
+	m.mu.RUnlock()
+	if invalidating, ok := selector.(authInvalidatingSelector); ok && invalidating != nil {
+		invalidating.InvalidateAuth(authID)
+	}
 }
 
 func ensureModelState(auth *Auth, model string) *ModelState {
@@ -2846,7 +2906,11 @@ func permanentAuthDisabledDetails(statusCode int, rawMessage string) (string, st
 		}
 	}
 
-	if strings.Contains(combined, "account_banned") {
+	if strings.Contains(combined, "account_banned") ||
+		strings.Contains(combined, "account has been banned") ||
+		strings.Contains(combined, "account is banned") ||
+		strings.Contains(combined, "has been banned") ||
+		strings.Contains(combined, "banned or disabled") {
 		if message == "" || strings.HasPrefix(message, "{") {
 			message = "Claude account has been banned or disabled."
 		}

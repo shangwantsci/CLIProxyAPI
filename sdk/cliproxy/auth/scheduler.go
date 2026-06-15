@@ -967,7 +967,20 @@ func buildReadyBucket(entries []*scheduledAuth) *readyBucket {
 
 // buildReadyView creates either a flat view or a grouped parent/child view for rotation.
 func buildReadyView(entries []*scheduledAuth) readyView {
-	view := readyView{flat: append([]*scheduledAuth(nil), entries...)}
+	flat := make([]*scheduledAuth, 0, len(entries))
+	for _, entry := range entries {
+		weight := 1
+		if entry != nil {
+			weight = authSchedulingWeight(entry.auth)
+		}
+		if weight < 1 {
+			weight = 1
+		}
+		for i := 0; i < weight; i++ {
+			flat = append(flat, entry)
+		}
+	}
+	view := readyView{flat: flat}
 	if len(entries) == 0 {
 		return view
 	}

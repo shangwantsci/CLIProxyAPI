@@ -135,6 +135,46 @@ func TestListClaudeAuthHealth_ExposesClaudeAccountRuntimeState(t *testing.T) {
 	}
 }
 
+func TestClaudeAuthHealth_429ResultIsStableQuotaCooldown(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	model := "claude-opus-4-8"
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "claude-429",
+		Provider: "claude",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"type": "claude"},
+	}); err != nil {
+		t.Fatalf("register claude auth: %v", err)
+	}
+
+	manager.MarkResult(context.Background(), coreauth.Result{
+		AuthID:   "claude-429",
+		Provider: "claude",
+		Model:    model,
+		Success:  false,
+		Error: &coreauth.Error{
+			HTTPStatus: http.StatusTooManyRequests,
+			Message:    "rate limit exceeded",
+			Retryable:  true,
+		},
+	})
+
+	updated, ok := manager.GetByID("claude-429")
+	if !ok {
+		t.Fatal("updated auth not found")
+	}
+	now := time.Now()
+	if got := claudeAuthStatusReason(updated, now); got != "quota_cooldown" {
+		t.Fatalf("status_reason = %q, want quota_cooldown", got)
+	}
+	if got := claudeAuthHealthStatus(updated, now); got != "cooling" {
+		t.Fatalf("health_status = %q, want cooling", got)
+	}
+	if got := claudeAuthRouteState(updated, now, claudeAuthStatusReason(updated, now)); got != "cooling" {
+		t.Fatalf("route_state = %q, want cooling", got)
+	}
+}
+
 func TestListClaudeAuthHealth_SeparatesPermanentAndManualDisabledStates(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)
@@ -232,6 +272,30 @@ func TestListClaudeAuthHealth_SeparatesPermanentAndManualDisabledStates(t *testi
 	}
 	if got, _ := manual["cleanup_recommended"].(bool); got {
 		t.Fatalf("manual cleanup_recommended = %v, want false", got)
+	}
+}
+
+func TestClaudeAuthHealth_BannedPhraseWinsOverManualDisabled(t *testing.T) {
+	auth := &coreauth.Auth{
+		ID:       "claude-banned",
+		Provider: "claude",
+		Disabled: true,
+		Status:   coreauth.StatusDisabled,
+		LastError: &coreauth.Error{
+			Message:    "Your account has been banned.",
+			HTTPStatus: http.StatusForbidden,
+		},
+	}
+	now := time.Now()
+
+	if got := claudeAuthStatusReason(auth, now); got != "account_banned" {
+		t.Fatalf("status_reason = %q, want account_banned", got)
+	}
+	if got := claudeAuthHealthStatus(auth, now); got != "permanent_disabled" {
+		t.Fatalf("health_status = %q, want permanent_disabled", got)
+	}
+	if got := claudeAuthRouteState(auth, now, claudeAuthStatusReason(auth, now)); got != "permanent_disabled" {
+		t.Fatalf("route_state = %q, want permanent_disabled", got)
 	}
 }
 

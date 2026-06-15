@@ -2,8 +2,10 @@ package auth
 
 import (
 	"context"
+	"net/http"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type countingStore struct {
@@ -62,6 +64,83 @@ func TestWithSkipPersist_DisablesRegisterPersistence(t *testing.T) {
 	}
 	if got := store.saveCount.Load(); got != 0 {
 		t.Fatalf("expected 0 Save calls, got %d", got)
+	}
+}
+
+func TestManagerMarkResultSuccessDoesNotPersistRuntimeOnlyStats(t *testing.T) {
+	store := &countingStore{}
+	mgr := NewManager(store, nil, nil)
+	auth := &Auth{
+		ID:       "auth-1",
+		Provider: "claude",
+		Status:   StatusActive,
+		Metadata: map[string]any{"type": "claude"},
+	}
+	if _, err := mgr.Register(WithSkipPersist(context.Background()), auth); err != nil {
+		t.Fatalf("Register(skipPersist) returned error: %v", err)
+	}
+
+	mgr.MarkResult(context.Background(), Result{
+		AuthID:   "auth-1",
+		Provider: "claude",
+		Model:    "claude-opus-4-8",
+		Success:  true,
+	})
+
+	if got := store.saveCount.Load(); got != 0 {
+		t.Fatalf("expected successful result without persistent state changes to skip Save, got %d", got)
+	}
+	updated, ok := mgr.GetByID("auth-1")
+	if !ok {
+		t.Fatal("auth not found")
+	}
+	if stats := updated.Quality24hStats(time.Now()); stats.Requests != 1 || stats.Success != 1 {
+		t.Fatalf("Quality24hStats = %#v, want one successful request", stats)
+	}
+}
+
+func TestManagerMarkResultQuotaFailurePersistsAndInvalidatesSessionAffinity(t *testing.T) {
+	store := &countingStore{}
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      5 * time.Minute,
+	})
+	mgr := NewManager(store, selector, nil)
+	auth := &Auth{
+		ID:       "auth-1",
+		Provider: "claude",
+		Status:   StatusActive,
+		Metadata: map[string]any{"type": "claude"},
+	}
+	if _, err := mgr.Register(WithSkipPersist(context.Background()), auth); err != nil {
+		t.Fatalf("Register(skipPersist) returned error: %v", err)
+	}
+	mgr.MarkResult(context.Background(), Result{
+		AuthID:   "auth-1",
+		Provider: "claude",
+		Model:    "claude-sonnet-4-6",
+		Success:  true,
+	})
+	cacheKey := "mixed::header:s1::claude-opus-4-8"
+	selector.cache.Set(cacheKey, "auth-1")
+
+	mgr.MarkResult(context.Background(), Result{
+		AuthID:   "auth-1",
+		Provider: "claude",
+		Model:    "claude-opus-4-8",
+		Success:  false,
+		Error: &Error{
+			HTTPStatus: http.StatusTooManyRequests,
+			Message:    "rate limit exceeded",
+			Retryable:  true,
+		},
+	})
+
+	if got := store.saveCount.Load(); got != 1 {
+		t.Fatalf("expected quota failure to persist once, got %d", got)
+	}
+	if _, ok := selector.cache.Get(cacheKey); ok {
+		t.Fatalf("expected quota failure to invalidate session-affinity cache for auth")
 	}
 }
 

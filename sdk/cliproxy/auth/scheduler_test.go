@@ -95,6 +95,32 @@ func TestSchedulerPick_RoundRobinHighestPriority(t *testing.T) {
 	}
 }
 
+func TestSchedulerPick_WeightsClaudePlanTypesWithinPriority(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "max", Provider: "claude", Metadata: map[string]any{"plan_type": "max"}},
+		&Auth{ID: "pro", Provider: "claude", Metadata: map[string]any{"plan_type": "pro"}},
+	)
+
+	counts := map[string]int{}
+	for i := 0; i < 5; i++ {
+		got, errPick := scheduler.pickSingle(context.Background(), "claude", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() #%d error = %v", i, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickSingle() #%d auth = nil", i)
+		}
+		counts[got.ID]++
+	}
+
+	if counts["max"] != 4 || counts["pro"] != 1 {
+		t.Fatalf("selection counts = %#v, want max=4 pro=1", counts)
+	}
+}
+
 func TestSchedulerPick_FillFirstSticksToFirstReady(t *testing.T) {
 	t.Parallel()
 

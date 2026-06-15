@@ -89,6 +89,49 @@ func TestRoundRobinSelectorPick_PriorityBuckets(t *testing.T) {
 	}
 }
 
+func TestRoundRobinSelectorPick_WeightsClaudePlanTypesWithinPriority(t *testing.T) {
+	t.Parallel()
+
+	selector := &RoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "max", Provider: "claude", Metadata: map[string]any{"plan_type": "max"}},
+		{ID: "pro", Provider: "claude", Metadata: map[string]any{"plan_type": "pro"}},
+	}
+
+	counts := map[string]int{}
+	for i := 0; i < 5; i++ {
+		got, err := selector.Pick(context.Background(), "claude", "", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		counts[got.ID]++
+	}
+
+	if counts["max"] != 4 || counts["pro"] != 1 {
+		t.Fatalf("selection counts = %#v, want max=4 pro=1", counts)
+	}
+}
+
+func TestRoundRobinSelectorPick_ExplicitPriorityOverridesPlanWeight(t *testing.T) {
+	t.Parallel()
+
+	selector := &RoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "max", Provider: "claude", Metadata: map[string]any{"plan_type": "max"}},
+		{ID: "pro", Provider: "claude", Attributes: map[string]string{"priority": "10"}, Metadata: map[string]any{"plan_type": "pro"}},
+	}
+
+	for i := 0; i < 3; i++ {
+		got, err := selector.Pick(context.Background(), "claude", "", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		if got.ID != "pro" {
+			t.Fatalf("Pick() #%d auth.ID = %q, want pro", i, got.ID)
+		}
+	}
+}
+
 func TestFillFirstSelectorPick_PriorityFallbackCooldown(t *testing.T) {
 	t.Parallel()
 

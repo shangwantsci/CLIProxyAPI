@@ -652,7 +652,11 @@ func normalizeClaudePermanentAccountError(code, message string) (string, string,
 		return "", "", false
 	}
 	trimmedMessage := strings.TrimSpace(message)
-	if strings.Contains(raw, "account_banned") {
+	if strings.Contains(raw, "account_banned") ||
+		strings.Contains(raw, "account has been banned") ||
+		strings.Contains(raw, "account is banned") ||
+		strings.Contains(raw, "has been banned") ||
+		strings.Contains(raw, "banned or disabled") {
 		if trimmedMessage == "" {
 			trimmedMessage = "Claude account has been banned or disabled."
 		}

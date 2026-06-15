@@ -381,6 +381,29 @@ func TestManager_DisablesClaudeAuthWhenOrganizationDisabled(t *testing.T) {
 	}
 }
 
+func TestNextQuotaCooldownCapsAtTenMinutes(t *testing.T) {
+	cooldown, nextLevel := nextQuotaCooldown(20, false)
+	if cooldown != 10*time.Minute {
+		t.Fatalf("cooldown = %v, want 10m", cooldown)
+	}
+	if nextLevel != 20 {
+		t.Fatalf("nextLevel = %d, want unchanged 20", nextLevel)
+	}
+}
+
+func TestClaudePermanentAccountErrorMatchesBannedPhrase(t *testing.T) {
+	code, message, ok := permanentAuthDisabledDetails(http.StatusForbidden, "Your account has been banned.")
+	if !ok {
+		t.Fatal("expected banned phrase to be recognized as a permanent account error")
+	}
+	if code != "account_banned" {
+		t.Fatalf("code = %q, want account_banned", code)
+	}
+	if message != "Your account has been banned." {
+		t.Fatalf("message = %q, want original message", message)
+	}
+}
+
 func TestManager_RetriesNextAuthWhenClaudeOrganizationDisabled(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 

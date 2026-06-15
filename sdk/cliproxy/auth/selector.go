@@ -128,6 +128,77 @@ func authPriority(auth *Auth) int {
 	return parsed
 }
 
+func authPlanType(auth *Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Attributes != nil {
+		if raw := strings.TrimSpace(auth.Attributes["plan_type"]); raw != "" {
+			return strings.ToLower(raw)
+		}
+	}
+	if auth.Metadata == nil {
+		return ""
+	}
+	raw, ok := auth.Metadata["plan_type"]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch v := raw.(type) {
+	case string:
+		return strings.ToLower(strings.TrimSpace(v))
+	default:
+		return strings.ToLower(strings.TrimSpace(fmt.Sprint(v)))
+	}
+}
+
+func authSchedulingWeight(auth *Auth) int {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "claude") {
+		return 1
+	}
+	plan := authPlanType(auth)
+	switch {
+	case strings.Contains(plan, "max"):
+		return 4
+	case strings.Contains(plan, "team"), strings.Contains(plan, "enterprise"):
+		return 3
+	default:
+		return 1
+	}
+}
+
+func expandAuthsBySchedulingWeight(auths []*Auth) []*Auth {
+	if len(auths) == 0 {
+		return auths
+	}
+	total := 0
+	weighted := false
+	for _, auth := range auths {
+		weight := authSchedulingWeight(auth)
+		if weight < 1 {
+			weight = 1
+		}
+		if weight > 1 {
+			weighted = true
+		}
+		total += weight
+	}
+	if !weighted {
+		return auths
+	}
+	out := make([]*Auth, 0, total)
+	for _, auth := range auths {
+		weight := authSchedulingWeight(auth)
+		if weight < 1 {
+			weight = 1
+		}
+		for i := 0; i < weight; i++ {
+			out = append(out, auth)
+		}
+	}
+	return out
+}
+
 func canonicalModelKey(model string) string {
 	model = strings.TrimSpace(model)
 	if model == "" {
@@ -251,6 +322,7 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 	if len(available) > 1 {
 		sort.Slice(available, func(i, j int) bool { return available[i].ID < available[j].ID })
 	}
+	available = expandAuthsBySchedulingWeight(available)
 	return available, nil
 }
 
