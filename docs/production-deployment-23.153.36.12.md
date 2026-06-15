@@ -58,18 +58,32 @@ Traefik 动态路由：
 
 ## 当前部署版本
 
-- 后端提交：`18f30ea1`（Claude 1M 上下文官方模型下限保护，防止远端旧模型目录降级为 200k）
+- 后端提交：`da722145`（Claude 高 429 压力下账号路由、冷却分类与订阅权重优化）
 - 前端提交：`f819c3e`（未变）
-- 最近一次按本文档部署时间：`2026-06-14T10:32:47+00:00`
-- 本次部署后端二进制 sha256：`7efb97f2d3ceeffc5b0ada0c09967a00d9cea408b5f06b23014822edaef95aa1`
-- 本次部署后端压缩包 sha256：`25999afea73e71fcc2a080b0309820d6c5eeac3816cb7221804f63669eb8396a`
+- 最近一次按本文档部署时间：`2026-06-15T08:07:42+00:00`
+- 本次部署后端二进制 sha256：`b57a398b3360199e5ebee7805573b5f33190f22b7c1fb12332998a912d1be3ec`
+- 本次部署后端压缩包 sha256：`d654d7964a7ba4da097e12f87387f1e1accb13675feef5d17fdabe2b9506ddd5`
 - 本次部署前端 management.html sha256：未变，沿用 `c251642a1e153348df79a706c8b647c5e8975fd9ed9f2de1adb6697a7c986dfe`
-- 部署前运行版本 backend=`e774bd53`，frontend=`f819c3e`
-- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-deploy-20260614-103157.bak`（可回滚到 `e774bd53`）
-- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260614-103157.tgz`
-- 部署后 `auths` 目录下 1401 个文件（含 `proxy_pool.json`；账号增删由晓宇手动管理）
+- 部署前运行版本 backend=`18f30ea1`，frontend=`f819c3e`
+- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-da722145-*`（可回滚到 `18f30ea1`）
+- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260615-075742.tgz`
+- 部署后已确认 `auths` 目录存在 Claude 账号 JSON 和 `proxy_pool.json`；账号增删由晓宇手动管理。
 
-### 本轮变更说明（18f30ea1 / f819c3e）
+### 本轮变更说明（da722145 / f819c3e）
+
+仅后端部署。本轮针对生产高峰期可用账号下降、Pro 账号更容易触发 429、429 后健康状态归类不稳定，以及成功请求高频持久化拖慢路由热路径的问题做收敛。
+
+1. 429 健康归类稳定化：如果账号已经写入 quota cooldown 状态，管理列表优先显示 `quota_cooldown/cooling`，不再被泛化的 429 `LastError` 摇摆成不可用或其他冷却状态。
+2. 上游封号语义归类为封禁/永久禁用：`Your account has been banned.`、`account has been banned` 等自然语言错误会归入 `account_banned/permanent_disabled`，不再误显示为人工“已停用”。
+3. 成功请求不再无条件持久化账号运行态：干净成功只更新内存计数，只有被动 quota header、已有持久化运行态或状态变化需要写盘时才保存账号文件，降低高并发下账号文件写入和 selector 缓存失效压力。
+4. 影响路由可用性的状态变化会主动失效 selector 缓存，避免 429、模型冷却或会话亲和仍短时间命中过期账号。
+5. 429 指数退避最大值从 30 分钟缩短到 10 分钟；官方 `Retry-After` 和被动 quota reset 仍按上游返回时间尊重，不被本地上限强行截断。
+6. 账号选择和 scheduler fast path 按订阅类型增加权重：`max=4`、`team/enterprise=3`、`pro/unknown=1`；显式账号 `priority` 仍优先于订阅权重。
+7. 新增回归测试覆盖 429 健康状态稳定性、封号文案归类、成功请求跳过持久化、quota failure 失效会话亲和、订阅权重选择和 10 分钟冷却上限。
+8. 本地验证：`git diff --check`、`go test -count=1 ./sdk/cliproxy/auth`、`go test -count=1 ./internal/api/handlers/management`、`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o ... ./cmd/server` 均通过；管理包测试在 Codex 沙箱内因 `httptest` 无法监听临时端口失败，脱沙箱复跑通过。
+9. 部署后验证：容器 `cpa-claude-proxy` 为 Up，运行二进制 sha256 与本地一致，`8318` 仍只监听 `127.0.0.1`，本机 `healthz 200`、`management 200`，公网 `https://api.openstaryu.com/` 与 `https://admin.openstaryu.com/management.html` 均为 200。
+
+### 上一轮变更说明（18f30ea1 / f819c3e）
 
 仅后端部署。本轮修复 `claude-sonnet-4-6` 官方 1M 上下文模型被远端旧模型目录覆盖成 200k 后，本地 `claude_prompt_too_long` guard 误拦截的问题。
 

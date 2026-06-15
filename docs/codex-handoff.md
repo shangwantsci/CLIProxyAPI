@@ -33,7 +33,7 @@
 - CPA 本机健康检查：`http://127.0.0.1:8318/healthz`
 - SSH：`root@154.29.158.193:56260`
 - 当前生产版本摘要见 `docs/production-deployment-23.153.36.12.md` 的“当前部署版本”。
-- 截至 `2026-06-11`，生产后端二进制部署提交为 `fe34c944`，前端部署提交为 `d5a90440`。
+- 截至 `2026-06-15`，生产后端二进制部署提交为 `da722145`，前端部署提交为 `f819c3e`。
 - 后端仓库本地 HEAD 可能是部署后的文档提交；生产实际运行的二进制仍以服务器 `/opt/cpa-claude-proxy/DEPLOYED_COMMITS` 为准。
 - 最近一次账号备份以生产部署文档记录为准；部署前必须重新备份 `/opt/cpa-claude-proxy/auths`。
 - 最近一次网络入口收口备份：`/root/openstaryu-hardening-20260528-113201`
@@ -68,6 +68,12 @@ cat /opt/cpa-claude-proxy/DEPLOYED_COMMITS
 
 ## 最近关键后端改动
 
+- `da722145 fix claude auth routing under 429 pressure`
+  - 稳定 429 后账号健康归类：quota cooldown 优先显示为冷却，不再在限额冷却和不可用之间摇摆。
+  - 封号自然语言错误归类为 `account_banned/permanent_disabled`，不再误归类为人工已停用。
+  - 成功请求不再无条件持久化账号运行态；只有 quota/header 或路由可用性变化时写盘并失效 selector 缓存，降低高并发路由热路径压力。
+  - Claude 账号选择按订阅类型加权：`max=4`、`team/enterprise=3`、`pro/unknown=1`，显式 priority 仍优先。
+  - 已部署到生产服务器，生产后端二进制提交为 `da722145`，前端仍为 `f819c3e`；后续文档提交只更新部署记录，不代表生产二进制。
 - `0582f97d fix: distinguish Claude auth health states`
   - 把 Claude 账号健康状态拆成更细的原因，不再统一显示为已停用。
 - `cd7a9c88 fix: classify Claude OAuth organization blocks`
