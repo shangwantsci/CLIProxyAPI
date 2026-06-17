@@ -232,6 +232,13 @@ func normalizeCookieOrganizationPlanType(raw string) string {
 		return ""
 	}
 	if strings.Contains(value, "max") {
+		compact := strings.NewReplacer("-", "", "_", "", " ", "").Replace(value)
+		if strings.Contains(compact, "max20x") || strings.Contains(compact, "20x") {
+			return "max20x"
+		}
+		if strings.Contains(compact, "max5x") || strings.Contains(compact, "5x") {
+			return "max5x"
+		}
 		return "max"
 	}
 	if strings.Contains(value, "team") || strings.Contains(value, "business") || strings.Contains(value, "raven") {

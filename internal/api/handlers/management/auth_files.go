@@ -283,6 +283,7 @@ func (h *Handler) ListClaudeAuthHealth(c *gin.Context) {
 	now := time.Now()
 	auths := h.authManager.List()
 	accounts := make([]gin.H, 0, len(auths))
+	claudeAuths := make([]*coreauth.Auth, 0, len(auths))
 	for _, auth := range auths {
 		if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "claude") {
 			continue
@@ -293,13 +294,144 @@ func (h *Handler) ListClaudeAuthHealth(c *gin.Context) {
 		}
 		addClaudeAuthHealthFields(entry, auth, now)
 		accounts = append(accounts, entry)
+		claudeAuths = append(claudeAuths, auth)
 	}
 	sort.Slice(accounts, func(i, j int) bool {
 		nameI, _ := accounts[i]["name"].(string)
 		nameJ, _ := accounts[j]["name"].(string)
 		return strings.ToLower(nameI) < strings.ToLower(nameJ)
 	})
-	c.JSON(200, gin.H{"accounts": accounts})
+	c.JSON(200, gin.H{"accounts": accounts, "summary": buildClaudeAuthHealthSummary(claudeAuths, now)})
+}
+
+type claudeRecoveryBucket struct {
+	RecoverAt time.Time
+	Units     int
+	Accounts  int
+	Pro       int
+	Max5x     int
+	Max20x    int
+}
+
+func buildClaudeAuthHealthSummary(auths []*coreauth.Auth, now time.Time) gin.H {
+	accountsTotal := 0
+	availableAccounts := 0
+	coolingAccounts := 0
+	errorAccounts := 0
+	disabledAccounts := 0
+	permanentAccounts := 0
+
+	knownTotalUnits := 0
+	availableUnits := 0
+	coolingUnits := 0
+	unknownMaxAccounts := 0
+	planCounts := map[string]int{}
+	recoveryByUnix := map[int64]*claudeRecoveryBucket{}
+
+	for _, auth := range auths {
+		if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "claude") {
+			continue
+		}
+		accountsTotal++
+		reason := claudeAuthStatusReason(auth, now)
+		routeState := claudeAuthRouteState(auth, now, reason)
+		healthClass := claudeAuthHealthClass(auth, now, reason)
+		capacity := claudeSubscriptionCapacity(auth)
+		if capacity.PlanType == "" {
+			planCounts["unknown"]++
+		} else {
+			planCounts[capacity.PlanType]++
+		}
+		if capacity.UnknownMax {
+			unknownMaxAccounts++
+		}
+		if capacity.Known {
+			knownTotalUnits += capacity.Units
+		}
+
+		switch routeState {
+		case "available":
+			availableAccounts++
+			if capacity.Known {
+				availableUnits += capacity.Units
+			}
+		case "cooling":
+			coolingAccounts++
+			if capacity.Known {
+				coolingUnits += capacity.Units
+				if recoverAt := claudeAuthRecoverAt(auth, now, reason); recoverAt.After(now) {
+					key := recoverAt.Truncate(time.Minute).Unix()
+					bucket := recoveryByUnix[key]
+					if bucket == nil {
+						bucket = &claudeRecoveryBucket{RecoverAt: recoverAt.Truncate(time.Minute)}
+						recoveryByUnix[key] = bucket
+					}
+					bucket.Units += capacity.Units
+					bucket.Accounts++
+					switch capacity.PlanType {
+					case "pro":
+						bucket.Pro += capacity.Units
+					case "max5x":
+						bucket.Max5x += capacity.Units
+					case "max20x":
+						bucket.Max20x += capacity.Units
+					}
+				}
+			}
+		case "manual_disabled":
+			disabledAccounts++
+		case "permanent_disabled":
+			permanentAccounts++
+		default:
+			if healthClass == "manual_disabled" {
+				disabledAccounts++
+			} else {
+				errorAccounts++
+			}
+		}
+	}
+
+	recovery := make([]gin.H, 0, len(recoveryByUnix))
+	recoveryKeys := make([]int64, 0, len(recoveryByUnix))
+	for key := range recoveryByUnix {
+		recoveryKeys = append(recoveryKeys, key)
+	}
+	sort.Slice(recoveryKeys, func(i, j int) bool { return recoveryKeys[i] < recoveryKeys[j] })
+	for _, key := range recoveryKeys {
+		bucket := recoveryByUnix[key]
+		item := gin.H{
+			"recover_at": bucket.RecoverAt,
+			"units":      bucket.Units,
+			"accounts":   bucket.Accounts,
+		}
+		if bucket.Pro > 0 {
+			item["pro_units"] = bucket.Pro
+		}
+		if bucket.Max5x > 0 {
+			item["max5x_units"] = bucket.Max5x
+		}
+		if bucket.Max20x > 0 {
+			item["max20x_units"] = bucket.Max20x
+		}
+		recovery = append(recovery, item)
+	}
+
+	return gin.H{
+		"accounts_total":      accountsTotal,
+		"available_accounts":  availableAccounts,
+		"cooling_accounts":    coolingAccounts,
+		"error_accounts":      errorAccounts,
+		"disabled_accounts":   disabledAccounts,
+		"permanent_accounts":  permanentAccounts,
+		"subscription_counts": planCounts,
+		"capacity": gin.H{
+			"known_total_units":    knownTotalUnits,
+			"available_units":      availableUnits,
+			"cooling_units":        coolingUnits,
+			"unknown_max_accounts": unknownMaxAccounts,
+		},
+		"recovery_timeline": recovery,
+	}
 }
 
 func (h *Handler) ClearAuthRuntimeSessions(c *gin.Context) {
@@ -661,10 +793,123 @@ func addClaudeSubscriptionFields(entry gin.H, auth *coreauth.Auth) {
 	if entry == nil || auth == nil {
 		return
 	}
-	for _, key := range []string{"plan_type", "subscription_tier", "subscription_status", "organization_name"} {
+	for _, key := range []string{
+		"plan_type",
+		"subscription_plan",
+		"subscription_multiplier",
+		"subscription_precision",
+		"subscription_tier",
+		"subscription_status",
+		"organization_name",
+	} {
 		if value := strings.TrimSpace(authStringSetting(auth, key)); value != "" {
 			entry[key] = value
 		}
+	}
+	capacity := claudeSubscriptionCapacity(auth)
+	if capacity.PlanType != "" {
+		entry["plan_type"] = capacity.PlanType
+		entry["subscription_plan"] = capacity.PlanType
+		entry["subscription_plan_label"] = capacity.PlanLabel
+	}
+	if capacity.Multiplier > 0 {
+		entry["subscription_multiplier"] = strconv.Itoa(capacity.Multiplier)
+	}
+	if capacity.Precision != "" {
+		entry["subscription_precision"] = capacity.Precision
+	}
+	entry["subscription_capacity_units"] = capacity.Units
+	entry["subscription_capacity_known"] = capacity.Known
+	entry["subscription_unknown_max"] = capacity.UnknownMax
+}
+
+type claudeSubscriptionCapacityInfo struct {
+	PlanType   string
+	PlanLabel  string
+	Multiplier int
+	Precision  string
+	Units      int
+	Known      bool
+	UnknownMax bool
+}
+
+func claudeSubscriptionCapacity(auth *coreauth.Auth) claudeSubscriptionCapacityInfo {
+	rawPlan := authStringSetting(auth, "subscription_plan")
+	if rawPlan == "" {
+		rawPlan = authStringSetting(auth, "plan_type")
+	}
+	plan := normalizeClaudePlanType(rawPlan)
+	multiplier := claudeSubscriptionMultiplier(auth)
+	if multiplier == 20 {
+		plan = "max20x"
+	} else if multiplier == 5 {
+		plan = "max5x"
+	}
+	precision := strings.TrimSpace(authStringSetting(auth, "subscription_precision"))
+	if precision == "" {
+		precision = "unknown"
+	}
+
+	info := claudeSubscriptionCapacityInfo{
+		PlanType:  plan,
+		Precision: precision,
+	}
+	switch plan {
+	case "max20x":
+		info.PlanLabel = "Max 20x"
+		info.Multiplier = 20
+		info.Units = 20
+		info.Known = true
+		info.Precision = "exact"
+	case "max5x":
+		info.PlanLabel = "Max 5x"
+		info.Multiplier = 5
+		info.Units = 5
+		info.Known = true
+		info.Precision = "exact"
+	case "max":
+		info.PlanLabel = "Max（未区分）"
+		info.UnknownMax = true
+		info.Known = false
+	case "pro":
+		info.PlanLabel = "Pro"
+		info.Multiplier = 1
+		info.Units = 1
+		info.Known = true
+		if info.Precision == "unknown" {
+			info.Precision = "exact"
+		}
+	case "team":
+		info.PlanLabel = "Team"
+	case "free":
+		info.PlanLabel = "Free"
+		info.Known = true
+		if info.Precision == "unknown" {
+			info.Precision = "exact"
+		}
+	default:
+		info.PlanLabel = "未知套餐"
+	}
+	return info
+}
+
+func claudeSubscriptionMultiplier(auth *coreauth.Auth) int {
+	value := strings.TrimSpace(authStringSetting(auth, "subscription_multiplier"))
+	if value == "" {
+		value = strings.TrimSpace(authStringSetting(auth, "subscription_capacity_units"))
+	}
+	if value == "" {
+		return 0
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0
+	}
+	switch parsed {
+	case 1, 5, 20:
+		return parsed
+	default:
+		return 0
 	}
 }
 
@@ -703,8 +948,11 @@ func addClaudeAuthHealthFields(entry gin.H, auth *coreauth.Auth, now time.Time) 
 	statusReason := claudeAuthStatusReason(auth, now)
 	entry["status_reason"] = statusReason
 	entry["status_reason_label"] = claudeAuthStatusReasonLabel(statusReason)
+	healthClass := claudeAuthHealthClass(auth, now, statusReason)
+	entry["health_class"] = healthClass
+	entry["health_class_label"] = claudeAuthHealthClassLabel(healthClass)
 	routeState := claudeAuthRouteState(auth, now, statusReason)
-	recoverability := claudeAuthRecoverability(statusReason)
+	recoverability := claudeAuthRecoverabilityForAuth(auth, now, statusReason)
 	entry["route_state"] = routeState
 	entry["route_state_label"] = claudeAuthRouteStateLabel(routeState)
 	entry["recoverability"] = recoverability
@@ -829,7 +1077,7 @@ func claudeAuthHealthStatus(auth *coreauth.Auth, now time.Time) string {
 			return "cooling"
 		case "auth_expired":
 			return "expired"
-		case "subscription_issue", "upstream_error", "unavailable":
+		case "subscription_issue", "upstream_error", "transient_error":
 			return "error"
 		default:
 			return "disabled"
@@ -846,9 +1094,11 @@ func claudeAuthHealthStatus(auth *coreauth.Auth, now time.Time) string {
 	switch reason {
 	case "rate_limited", "quota_cooldown", "rpm_cooldown", "session_full":
 		return "cooling"
-	}
-	if auth.Unavailable {
-		return "unavailable"
+	case "transient_error":
+		if recoverAt := claudeAuthRecoverAt(auth, now, reason); !recoverAt.IsZero() {
+			return "cooling"
+		}
+		return "error"
 	}
 	if auth.Status == coreauth.StatusError || auth.LastError != nil {
 		return "error"
@@ -913,12 +1163,57 @@ func claudeAuthStatusReason(auth *coreauth.Auth, now time.Time) string {
 		return "subscription_issue"
 	}
 	if auth.Unavailable {
-		return "unavailable"
+		return "transient_error"
+	}
+	if isClaudeTransientAuthError(auth.LastError) {
+		return "transient_error"
 	}
 	if auth.Status == coreauth.StatusError || auth.LastError != nil {
 		return "upstream_error"
 	}
 	return "healthy"
+}
+
+func claudeAuthHealthClass(auth *coreauth.Auth, now time.Time, reason string) string {
+	_ = now
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "healthy":
+		return "healthy"
+	case "quota_cooldown", "rpm_cooldown", "session_full", "rate_limited":
+		return "limit_cooling"
+	case "auth_expired":
+		return "auth_error"
+	case "account_banned", "organization_disabled", "account_disabled", "subscription_issue":
+		return "permanent_error"
+	case "manual_disabled", "disabled":
+		return "manual_disabled"
+	case "transient_error", "upstream_error":
+		return "transient_error"
+	default:
+		if auth != nil && (auth.Status == coreauth.StatusError || auth.LastError != nil || auth.Unavailable) {
+			return "transient_error"
+		}
+		return "unknown"
+	}
+}
+
+func claudeAuthHealthClassLabel(class string) string {
+	switch strings.ToLower(strings.TrimSpace(class)) {
+	case "healthy":
+		return "正常"
+	case "limit_cooling":
+		return "限额冷却"
+	case "auth_error":
+		return "认证错误"
+	case "permanent_error":
+		return "永久错误"
+	case "transient_error":
+		return "临时上游错误"
+	case "manual_disabled":
+		return "人工停用"
+	default:
+		return "未知"
+	}
 }
 
 func claudeAuthStatusReasonLabel(reason string) string {
@@ -939,10 +1234,12 @@ func claudeAuthStatusReasonLabel(reason string) string {
 		return "封禁/组织禁用"
 	case "subscription_issue":
 		return "退款/订阅异常"
+	case "transient_error":
+		return "临时上游错误"
 	case "upstream_error":
 		return "上游异常"
 	case "unavailable":
-		return "不可用"
+		return "临时上游错误"
 	case "manual_disabled", "disabled":
 		return "人工停用"
 	default:
@@ -958,6 +1255,11 @@ func claudeAuthRouteState(auth *coreauth.Auth, now time.Time, reason string) str
 		return "available"
 	case "quota_cooldown", "rpm_cooldown", "session_full", "rate_limited":
 		return "cooling"
+	case "transient_error":
+		if recoverAt := claudeAuthRecoverAt(auth, now, reason); !recoverAt.IsZero() {
+			return "cooling"
+		}
+		return "repair_required"
 	case "account_banned", "organization_disabled", "account_disabled":
 		return "permanent_disabled"
 	case "manual_disabled", "disabled":
@@ -987,11 +1289,20 @@ func claudeAuthRouteStateLabel(state string) string {
 }
 
 func claudeAuthRecoverability(reason string) string {
+	return claudeAuthRecoverabilityForAuth(nil, time.Time{}, reason)
+}
+
+func claudeAuthRecoverabilityForAuth(auth *coreauth.Auth, now time.Time, reason string) string {
 	switch strings.ToLower(strings.TrimSpace(reason)) {
 	case "healthy":
 		return "none"
 	case "quota_cooldown", "rpm_cooldown", "session_full", "rate_limited":
 		return "auto"
+	case "transient_error":
+		if auth != nil && !now.IsZero() && !claudeAuthRecoverAt(auth, now, reason).IsZero() {
+			return "auto"
+		}
+		return "manual"
 	case "account_banned", "organization_disabled", "account_disabled":
 		return "permanent"
 	case "manual_disabled", "disabled", "auth_expired", "subscription_issue", "upstream_error", "unavailable":
@@ -999,6 +1310,32 @@ func claudeAuthRecoverability(reason string) string {
 	default:
 		return "unknown"
 	}
+}
+
+func claudeAuthRecoverAt(auth *coreauth.Auth, now time.Time, reason string) time.Time {
+	if auth == nil || now.IsZero() {
+		return time.Time{}
+	}
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "quota_cooldown", "rate_limited":
+		if !auth.Quota.NextRecoverAt.IsZero() && auth.Quota.NextRecoverAt.After(now) {
+			return auth.Quota.NextRecoverAt
+		}
+	}
+	if !auth.NextRetryAfter.IsZero() && auth.NextRetryAfter.After(now) {
+		return auth.NextRetryAfter
+	}
+	if !auth.Quota.NextRecoverAt.IsZero() && auth.Quota.NextRecoverAt.After(now) {
+		return auth.Quota.NextRecoverAt
+	}
+	runtimeStats := auth.RuntimeUsageStats(now)
+	if runtimeStats.RPMLimit > 0 && runtimeStats.CurrentRPM >= runtimeStats.RPMLimit && runtimeStats.RPMResetAt.After(now) {
+		return runtimeStats.RPMResetAt
+	}
+	if runtimeStats.MaxSessions > 0 && runtimeStats.ActiveSessions >= runtimeStats.MaxSessions && runtimeStats.SessionResetAt.After(now) {
+		return runtimeStats.SessionResetAt
+	}
+	return time.Time{}
 }
 
 func claudeAuthRecoverabilityLabel(recoverability string) string {
@@ -1036,6 +1373,17 @@ func isClaudeSubscriptionError(err *coreauth.Error) bool {
 		strings.Contains(raw, "payment required") ||
 		strings.Contains(raw, "billing") ||
 		strings.Contains(raw, "refund")
+}
+
+func isClaudeTransientAuthError(err *coreauth.Error) bool {
+	if err == nil {
+		return false
+	}
+	switch err.HTTPStatus {
+	case http.StatusRequestTimeout, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	}
+	return err.Retryable
 }
 
 func authProjectID(auth *coreauth.Auth) string {
@@ -1134,8 +1482,20 @@ func authStringSetting(auth *coreauth.Auth, key string) string {
 	if auth == nil || auth.Metadata == nil {
 		return ""
 	}
-	if v, ok := auth.Metadata[key].(string); ok {
+	switch v := auth.Metadata[key].(type) {
+	case string:
 		return strings.TrimSpace(v)
+	case int:
+		return strconv.Itoa(v)
+	case int64:
+		return strconv.FormatInt(v, 10)
+	case float64:
+		if v == float64(int64(v)) {
+			return strconv.FormatInt(int64(v), 10)
+		}
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case json.Number:
+		return strings.TrimSpace(v.String())
 	}
 	return ""
 }
@@ -1860,6 +2220,10 @@ func (h *Handler) ReauthenticateClaudeAuthFile(c *gin.Context) {
 		targetAuth.Metadata = make(map[string]any)
 	}
 	applyClaudeTokenDataMetadata(targetAuth.Metadata, tokenData)
+	h.applyClaudeOAuthProfileSubscriptionMetadata(c.Request.Context(), targetAuth.Metadata, &claude.ClaudeTokenStorage{
+		AccessToken: tokenData.AccessToken,
+		Scope:       tokenData.Scope,
+	}, proxyURL)
 	clearClaudeAuthFailureMetadata(targetAuth.Metadata)
 	targetAuth.Metadata["type"] = "claude"
 	targetAuth.Metadata["disabled"] = false
@@ -2381,33 +2745,76 @@ func applyClaudeProfileSubscriptionMetadata(metadata map[string]any, body []byte
 	if status := strings.TrimSpace(root.Get("organization.subscription_status").String()); status != "" {
 		metadata["subscription_status"] = status
 	}
-	if plan := claudeProfilePlanType(root); plan != "" {
-		metadata["plan_type"] = plan
+	if plan := claudeProfilePlan(root); plan.PlanType != "" {
+		metadata["plan_type"] = plan.PlanType
+		metadata["subscription_plan"] = plan.PlanType
+		if plan.Multiplier > 0 {
+			metadata["subscription_multiplier"] = plan.Multiplier
+		}
+		if plan.Precision != "" {
+			metadata["subscription_precision"] = plan.Precision
+		}
 	}
 }
 
-func claudeProfilePlanType(root gjson.Result) string {
+type claudeProfilePlanDecision struct {
+	PlanType   string
+	Multiplier int
+	Precision  string
+}
+
+func claudeProfilePlan(root gjson.Result) claudeProfilePlanDecision {
+	candidates := []string{
+		root.Get("account.plan_type").String(),
+		root.Get("account.subscription_tier").String(),
+		root.Get("account.plan").String(),
+		root.Get("account.rate_limit_tier").String(),
+		root.Get("organization.plan_type").String(),
+		root.Get("organization.subscription_tier").String(),
+		root.Get("organization.plan").String(),
+		root.Get("organization.rate_limit_tier").String(),
+	}
+	if decision := claudePlanDecisionFromStrings(candidates...); decision.PlanType != "" {
+		return decision
+	}
 	if root.Get("account.has_claude_max").Bool() {
-		return "max"
+		return claudeProfilePlanDecision{PlanType: "max", Precision: "unknown"}
 	}
 	if root.Get("account.has_claude_pro").Bool() {
-		return "pro"
-	}
-	if plan := normalizeClaudePlanType(root.Get("organization.plan_type").String()); plan != "" {
-		return plan
-	}
-	if plan := normalizeClaudePlanType(root.Get("organization.subscription_tier").String()); plan != "" {
-		return plan
+		return claudeProfilePlanDecision{PlanType: "pro", Multiplier: 1, Precision: "exact"}
 	}
 	organizationType := strings.ToLower(strings.TrimSpace(root.Get("organization.organization_type").String()))
 	subscriptionStatus := strings.ToLower(strings.TrimSpace(root.Get("organization.subscription_status").String()))
 	if organizationType == "claude_team" && subscriptionStatus == "active" {
-		return "team"
+		return claudeProfilePlanDecision{PlanType: "team", Precision: "unknown"}
 	}
 	if root.Get("account.has_claude_max").Exists() || root.Get("account.has_claude_pro").Exists() {
-		return "free"
+		return claudeProfilePlanDecision{PlanType: "free", Precision: "exact"}
 	}
-	return ""
+	return claudeProfilePlanDecision{}
+}
+
+func claudeProfilePlanType(root gjson.Result) string {
+	return claudeProfilePlan(root).PlanType
+}
+
+func claudePlanDecisionFromStrings(values ...string) claudeProfilePlanDecision {
+	for _, raw := range values {
+		plan := normalizeClaudePlanType(raw)
+		switch plan {
+		case "max20x":
+			return claudeProfilePlanDecision{PlanType: plan, Multiplier: 20, Precision: "exact"}
+		case "max5x":
+			return claudeProfilePlanDecision{PlanType: plan, Multiplier: 5, Precision: "exact"}
+		case "max":
+			return claudeProfilePlanDecision{PlanType: plan, Precision: "unknown"}
+		case "pro":
+			return claudeProfilePlanDecision{PlanType: plan, Multiplier: 1, Precision: "exact"}
+		case "team", "free":
+			return claudeProfilePlanDecision{PlanType: plan, Precision: "exact"}
+		}
+	}
+	return claudeProfilePlanDecision{}
 }
 
 func normalizeClaudePlanType(raw string) string {
@@ -2416,6 +2823,13 @@ func normalizeClaudePlanType(raw string) string {
 		return ""
 	}
 	if strings.Contains(value, "max") {
+		compact := strings.NewReplacer("-", "", "_", "", " ", "").Replace(value)
+		if strings.Contains(compact, "max20x") || strings.Contains(compact, "20x") {
+			return "max20x"
+		}
+		if strings.Contains(compact, "max5x") || strings.Contains(compact, "5x") {
+			return "max5x"
+		}
 		return "max"
 	}
 	if strings.Contains(value, "team") || strings.Contains(value, "business") || strings.Contains(value, "raven") {

@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -31,13 +33,13 @@ const (
 )
 
 type claudeSessionImportStartRequest struct {
-	SessionKeys    []string `json:"session_keys"`
-	ProxyURL       string   `json:"proxy_url"`
-	Prefix         string   `json:"prefix"`
-	Note           string   `json:"note"`
-	Concurrency    int      `json:"concurrency"`
-	DelayMinMS     int      `json:"delay_min_ms"`
-	DelayMaxMS     int      `json:"delay_max_ms"`
+	SessionKeys []string `json:"session_keys"`
+	ProxyURL    string   `json:"proxy_url"`
+	Prefix      string   `json:"prefix"`
+	Note        string   `json:"note"`
+	Concurrency int      `json:"concurrency"`
+	DelayMinMS  int      `json:"delay_min_ms"`
+	DelayMaxMS  int      `json:"delay_max_ms"`
 }
 
 type normalizedClaudeSessionImportRequest struct {
@@ -62,43 +64,57 @@ type claudeSessionImportAuthRequest struct {
 }
 
 type claudeSessionImportAuthResult struct {
-	AuthFile        string `json:"auth_file,omitempty"`
-	Path            string `json:"path,omitempty"`
-	Email           string `json:"email,omitempty"`
-	AuthSource      string `json:"auth_source,omitempty"`
-	AuthMethodLabel string `json:"auth_method_label,omitempty"`
-	TokenEndpoint   string `json:"token_endpoint,omitempty"`
-	RedirectURI     string `json:"redirect_uri,omitempty"`
+	AuthFile                 string `json:"auth_file,omitempty"`
+	Path                     string `json:"path,omitempty"`
+	Email                    string `json:"email,omitempty"`
+	AuthSource               string `json:"auth_source,omitempty"`
+	AuthMethodLabel          string `json:"auth_method_label,omitempty"`
+	TokenEndpoint            string `json:"token_endpoint,omitempty"`
+	RedirectURI              string `json:"redirect_uri,omitempty"`
+	Existing                 bool   `json:"existing,omitempty"`
+	PlanType                 string `json:"plan_type,omitempty"`
+	SubscriptionMultiplier   int    `json:"subscription_multiplier,omitempty"`
+	SubscriptionPrecision    string `json:"subscription_precision,omitempty"`
+	SubscriptionCapacityUnit int    `json:"subscription_capacity_units,omitempty"`
 }
 
 type claudeSessionImportResult struct {
-	SessionKeyHash  string `json:"session_key_hash"`
-	Status          string `json:"status"`
-	Reason          string `json:"reason,omitempty"`
-	AuthFile        string `json:"auth_file,omitempty"`
-	Email           string `json:"email,omitempty"`
-	AuthSource      string `json:"auth_source,omitempty"`
-	AuthMethodLabel string `json:"auth_method_label,omitempty"`
+	SessionKeyHash           string `json:"session_key_hash"`
+	Status                   string `json:"status"`
+	Reason                   string `json:"reason,omitempty"`
+	AuthFile                 string `json:"auth_file,omitempty"`
+	Email                    string `json:"email,omitempty"`
+	AuthSource               string `json:"auth_source,omitempty"`
+	AuthMethodLabel          string `json:"auth_method_label,omitempty"`
+	ImportAction             string `json:"import_action,omitempty"`
+	PlanType                 string `json:"plan_type,omitempty"`
+	SubscriptionMultiplier   int    `json:"subscription_multiplier,omitempty"`
+	SubscriptionPrecision    string `json:"subscription_precision,omitempty"`
+	SubscriptionCapacityUnit int    `json:"subscription_capacity_units,omitempty"`
 }
 
 type claudeSessionImportJobSnapshot struct {
-	ID               string                      `json:"id"`
-	Status           string                      `json:"status"`
-	ProxyURL         string                      `json:"-"`
-	RedactedProxyURL string                      `json:"redacted_proxy_url,omitempty"`
-	Concurrency      int                         `json:"concurrency"`
-	StartedAt        time.Time                   `json:"started_at"`
-	UpdatedAt        time.Time                   `json:"updated_at"`
-	FinishedAt       *time.Time                  `json:"finished_at,omitempty"`
-	TotalProcessed   int                         `json:"total_processed"`
-	Imported         int                         `json:"imported"`
-	Failed           int                         `json:"failed"`
-	Rejected         int                         `json:"rejected"`
-	RejectedReasons  map[string]int              `json:"rejected_reasons,omitempty"`
-	Duplicate        int                         `json:"duplicate"`
-	Error            string                      `json:"error,omitempty"`
-	FailureReasons   map[string]int              `json:"failure_reasons,omitempty"`
-	Results          []claudeSessionImportResult `json:"results,omitempty"`
+	ID                 string                      `json:"id"`
+	Status             string                      `json:"status"`
+	ProxyURL           string                      `json:"-"`
+	RedactedProxyURL   string                      `json:"redacted_proxy_url,omitempty"`
+	Concurrency        int                         `json:"concurrency"`
+	StartedAt          time.Time                   `json:"started_at"`
+	UpdatedAt          time.Time                   `json:"updated_at"`
+	FinishedAt         *time.Time                  `json:"finished_at,omitempty"`
+	TotalProcessed     int                         `json:"total_processed"`
+	Imported           int                         `json:"imported"`
+	NewImported        int                         `json:"new_imported"`
+	ExistingUpdated    int                         `json:"existing_updated"`
+	Failed             int                         `json:"failed"`
+	Rejected           int                         `json:"rejected"`
+	RejectedReasons    map[string]int              `json:"rejected_reasons,omitempty"`
+	Duplicate          int                         `json:"duplicate"`
+	Error              string                      `json:"error,omitempty"`
+	FailureReasons     map[string]int              `json:"failure_reasons,omitempty"`
+	NewPlanCounts      map[string]int              `json:"new_plan_counts,omitempty"`
+	ExistingPlanCounts map[string]int              `json:"existing_plan_counts,omitempty"`
+	Results            []claudeSessionImportResult `json:"results,omitempty"`
 }
 
 type claudeSessionImportJob struct {
@@ -132,15 +148,17 @@ func (h *Handler) PostClaudeSessionImportJob(c *gin.Context) {
 	job := &claudeSessionImportJob{
 		cancel: cancel,
 		data: claudeSessionImportJobSnapshot{
-			ID:               fmt.Sprintf("claude-session-import-%d", now.UnixNano()),
-			Status:           claudeSessionImportStatusRunning,
-			ProxyURL:         normalized.ProxyURL,
-			RedactedProxyURL: redactedClaudeSessionImportProxy(normalized),
-			Concurrency:      normalized.Concurrency,
-			StartedAt:        now,
-			UpdatedAt:        now,
-			FailureReasons:   map[string]int{},
-			RejectedReasons:  map[string]int{},
+			ID:                 fmt.Sprintf("claude-session-import-%d", now.UnixNano()),
+			Status:             claudeSessionImportStatusRunning,
+			ProxyURL:           normalized.ProxyURL,
+			RedactedProxyURL:   redactedClaudeSessionImportProxy(normalized),
+			Concurrency:        normalized.Concurrency,
+			StartedAt:          now,
+			UpdatedAt:          now,
+			FailureReasons:     map[string]int{},
+			RejectedReasons:    map[string]int{},
+			NewPlanCounts:      map[string]int{},
+			ExistingPlanCounts: map[string]int{},
 		},
 	}
 
@@ -205,6 +223,18 @@ func (j *claudeSessionImportJob) snapshot() claudeSessionImportJobSnapshot {
 		out.FailureReasons = make(map[string]int, len(j.data.FailureReasons))
 		for key, value := range j.data.FailureReasons {
 			out.FailureReasons[key] = value
+		}
+	}
+	if j.data.NewPlanCounts != nil {
+		out.NewPlanCounts = make(map[string]int, len(j.data.NewPlanCounts))
+		for key, value := range j.data.NewPlanCounts {
+			out.NewPlanCounts[key] = value
+		}
+	}
+	if j.data.ExistingPlanCounts != nil {
+		out.ExistingPlanCounts = make(map[string]int, len(j.data.ExistingPlanCounts))
+		for key, value := range j.data.ExistingPlanCounts {
+			out.ExistingPlanCounts[key] = value
 		}
 	}
 	if j.data.RejectedReasons != nil {
@@ -295,6 +325,20 @@ func (h *Handler) runClaudeSessionImportJob(ctx context.Context, job *claudeSess
 					switch result.Status {
 					case "imported":
 						snapshot.Imported++
+						plan := normalizeClaudeSessionImportPlanCountKey(result.PlanType)
+						if result.ImportAction == "existing_updated" {
+							snapshot.ExistingUpdated++
+							if snapshot.ExistingPlanCounts == nil {
+								snapshot.ExistingPlanCounts = map[string]int{}
+							}
+							snapshot.ExistingPlanCounts[plan]++
+						} else {
+							snapshot.NewImported++
+							if snapshot.NewPlanCounts == nil {
+								snapshot.NewPlanCounts = map[string]int{}
+							}
+							snapshot.NewPlanCounts[plan]++
+						}
 					case "rejected":
 						snapshot.Rejected++
 						if snapshot.RejectedReasons == nil {
@@ -403,6 +447,15 @@ func (h *Handler) processClaudeSessionImportKey(ctx context.Context, sessionKey 
 	result.Email = authResult.Email
 	result.AuthSource = authResult.AuthSource
 	result.AuthMethodLabel = authResult.AuthMethodLabel
+	if authResult.Existing {
+		result.ImportAction = "existing_updated"
+	} else {
+		result.ImportAction = "new_imported"
+	}
+	result.PlanType = normalizeClaudeSessionImportPlanCountKey(authResult.PlanType)
+	result.SubscriptionMultiplier = authResult.SubscriptionMultiplier
+	result.SubscriptionPrecision = authResult.SubscriptionPrecision
+	result.SubscriptionCapacityUnit = authResult.SubscriptionCapacityUnit
 	return result
 }
 
@@ -488,6 +541,7 @@ func (h *Handler) saveClaudeSessionKeyAuth(ctx context.Context, req claudeSessio
 		},
 	}
 
+	existing := h.claudeAuthRecordExists(fileName)
 	savedPath, err := h.saveTokenRecord(ctx, record)
 	if err != nil {
 		return claudeSessionImportAuthResult{}, fmt.Errorf("failed to save authentication tokens: %w", err)
@@ -495,15 +549,49 @@ func (h *Handler) saveClaudeSessionKeyAuth(ctx context.Context, req claudeSessio
 	if err := h.autoAddProxyURL(ctx, proxyURL); err != nil {
 		log.WithError(err).Warn("failed to auto add session import proxy to proxy pool")
 	}
+	capacity := claudeSubscriptionCapacity(record)
 	return claudeSessionImportAuthResult{
-		AuthFile:        fileName,
-		Path:            savedPath,
-		Email:           tokenStorage.Email,
-		AuthSource:      tokenStorage.AuthSource,
-		AuthMethodLabel: claudeAuthMethodLabel(tokenStorage.AuthSource),
-		TokenEndpoint:   tokenStorage.TokenEndpoint,
-		RedirectURI:     tokenStorage.RedirectURI,
+		AuthFile:                 fileName,
+		Path:                     savedPath,
+		Email:                    tokenStorage.Email,
+		AuthSource:               tokenStorage.AuthSource,
+		AuthMethodLabel:          claudeAuthMethodLabel(tokenStorage.AuthSource),
+		TokenEndpoint:            tokenStorage.TokenEndpoint,
+		RedirectURI:              tokenStorage.RedirectURI,
+		Existing:                 existing,
+		PlanType:                 capacity.PlanType,
+		SubscriptionMultiplier:   capacity.Multiplier,
+		SubscriptionPrecision:    capacity.Precision,
+		SubscriptionCapacityUnit: capacity.Units,
 	}, nil
+}
+
+func (h *Handler) claudeAuthRecordExists(fileName string) bool {
+	name := strings.TrimSpace(fileName)
+	if name == "" {
+		return false
+	}
+	if h != nil && h.authManager != nil {
+		if _, ok := h.authManager.GetByID(name); ok {
+			return true
+		}
+	}
+	if h == nil || h.cfg == nil || strings.TrimSpace(h.cfg.AuthDir) == "" {
+		return false
+	}
+	path := filepath.Join(h.cfg.AuthDir, name)
+	if _, err := os.Stat(path); err == nil {
+		return true
+	}
+	return false
+}
+
+func normalizeClaudeSessionImportPlanCountKey(plan string) string {
+	normalized := normalizeClaudePlanType(plan)
+	if normalized == "" {
+		return "unknown"
+	}
+	return normalized
 }
 
 func sleepClaudeSessionImportDelay(ctx context.Context, minDelay, maxDelay time.Duration) {

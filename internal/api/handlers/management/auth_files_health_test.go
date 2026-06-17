@@ -175,6 +175,46 @@ func TestClaudeAuthHealth_429ResultIsStableQuotaCooldown(t *testing.T) {
 	}
 }
 
+func TestClaudeAuthHealth_UnavailableInternalFlagIsRenderedAsTransientError(t *testing.T) {
+	now := time.Now().UTC()
+	auth := &coreauth.Auth{
+		ID:              "claude-503",
+		Provider:        "claude",
+		Status:          coreauth.StatusError,
+		Unavailable:     true,
+		NextRetryAfter:  now.Add(45 * time.Second),
+		StatusMessage:   "transient upstream error",
+		Metadata:        map[string]any{"type": "claude"},
+		Attributes:      map[string]string{},
+		LastRefreshedAt: now.Add(-1 * time.Hour),
+		LastError: &coreauth.Error{
+			Code:       "upstream_error",
+			Message:    "upstream overloaded",
+			Retryable:  true,
+			HTTPStatus: http.StatusServiceUnavailable,
+		},
+	}
+
+	entry := gin.H{}
+	addClaudeAuthHealthFields(entry, auth, now)
+
+	if got, _ := entry["status_reason"].(string); got != "transient_error" {
+		t.Fatalf("status_reason = %q, want transient_error", got)
+	}
+	if got, _ := entry["status_reason_label"].(string); got == "不可用" {
+		t.Fatalf("status_reason_label = %q, should not expose 不可用", got)
+	}
+	if got, _ := entry["health_class"].(string); got != "transient_error" {
+		t.Fatalf("health_class = %q, want transient_error", got)
+	}
+	if got, _ := entry["route_state"].(string); got != "cooling" {
+		t.Fatalf("route_state = %q, want cooling while retry window is active", got)
+	}
+	if got, _ := entry["recoverability"].(string); got != "auto" {
+		t.Fatalf("recoverability = %q, want auto", got)
+	}
+}
+
 func TestListClaudeAuthHealth_SeparatesPermanentAndManualDisabledStates(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)

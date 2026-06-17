@@ -82,15 +82,15 @@ func TestRecordClaudeMessagesProbeHTTPFailureRateLimitedSetsReason(t *testing.T)
 	}
 }
 
-func TestRecordClaudeMessagesProbeHTTPFailureServerErrorSetsUnavailable(t *testing.T) {
+func TestRecordClaudeMessagesProbeHTTPFailureServerErrorSetsTransientError(t *testing.T) {
 	auth := &coreauth.Auth{ID: "se1", Provider: "claude", Status: coreauth.StatusActive}
 	h := newMessagesProbeTestHandler(t, auth)
 
 	h.recordClaudeMessagesProbeHTTPFailure(context.Background(), auth, http.StatusInternalServerError, []byte(`{"error":{"message":"internal"}}`))
 
 	updated, _ := h.authManager.GetByID("se1")
-	if reason := claudeAuthStatusReason(updated, time.Now()); reason != "unavailable" {
-		t.Fatalf("expected unavailable, got %q", reason)
+	if reason := claudeAuthStatusReason(updated, time.Now()); reason != "transient_error" {
+		t.Fatalf("expected transient_error, got %q", reason)
 	}
 	if updated.LastError == nil || !updated.LastError.Retryable {
 		t.Fatalf("expected retryable LastError for 5xx")

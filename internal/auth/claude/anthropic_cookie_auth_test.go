@@ -541,6 +541,11 @@ func TestCookieOrganizationPlanType(t *testing.T) {
 			want: "max",
 		},
 		{
+			name: "max20x from rate_limit_tier",
+			org:  claudeOrganization{RateLimitTier: ptr("default_claude_max_20x")},
+			want: "max20x",
+		},
+		{
 			name: "raven rate_limit_tier resolves to team",
 			org:  claudeOrganization{RateLimitTier: ptr("default_raven")},
 			want: "team",

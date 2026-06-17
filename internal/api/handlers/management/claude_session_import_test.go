@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -171,6 +172,113 @@ func TestPostClaudeSessionImportJobImportsPastedSessionKeysAsManual(t *testing.T
 		if source != "" {
 			t.Fatalf("import source = %q, want empty manual source; all=%v", source, capturedSources)
 		}
+	}
+}
+
+func TestPostClaudeSessionImportJobSeparatesNewExistingAndPlanCounts(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
+	h.sessionImportAuthenticate = func(ctx context.Context, req claudeSessionImportAuthRequest) (claudeSessionImportAuthResult, error) {
+		switch req.SessionKey {
+		case "fail":
+			return claudeSessionImportAuthResult{}, fmt.Errorf("token exchange failed")
+		case "existing-max20":
+			return claudeSessionImportAuthResult{
+				AuthFile:                 "claude-existing-max20.json",
+				Email:                    "existing-max20@example.test",
+				AuthSource:               "claude_code_cli",
+				AuthMethodLabel:          "Claude Code CLI OAuth",
+				Existing:                 true,
+				PlanType:                 "max20x",
+				SubscriptionMultiplier:   20,
+				SubscriptionPrecision:    "exact",
+				SubscriptionCapacityUnit: 20,
+			}, nil
+		case "new-max5":
+			return claudeSessionImportAuthResult{
+				AuthFile:                 "claude-new-max5.json",
+				Email:                    "new-max5@example.test",
+				AuthSource:               "claude_code_cli",
+				AuthMethodLabel:          "Claude Code CLI OAuth",
+				PlanType:                 "max5x",
+				SubscriptionMultiplier:   5,
+				SubscriptionPrecision:    "exact",
+				SubscriptionCapacityUnit: 5,
+			}, nil
+		default:
+			return claudeSessionImportAuthResult{
+				AuthFile:                 "claude-new-pro.json",
+				Email:                    "new-pro@example.test",
+				AuthSource:               "claude_code_cli",
+				AuthMethodLabel:          "Claude Code CLI OAuth",
+				PlanType:                 "pro",
+				SubscriptionMultiplier:   1,
+				SubscriptionPrecision:    "exact",
+				SubscriptionCapacityUnit: 1,
+			}, nil
+		}
+	}
+
+	body := bytes.NewBufferString(`{
+		"session_keys":["new-pro","existing-max20","existing-max20","new-max5","fail"],
+		"proxy_url":"direct",
+		"concurrency":3,
+		"delay_min_ms":0,
+		"delay_max_ms":0
+	}`)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/claude-session-import-jobs", body)
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	h.PostClaudeSessionImportJob(ctx)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	var created struct {
+		JobID string `json:"job_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+
+	var snapshot claudeSessionImportJobSnapshot
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		rec = httptest.NewRecorder()
+		ctx, _ = gin.CreateTestContext(rec)
+		ctx.Params = gin.Params{{Key: "id", Value: created.JobID}}
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/claude-session-import-jobs/"+created.JobID, nil)
+		h.GetClaudeSessionImportJob(ctx)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("get status = %d body=%s", rec.Code, rec.Body.String())
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &snapshot); err != nil {
+			t.Fatalf("decode job snapshot: %v", err)
+		}
+		if snapshot.Status == claudeSessionImportStatusCompleted {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if snapshot.Status != claudeSessionImportStatusCompleted {
+		t.Fatalf("job status = %q, want completed; snapshot=%#v", snapshot.Status, snapshot)
+	}
+	if snapshot.Imported != 3 || snapshot.NewImported != 2 || snapshot.ExistingUpdated != 1 {
+		t.Fatalf("import counts imported/new/existing = %d/%d/%d, want 3/2/1", snapshot.Imported, snapshot.NewImported, snapshot.ExistingUpdated)
+	}
+	if snapshot.Duplicate != 1 || snapshot.Failed != 1 {
+		t.Fatalf("duplicate/failed = %d/%d, want 1/1", snapshot.Duplicate, snapshot.Failed)
+	}
+	if snapshot.NewPlanCounts["pro"] != 1 || snapshot.NewPlanCounts["max5x"] != 1 {
+		t.Fatalf("new_plan_counts = %#v, want pro=1 max5x=1", snapshot.NewPlanCounts)
+	}
+	if snapshot.ExistingPlanCounts["max20x"] != 1 {
+		t.Fatalf("existing_plan_counts = %#v, want max20x=1", snapshot.ExistingPlanCounts)
 	}
 }
 
