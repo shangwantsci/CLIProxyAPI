@@ -419,6 +419,154 @@ func TestManagerCustomSelector_FallsBackToLegacyPath(t *testing.T) {
 	}
 }
 
+func TestManagerSessionAffinitySelectorUsesSchedulerFastPathAndKeepsBinding(t *testing.T) {
+	t.Parallel()
+
+	model := "session-affinity-fast-path-model"
+	authA := "session-affinity-fast-path-a"
+	authB := "session-affinity-fast-path-b"
+	registerSchedulerModels(t, "claude", model, authA, authB)
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	t.Cleanup(selector.Stop)
+
+	manager := NewManager(nil, selector, nil)
+	manager.executors["claude"] = schedulerTestExecutor{}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: authA, Provider: "claude"}); errRegister != nil {
+		t.Fatalf("Register(%s) error = %v", authA, errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: authB, Provider: "claude"}); errRegister != nil {
+		t.Fatalf("Register(%s) error = %v", authB, errRegister)
+	}
+
+	if !manager.useSchedulerFastPath() {
+		t.Fatalf("useSchedulerFastPath() = false, want true for session-affinity over round-robin")
+	}
+	if manager.scheduler.strategy != schedulerStrategyRoundRobin {
+		t.Fatalf("scheduler.strategy = %v, want %v", manager.scheduler.strategy, schedulerStrategyRoundRobin)
+	}
+
+	opts := cliproxyexecutor.Options{Headers: http.Header{"X-Session-Id": []string{"session-1"}}}
+	first, _, _, errPick := manager.pickNextMixed(context.Background(), []string{"claude"}, model, opts, nil)
+	if errPick != nil {
+		t.Fatalf("first pickNextMixed() error = %v", errPick)
+	}
+	if first == nil || first.ID != authA {
+		t.Fatalf("first pickNextMixed() auth = %v, want %s", first, authA)
+	}
+
+	second, _, _, errPick := manager.pickNextMixed(context.Background(), []string{"claude"}, model, opts, nil)
+	if errPick != nil {
+		t.Fatalf("second pickNextMixed() error = %v", errPick)
+	}
+	if second == nil || second.ID != authA {
+		t.Fatalf("second pickNextMixed() auth = %v, want sticky %s", second, authA)
+	}
+
+	cacheKey := "mixed::header:session-1::" + model
+	if cached, ok := selector.cache.Get(cacheKey); !ok || cached != authA {
+		t.Fatalf("session-affinity cache = %q/%v, want %s/true", cached, ok, authA)
+	}
+}
+
+func TestManagerSessionAffinityFastPathRebindsCoolingCachedAuth(t *testing.T) {
+	t.Parallel()
+
+	model := "session-affinity-cooling-model"
+	authA := "session-affinity-cooling-a"
+	authB := "session-affinity-cooling-b"
+	registerSchedulerModels(t, "claude", model, authA, authB)
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	t.Cleanup(selector.Stop)
+
+	manager := NewManager(nil, selector, nil)
+	manager.executors["claude"] = schedulerTestExecutor{}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: authA, Provider: "claude"}); errRegister != nil {
+		t.Fatalf("Register(%s) error = %v", authA, errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: authB, Provider: "claude"}); errRegister != nil {
+		t.Fatalf("Register(%s) error = %v", authB, errRegister)
+	}
+
+	if !manager.useSchedulerFastPath() {
+		t.Fatalf("useSchedulerFastPath() = false, want true for session-affinity over round-robin")
+	}
+
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   authA,
+		Provider: "claude",
+		Model:    model,
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"},
+	})
+	cacheKey := "mixed::header:session-1::" + model
+	selector.cache.Set(cacheKey, authA)
+
+	opts := cliproxyexecutor.Options{Headers: http.Header{"X-Session-Id": []string{"session-1"}}}
+	got, _, _, errPick := manager.pickNextMixed(context.Background(), []string{"claude"}, model, opts, nil)
+	if errPick != nil {
+		t.Fatalf("pickNextMixed() error = %v", errPick)
+	}
+	if got == nil || got.ID != authB {
+		t.Fatalf("pickNextMixed() auth = %v, want %s after cached auth cooled down", got, authB)
+	}
+	if cached, ok := selector.cache.Get(cacheKey); !ok || cached != authB {
+		t.Fatalf("session-affinity cache = %q/%v, want %s/true", cached, ok, authB)
+	}
+}
+
+func TestManagerSessionAffinityFastPathRebindsSessionFullCachedAuth(t *testing.T) {
+	t.Parallel()
+
+	model := "session-affinity-session-full-model"
+	authA := "session-affinity-session-full-a"
+	authB := "session-affinity-session-full-b"
+	registerSchedulerModels(t, "claude", model, authA, authB)
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	t.Cleanup(selector.Stop)
+
+	manager := NewManager(nil, selector, nil)
+	manager.executors["claude"] = schedulerTestExecutor{}
+	registerClaudeRuntimeLimitAuth(t, manager, authA, map[string]string{"max_sessions": "1"})
+	registerClaudeRuntimeLimitAuth(t, manager, authB, map[string]string{"max_sessions": "1"})
+
+	first, _, _, errPick := manager.pickNextMixedForRuntime(context.Background(), []string{"claude"}, model, cliproxyexecutor.Options{
+		Headers: http.Header{"X-Session-Id": []string{"occupied"}},
+	}, nil, "header:occupied")
+	if errPick != nil {
+		t.Fatalf("first pickNextMixedForRuntime() error = %v", errPick)
+	}
+	if first == nil || first.ID != authA {
+		t.Fatalf("first pickNextMixedForRuntime() auth = %v, want %s", first, authA)
+	}
+
+	cacheKey := "mixed::header:session-1::" + model
+	selector.cache.Set(cacheKey, authA)
+	got, _, _, errPick := manager.pickNextMixedForRuntime(context.Background(), []string{"claude"}, model, cliproxyexecutor.Options{
+		Headers: http.Header{"X-Session-Id": []string{"session-1"}},
+	}, nil, "header:session-1")
+	if errPick != nil {
+		t.Fatalf("second pickNextMixedForRuntime() error = %v", errPick)
+	}
+	if got == nil || got.ID != authB {
+		t.Fatalf("second pickNextMixedForRuntime() auth = %v, want %s after cached auth session is full", got, authB)
+	}
+	if cached, ok := selector.cache.Get(cacheKey); !ok || cached != authB {
+		t.Fatalf("session-affinity cache = %q/%v, want %s/true", cached, ok, authB)
+	}
+}
+
 func TestManager_InitializesSchedulerForBuiltInSelector(t *testing.T) {
 	t.Parallel()
 

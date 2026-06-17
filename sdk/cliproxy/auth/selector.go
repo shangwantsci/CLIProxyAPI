@@ -514,6 +514,11 @@ type SessionAffinitySelector struct {
 	cache    *SessionCache
 }
 
+type sessionAffinityBinding struct {
+	primaryKey  string
+	fallbackKey string
+}
+
 // SessionAffinityConfig configures the session affinity selector.
 type SessionAffinityConfig struct {
 	Fallback Selector
@@ -540,6 +545,74 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 		fallback: cfg.Fallback,
 		cache:    NewSessionCache(cfg.TTL),
 	}
+}
+
+func schedulingSelector(selector Selector) Selector {
+	for {
+		affinity, ok := selector.(*SessionAffinitySelector)
+		if !ok || affinity == nil {
+			return selector
+		}
+		selector = affinity.fallback
+	}
+}
+
+func sessionAffinitySelectorFor(selector Selector) *SessionAffinitySelector {
+	affinity, ok := selector.(*SessionAffinitySelector)
+	if !ok {
+		return nil
+	}
+	return affinity
+}
+
+func sessionAffinityCacheKey(provider, sessionID, model string) string {
+	return provider + "::" + sessionID + "::" + model
+}
+
+func (s *SessionAffinitySelector) bindingForOptions(provider, model string, opts cliproxyexecutor.Options) sessionAffinityBinding {
+	if s == nil {
+		return sessionAffinityBinding{}
+	}
+	primaryID, fallbackID := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	if primaryID == "" {
+		return sessionAffinityBinding{}
+	}
+	binding := sessionAffinityBinding{
+		primaryKey: sessionAffinityCacheKey(provider, primaryID, model),
+	}
+	if fallbackID != "" && fallbackID != primaryID {
+		binding.fallbackKey = sessionAffinityCacheKey(provider, fallbackID, model)
+	}
+	return binding
+}
+
+func (s *SessionAffinitySelector) cachedAuthID(binding sessionAffinityBinding) (string, string, bool) {
+	if s == nil || s.cache == nil || binding.primaryKey == "" {
+		return "", "", false
+	}
+	if authID, ok := s.cache.GetAndRefresh(binding.primaryKey); ok {
+		return authID, binding.primaryKey, true
+	}
+	if binding.fallbackKey != "" {
+		if authID, ok := s.cache.Get(binding.fallbackKey); ok {
+			return authID, binding.fallbackKey, true
+		}
+	}
+	return "", "", false
+}
+
+func (s *SessionAffinitySelector) bindAuth(binding sessionAffinityBinding, authID string) {
+	if s == nil || s.cache == nil || binding.primaryKey == "" {
+		return
+	}
+	s.cache.Set(binding.primaryKey, authID)
+}
+
+func (s *SessionAffinitySelector) invalidateCacheKey(cacheKey string) {
+	if s == nil || s.cache == nil || cacheKey == "" {
+		return
+	}
+	s.cache.Invalidate(cacheKey)
 }
 
 // Pick selects an auth with session affinity when possible.
@@ -570,7 +643,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		return nil, err
 	}
 
-	cacheKey := provider + "::" + primaryID + "::" + model
+	cacheKey := sessionAffinityCacheKey(provider, primaryID, model)
 
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 		for _, auth := range available {
@@ -590,7 +663,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	}
 
 	if fallbackID != "" && fallbackID != primaryID {
-		fallbackKey := provider + "::" + fallbackID + "::" + model
+		fallbackKey := sessionAffinityCacheKey(provider, fallbackID, model)
 		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
 			for _, auth := range available {
 				if auth.ID == cachedAuthID {

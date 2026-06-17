@@ -218,7 +218,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 }
 
 func isBuiltInSelector(selector Selector) bool {
-	switch selector.(type) {
+	switch schedulingSelector(selector).(type) {
 	case *RoundRobinSelector, *FillFirstSelector:
 		return true
 	default:
@@ -707,10 +707,12 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 }
 
 func selectionArgForSelector(selector Selector, routeModel string) string {
-	if isBuiltInSelector(selector) {
+	switch selector.(type) {
+	case *RoundRobinSelector, *FillFirstSelector:
 		return ""
+	default:
+		return routeModel
 	}
-	return routeModel
 }
 
 func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, auth *Auth, routeModel string) bool {
@@ -1885,6 +1887,20 @@ func pinnedAuthIDFromMetadata(meta map[string]any) string {
 	default:
 		return ""
 	}
+}
+
+func optionsWithPinnedAuthID(opts cliproxyexecutor.Options, authID string) cliproxyexecutor.Options {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return opts
+	}
+	meta := make(map[string]any, len(opts.Metadata)+1)
+	for key, value := range opts.Metadata {
+		meta[key] = value
+	}
+	meta[cliproxyexecutor.PinnedAuthMetadataKey] = authID
+	opts.Metadata = meta
+	return opts
 }
 
 func disallowFreeAuthFromMetadata(meta map[string]any) bool {
@@ -4239,6 +4255,30 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 		return nil, nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
+	affinity := sessionAffinitySelectorFor(m.selector)
+	binding := sessionAffinityBinding{}
+	if affinity != nil {
+		binding = affinity.bindingForOptions(provider, model, opts)
+	}
+	if affinity != nil && pinnedAuthIDFromMetadata(opts.Metadata) == "" {
+		if cachedAuthID, cacheKey, ok := affinity.cachedAuthID(binding); ok {
+			authCopy, errPick := m.pickNextSingleFromScheduler(ctx, provider, model, optionsWithPinnedAuthID(opts, cachedAuthID), tried, disallowFreeAuth)
+			if errPick == nil {
+				affinity.bindAuth(binding, authCopy.ID)
+				return authCopy, executor, nil
+			}
+			affinity.invalidateCacheKey(cacheKey)
+		}
+	}
+	authCopy, errPick := m.pickNextSingleFromScheduler(ctx, provider, model, opts, tried, disallowFreeAuth)
+	if errPick != nil {
+		return nil, nil, errPick
+	}
+	affinity.bindAuth(binding, authCopy.ID)
+	return authCopy, executor, nil
+}
+
+func (m *Manager) pickNextSingleFromScheduler(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, disallowFreeAuth bool) (*Auth, error) {
 	for {
 		selected, errPick := m.scheduler.pickSingle(ctx, provider, model, opts, tried)
 		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
@@ -4246,10 +4286,10 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 			selected, errPick = m.scheduler.pickSingle(ctx, provider, model, opts, tried)
 		}
 		if errPick != nil {
-			return nil, nil, errPick
+			return nil, errPick
 		}
 		if selected == nil {
-			return nil, nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
+			return nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 		}
 		if disallowFreeAuth && isFreeCodexAuth(selected) {
 			if tried == nil {
@@ -4267,7 +4307,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 			}
 			m.mu.Unlock()
 		}
-		return authCopy, executor, nil
+		return authCopy, nil
 	}
 }
 
@@ -4459,6 +4499,30 @@ func (m *Manager) pickNextMixedForRuntime(ctx context.Context, providers []strin
 
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
 	sessionTTL := m.accountSessionTTL()
+	affinity := sessionAffinitySelectorFor(m.selector)
+	binding := sessionAffinityBinding{}
+	if affinity != nil {
+		binding = affinity.bindingForOptions("mixed", model, opts)
+	}
+	if affinity != nil && pinnedAuthIDFromMetadata(opts.Metadata) == "" {
+		if cachedAuthID, cacheKey, ok := affinity.cachedAuthID(binding); ok {
+			authCopy, executor, providerKey, errPick := m.pickNextMixedFromScheduler(ctx, eligibleProviders, model, optionsWithPinnedAuthID(opts, cachedAuthID), tried, runtimeSessionID, disallowFreeAuth, sessionTTL)
+			if errPick == nil {
+				affinity.bindAuth(binding, authCopy.ID)
+				return authCopy, executor, providerKey, nil
+			}
+			affinity.invalidateCacheKey(cacheKey)
+		}
+	}
+	authCopy, executor, providerKey, errPick := m.pickNextMixedFromScheduler(ctx, eligibleProviders, model, opts, tried, runtimeSessionID, disallowFreeAuth, sessionTTL)
+	if errPick != nil {
+		return nil, nil, "", errPick
+	}
+	affinity.bindAuth(binding, authCopy.ID)
+	return authCopy, executor, providerKey, nil
+}
+
+func (m *Manager) pickNextMixedFromScheduler(ctx context.Context, eligibleProviders []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, runtimeSessionID string, disallowFreeAuth bool, sessionTTL time.Duration) (*Auth, ProviderExecutor, string, error) {
 	var lastRuntimeErr error
 	for {
 		selected, providerKey, errPick := m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
