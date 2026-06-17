@@ -2383,6 +2383,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		responseHeaders := logging.GetResponseHeaders(ctx)
 		claudeAuthResult := isClaudeAuthResult(auth, result.Provider)
 		passiveClaudeQuotaHeaders := claudeAuthResult && claudePassiveQuotaHeadersPresent(responseHeaders)
+		passiveClaudeQuotaPersist := false
 		if !clientRequestError && claudeAuthResult {
 			updateClaudePassiveQuotaFromHeaders(auth, responseHeaders, now)
 			if result.RetryAfter == nil && statusCodeFromResult(result.Error) == http.StatusTooManyRequests {
@@ -2551,6 +2552,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		if result.Success && passiveClaudeQuotaHeaders {
 			if quotaState, ok := m.claudePassiveQuotaState(auth, now); ok && quotaState.exceeded {
 				applyClaudePassiveQuotaCooldown(auth, result.Model, quotaState, now)
+				passiveClaudeQuotaPersist = true
 				if result.Model != "" {
 					shouldResumeModel = false
 					clearModelQuota = false
@@ -2561,7 +2563,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 
-		if passiveClaudeQuotaHeaders || persistentStateBefore || authHasPersistedRuntimeState(auth) {
+		if passiveClaudeQuotaPersist || persistentStateBefore || authHasPersistedRuntimeState(auth) {
 			_ = m.persist(ctx, auth)
 			authSnapshot = auth.Clone()
 		} else if authAvailabilityAffectsRouting(auth) {

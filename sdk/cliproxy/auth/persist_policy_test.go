@@ -6,6 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 )
 
 type countingStore struct {
@@ -96,6 +98,42 @@ func TestManagerMarkResultSuccessDoesNotPersistRuntimeOnlyStats(t *testing.T) {
 	}
 	if stats := updated.Quality24hStats(time.Now()); stats.Requests != 1 || stats.Success != 1 {
 		t.Fatalf("Quality24hStats = %#v, want one successful request", stats)
+	}
+}
+
+func TestManagerMarkResultSuccessWithPassiveQuotaHeadersDoesNotPersistAllowedState(t *testing.T) {
+	store := &countingStore{}
+	mgr := NewManager(store, nil, nil)
+	auth := &Auth{
+		ID:       "auth-1",
+		Provider: "claude",
+		Status:   StatusActive,
+		Metadata: map[string]any{"type": "claude"},
+	}
+	if _, err := mgr.Register(WithSkipPersist(context.Background()), auth); err != nil {
+		t.Fatalf("Register(skipPersist) returned error: %v", err)
+	}
+
+	headers := http.Header{}
+	headers.Set("anthropic-ratelimit-unified-5h-status", "allowed")
+	ctx := logging.WithResponseHeadersHolder(context.Background())
+	logging.SetResponseHeaders(ctx, headers)
+	mgr.MarkResult(ctx, Result{
+		AuthID:   "auth-1",
+		Provider: "claude",
+		Model:    "claude-opus-4-8",
+		Success:  true,
+	})
+
+	if got := store.saveCount.Load(); got != 0 {
+		t.Fatalf("successful passive quota sample should stay in memory without Save, got %d", got)
+	}
+	updated, ok := mgr.GetByID("auth-1")
+	if !ok {
+		t.Fatal("auth not found")
+	}
+	if got := updated.Metadata["session_window_status"]; got != "allowed" {
+		t.Fatalf("session_window_status = %v, want allowed", got)
 	}
 }
 
