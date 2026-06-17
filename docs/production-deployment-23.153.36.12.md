@@ -58,18 +58,31 @@ Traefik 动态路由：
 
 ## 当前部署版本
 
-- 后端提交：`da722145`（Claude 高 429 压力下账号路由、冷却分类与订阅权重优化）
+- 后端提交：`3edce407`（Session affinity 走 scheduler fast path，并减少成功请求 passive quota 写盘）
 - 前端提交：`f819c3e`（未变）
-- 最近一次按本文档部署时间：`2026-06-15T08:07:42+00:00`
-- 本次部署后端二进制 sha256：`b57a398b3360199e5ebee7805573b5f33190f22b7c1fb12332998a912d1be3ec`
-- 本次部署后端压缩包 sha256：`d654d7964a7ba4da097e12f87387f1e1accb13675feef5d17fdabe2b9506ddd5`
+- 最近一次按本文档部署时间：`2026-06-17T11:09:41+00:00`
+- 本次部署后端二进制 sha256：`25427b15f68bb92883bb337158f4aabe9a1a3867d8c18db6f8730f0a29893dd3`
+- 本次部署后端压缩包 sha256：`09d8bfd38b2a973e09dd48566176d1a7e9692dd2f8a62ec73f87a42db897a8de`
 - 本次部署前端 management.html sha256：未变，沿用 `c251642a1e153348df79a706c8b647c5e8975fd9ed9f2de1adb6697a7c986dfe`
-- 部署前运行版本 backend=`18f30ea1`，frontend=`f819c3e`
-- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-da722145-*`（可回滚到 `18f30ea1`）
-- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260615-075742.tgz`
+- 部署前运行版本 backend=`da722145`，frontend=`f819c3e`
+- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-3370d072-*`、`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-3edce407-*`（可回滚到 `da722145` 或中间版本 `3370d072`）
+- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260617-110155.tgz`、`/opt/cpa-claude-proxy-backups/auths-20260617-110920.tgz`
 - 部署后已确认 `auths` 目录存在 Claude 账号 JSON 和 `proxy_pool.json`；账号增删由晓宇手动管理。
 
-### 本轮变更说明（da722145 / f819c3e）
+### 本轮变更说明（3edce407 / f819c3e）
+
+仅后端部署。本轮针对生产高峰期首字慢和 CPU 高的确定性热点做两步修复：先让 `session-affinity` 不再关闭 scheduler fast path，再避免成功请求因普通 passive quota 采样持续写账号 JSON。
+
+1. `SessionAffinitySelector` 包装 `RoundRobinSelector` / `FillFirstSelector` 时，`useSchedulerFastPath` 和 scheduler strategy 会解包识别底层内置 selector，不再回退到 legacy 全量扫描选号路径。
+2. Scheduler fast path 内原生处理 session affinity：缓存命中时使用 pinned auth 尝试 scheduler 选择；账号冷却、不可用或 session 满时只清当前绑定并重绑新账号，避免同一 session 反复粘到满号或冷却号。
+3. 保留 legacy selector 的模型分桶语义：裸内置 selector 仍不传 route model；session-affinity 等包装 selector 在 legacy path 中继续按 model 生成 cache key。
+4. 成功请求带 Claude passive quota header 时，普通 `allowed/allowed_warning` 采样只更新内存，不再直接持久化账号文件；只有真正进入 passive quota cooldown、已有持久化运行态需要清理、或路由可用性变化时才写盘。
+5. 新增回归测试覆盖 session-affinity over round-robin 走 scheduler fast path、缓存账号 cooling 时重绑、缓存账号 session full 时重绑，以及普通成功 passive quota sample 不触发 `Save`。
+6. 本地验证：`git diff --check`、`go test -count=1 ./sdk/cliproxy/auth`、`go test -count=1 ./internal/api/handlers/management`、`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o ... ./cmd/server` 均通过；管理包测试在 Codex 沙箱内因 `httptest` 端口限制需脱沙箱复跑。
+7. 部署后验证：容器 `cpa-claude-proxy` 为 Up，运行二进制 sha256 与本地一致，`8318` 仍只监听 `127.0.0.1`，本机 `healthz 200`、`management 200`，公网 `https://api.openstaryu.com/` 与 `https://admin.openstaryu.com/management.html` 均为 200。
+8. 部署后观测：`session-affinity: cache hit but auth unavailable, reselected` 在部署后窗口为 `0`；账号文件写入从上一版观测到的每请求级别明显下降，但高并发流式请求下 CPU 仍可能出现高峰，后续若继续排查需要启用/接入 pprof 或增加低噪声 per-request timing 指标。
+
+### 上一轮变更说明（da722145 / f819c3e）
 
 仅后端部署。本轮针对生产高峰期可用账号下降、Pro 账号更容易触发 429、429 后健康状态归类不稳定，以及成功请求高频持久化拖慢路由热路径的问题做收敛。
 

@@ -33,7 +33,7 @@
 - CPA 本机健康检查：`http://127.0.0.1:8318/healthz`
 - SSH：`root@154.29.158.193:56260`
 - 当前生产版本摘要见 `docs/production-deployment-23.153.36.12.md` 的“当前部署版本”。
-- 截至 `2026-06-15`，生产后端二进制部署提交为 `da722145`，前端部署提交为 `f819c3e`。
+- 截至 `2026-06-17`，生产后端二进制部署提交为 `3edce407`，前端部署提交为 `f819c3e`。
 - 后端仓库本地 HEAD 可能是部署后的文档提交；生产实际运行的二进制仍以服务器 `/opt/cpa-claude-proxy/DEPLOYED_COMMITS` 为准。
 - 最近一次账号备份以生产部署文档记录为准；部署前必须重新备份 `/opt/cpa-claude-proxy/auths`。
 - 最近一次网络入口收口备份：`/root/openstaryu-hardening-20260528-113201`
@@ -68,6 +68,11 @@ cat /opt/cpa-claude-proxy/DEPLOYED_COMMITS
 
 ## 最近关键后端改动
 
+- `3edce407 fix auth passive quota success persistence`
+  - 最终生产部署版本，同次包含前一提交 `3370d072 fix auth scheduler session affinity fast path`。
+  - 生产开启 session-affinity 时，selector 包装不再关闭 scheduler fast path；缓存绑定账号冷却或 session 满时会清当前绑定并用 scheduler 重绑，避免回到 legacy 全量扫描与大量 reselect 日志。
+  - 成功请求带 Claude passive quota header 时，普通 allowed/allowed_warning 采样只更新内存，不再直接写账号 JSON；只有进入 passive quota cooldown、已有持久化运行态需要清理或路由可用性变化时才落盘。
+  - 已部署到生产服务器，生产后端二进制提交为 `3edce407`，前端仍为 `f819c3e`；部署后 `reselect` 统计为 0，账号文件写入明显下降，但高并发流式请求下 CPU 仍可能有高峰，后续需 pprof 或低噪声 timing 指标继续定位。
 - `da722145 fix claude auth routing under 429 pressure`
   - 稳定 429 后账号健康归类：quota cooldown 优先显示为冷却，不再在限额冷却和不可用之间摇摆。
   - 封号自然语言错误归类为 `account_banned/permanent_disabled`，不再误归类为人工已停用。
