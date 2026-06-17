@@ -33,7 +33,7 @@
 - CPA 本机健康检查：`http://127.0.0.1:8318/healthz`
 - SSH：`root@154.29.158.193:56260`
 - 当前生产版本摘要见 `docs/production-deployment-23.153.36.12.md` 的“当前部署版本”。
-- 截至 `2026-06-17`，生产后端二进制部署提交为 `3edce407`，前端部署提交为 `f819c3e`。
+- 截至 `2026-06-17`，生产后端二进制部署提交为 `002c2404`，前端部署提交为 `54605c3`。
 - 后端仓库本地 HEAD 可能是部署后的文档提交；生产实际运行的二进制仍以服务器 `/opt/cpa-claude-proxy/DEPLOYED_COMMITS` 为准。
 - 最近一次账号备份以生产部署文档记录为准；部署前必须重新备份 `/opt/cpa-claude-proxy/auths`。
 - 最近一次网络入口收口备份：`/root/openstaryu-hardening-20260528-113201`
@@ -68,6 +68,12 @@ cat /opt/cpa-claude-proxy/DEPLOYED_COMMITS
 
 ## 最近关键后端改动
 
+- `002c2404 feat: refine Claude health capacity monitoring`
+  - 生产部署版本，同次前端为 `54605c3 feat: show account capacity monitoring`。
+  - 管理 API 新增统一健康分类 `health_class`，旧 `unavailable` 收敛为 `transient_error`；401 仍按认证错误处理，429/RPM/session full 归为冷却。
+  - 订阅容量语义收敛：Pro `+1`、Max 5x `+5`、Max 20x `+20`；旧未区分 Max 作为未知 Max，不计入总容量。
+  - 批量 sessionKey 导入拆分 `new_imported` 与 `existing_updated`，已存在账号再次导入会更新凭证但不算新导入，并返回新/已存在账号的订阅分布。
+  - 管理面板新增剩余容量、容量恢复预估、未知 Max 数量、Max 5x/20x 展示和导入结果明细；生产已验证 `healthz 200`、`management 200`、公网 API 和管理页均为 200。
 - `3edce407 fix auth passive quota success persistence`
   - 最终生产部署版本，同次包含前一提交 `3370d072 fix auth scheduler session affinity fast path`。
   - 生产开启 session-affinity 时，selector 包装不再关闭 scheduler fast path；缓存绑定账号冷却或 session 满时会清当前绑定并用 scheduler 重绑，避免回到 legacy 全量扫描与大量 reselect 日志。

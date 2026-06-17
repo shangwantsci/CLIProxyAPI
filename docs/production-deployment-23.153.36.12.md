@@ -58,16 +58,28 @@ Traefik 动态路由：
 
 ## 当前部署版本
 
-- 后端提交：`3edce407`（Session affinity 走 scheduler fast path，并减少成功请求 passive quota 写盘）
-- 前端提交：`f819c3e`（未变）
-- 最近一次按本文档部署时间：`2026-06-17T11:09:41+00:00`
-- 本次部署后端二进制 sha256：`25427b15f68bb92883bb337158f4aabe9a1a3867d8c18db6f8730f0a29893dd3`
-- 本次部署后端压缩包 sha256：`09d8bfd38b2a973e09dd48566176d1a7e9692dd2f8a62ec73f87a42db897a8de`
-- 本次部署前端 management.html sha256：未变，沿用 `c251642a1e153348df79a706c8b647c5e8975fd9ed9f2de1adb6697a7c986dfe`
-- 部署前运行版本 backend=`da722145`，frontend=`f819c3e`
-- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-3370d072-*`、`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-3edce407-*`（可回滚到 `da722145` 或中间版本 `3370d072`）
-- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260617-110155.tgz`、`/opt/cpa-claude-proxy-backups/auths-20260617-110920.tgz`
+- 后端提交：`002c2404`（收敛 Claude 账号健康分类、订阅容量和批量导入统计）
+- 前端提交：`54605c3`（展示账号容量、恢复预估和导入结果拆分）
+- 最近一次按本文档部署时间：`2026-06-17T13:08:40+00:00`
+- 本次部署后端二进制 sha256：`fdffefebeaa6e7b5d1b1cbfa93dd0926e1cc5011b892d99d2dbe64dfeb287c06`
+- 本次部署后端压缩包 sha256：`a8ee8ba14a6aab78abf9f8b7171f5d12d3f71edef1ed06ddd89cd5955503d713`
+- 本次部署前端 management.html sha256：`67927c98cd0fd48bdffd297a65fa1efcfa634581c07aa165b50a97ec8ec95feb`
+- 部署前运行版本 backend=`3edce407`，frontend=`f819c3e`
+- 部署前后端二进制备份：`/opt/cpa-claude-proxy-backups/CLIProxyAPI-before-002c2404-20260617-130809.bak`
+- 部署前账号备份（exclude logs）：`/opt/cpa-claude-proxy-backups/auths-20260617-130809.tgz`
 - 部署后已确认 `auths` 目录存在 Claude 账号 JSON 和 `proxy_pool.json`；账号增删由晓宇手动管理。
+
+### 本轮变更说明（002c2404 / 54605c3）
+
+前后端均部署。本轮回到账号健康、订阅容量和导入可观测性，不改生产路由热路径。
+
+1. 后端管理 API 新增统一健康分类 `health_class`，把旧的内部 `unavailable` 收敛为 `transient_error`；401/unauthorized 仍归为认证错误，429/RPM/session full 归为冷却类，5xx/可重试错误归为临时上游错误。
+2. Claude 订阅识别新增 `max5x`、`max20x`、`pro` 等容量语义：Pro 计 `+1`，Max 5x 计 `+5`，Max 20x 计 `+20`；旧的未区分 Max 标记为未知 Max，不计入容量总量。
+3. 重新认证、OAuth profile 和 Cookie/sessionKey 导入会尽量写入 `subscription_plan`、`subscription_multiplier`、`subscription_precision`、`subscription_capacity_units` 等字段，避免后续页面只看到模糊 Max。
+4. 批量 sessionKey 导入结果拆分为 `new_imported` 与 `existing_updated`：已存在账号再次导入会更新凭证，但不算作新导入；同时返回新账号和已存在账号的订阅分布。
+5. 管理面板账号池去掉“不可用”这个健康筛选标签，改为“临时错误”；新增剩余容量、容量恢复预估、未知 Max 数量、Max 5x/20x 筛选和导入结果明细展示。
+6. 本地验证：`git diff --check`、`go test -count=1 ./internal/api/handlers/management`、`go test -count=1 ./internal/auth/claude`、`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o ... ./cmd/server`、前端 `npm run type-check`、`npm run lint`、`npm run build` 均通过；`rg -n -i "claude|anthropic" dist` 无输出。
+7. 部署后验证：容器 `cpa-claude-proxy` 为 Up，运行二进制和 `management.html` sha256 与本地一致，`8318` 仍只监听 `127.0.0.1`，本机 `healthz 200`、`management 200`，公网 `https://api.openstaryu.com/` 与 `https://admin.openstaryu.com/management.html` 均为 200。
 
 ### 本轮变更说明（3edce407 / f819c3e）
 
