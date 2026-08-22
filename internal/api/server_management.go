@@ -111,6 +111,9 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/max-retry-interval", s.mgmt.GetMaxRetryInterval)
 		mgmt.PUT("/max-retry-interval", s.mgmt.PutMaxRetryInterval)
 		mgmt.PATCH("/max-retry-interval", s.mgmt.PutMaxRetryInterval)
+		mgmt.GET("/account-limit-wait-seconds", s.mgmt.GetAccountLimitWaitSeconds)
+		mgmt.PUT("/account-limit-wait-seconds", s.mgmt.PutAccountLimitWaitSeconds)
+		mgmt.PATCH("/account-limit-wait-seconds", s.mgmt.PutAccountLimitWaitSeconds)
 
 		mgmt.GET("/force-model-prefix", s.mgmt.GetForceModelPrefix)
 		mgmt.PUT("/force-model-prefix", s.mgmt.PutForceModelPrefix)

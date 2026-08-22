@@ -117,6 +117,7 @@ type Manager struct {
 	configCooldownMu          sync.Mutex
 	auths                     map[string]*Auth
 	scheduler                 *authScheduler
+	limiter                   *accountLimiter
 	// pluginScheduler runs outside m.mu before falling back to native selection.
 	pluginScheduler PluginScheduler
 	// homeRuntimeAuths retains legacy session auth lookups for non-execution callers.
@@ -136,6 +137,7 @@ type Manager struct {
 	requestRetry        atomic.Int32
 	maxRetryCredentials atomic.Int32
 	maxRetryInterval    atomic.Int64
+	accountLimitWait    atomic.Int64
 
 	// oauthModelAlias stores global OAuth model alias mappings (alias -> upstream name) keyed by channel.
 	oauthModelAlias atomic.Value
@@ -191,5 +193,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		manager.ApplyHomeInFlightPublisherConfig(defaultInFlightConfig)
 	}
 	manager.scheduler = newAuthScheduler(selector)
+	manager.limiter = newAccountLimiter()
+	manager.accountLimitWait.Store(defaultAccountLimitWait.Nanoseconds())
 	return manager
 }

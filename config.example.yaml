@@ -164,6 +164,11 @@ max-retry-credentials: 0
 # Retry rounds that need no wait remain controlled by request-retry.
 max-retry-interval: 30
 
+# How long a request waits when every eligible credential is at its
+# per-auth max-concurrent or max-rpm cap. Omit to keep the default of 5
+# seconds. Set to 0 to return 429 immediately. Values above 10 are clamped to 10.
+# account-limit-wait-seconds: 5
+
 # When true, disable auth/model cooldown scheduling globally (prevents blackout windows after failure states).
 # A credential/provider disable-cooling value, when present, overrides this global value.
 disable-cooling: false

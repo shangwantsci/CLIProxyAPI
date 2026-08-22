@@ -29,6 +29,33 @@ func (m *Manager) SetRetryConfig(retry int, maxRetryInterval time.Duration, maxR
 	m.maxRetryInterval.Store(maxRetryInterval.Nanoseconds())
 }
 
+// SetAccountLimitWait updates how long a request waits when every eligible
+// credential is at its configured concurrency or RPM cap. Negative values
+// restore the 5-second default. Values above 10 seconds are clamped to 10s.
+func (m *Manager) SetAccountLimitWait(d time.Duration) {
+	if m == nil {
+		return
+	}
+	if d < 0 {
+		d = defaultAccountLimitWait
+	}
+	if d > time.Duration(internalconfig.MaxAccountLimitWaitSeconds)*time.Second {
+		d = time.Duration(internalconfig.MaxAccountLimitWaitSeconds) * time.Second
+	}
+	m.accountLimitWait.Store(d.Nanoseconds())
+}
+
+func (m *Manager) accountLimitWaitBudget() time.Duration {
+	if m == nil {
+		return defaultAccountLimitWait
+	}
+	n := m.accountLimitWait.Load()
+	if n < 0 {
+		return defaultAccountLimitWait
+	}
+	return time.Duration(n)
+}
+
 // RegisterExecutor registers a provider executor with the manager.
 func (m *Manager) RegisterExecutor(executor ProviderExecutor) {
 	if executor == nil {
@@ -197,6 +224,9 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 	}
 	if m.scheduler != nil {
 		m.scheduler.removeAuth(id)
+	}
+	if m.limiter != nil {
+		m.limiter.Forget(id)
 	}
 	m.queueRefreshUnschedule(id)
 	m.invalidateSessionAffinity(id)
