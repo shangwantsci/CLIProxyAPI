@@ -369,3 +369,67 @@ func TestPatchAuthFileFields_RejectsInvalidWeights(t *testing.T) {
 		}
 	}
 }
+
+func TestPatchAuthFileFields_AccountLimits(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	record := &coreauth.Auth{ID: "auth.json", FileName: "auth.json", Provider: "codex", Metadata: map[string]any{"type": "codex"}}
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+	h := NewHandlerWithoutConfigFilePath(&config.Config{}, manager)
+
+	patch := func(body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(rec)
+		ctx.Request = httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
+		ctx.Request.Header.Set("Content-Type", "application/json")
+		h.PatchAuthFileFields(ctx)
+		return rec
+	}
+
+	if rec := patch(`{"name":"auth.json","max_concurrent":2,"max_rpm":20}`); rec.Code != http.StatusOK {
+		t.Fatalf("set status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	updated, _ := manager.GetByID("auth.json")
+	if got, ok := updated.MaxConcurrentOverride(); !ok || got != 2 {
+		t.Fatalf("max_concurrent override = (%d, %t), want (2, true)", got, ok)
+	}
+	if got, ok := updated.MaxRPMOverride(); !ok || got != 20 {
+		t.Fatalf("max_rpm override = (%d, %t), want (20, true)", got, ok)
+	}
+	if _, exists := updated.Attributes["max_concurrent"]; exists {
+		t.Fatal("max_concurrent should not be synced to Attributes")
+	}
+	if _, exists := updated.Attributes["max_rpm"]; exists {
+		t.Fatal("max_rpm should not be synced to Attributes")
+	}
+
+	if rec := patch(`{"name":"auth.json","max_concurrent":0}`); rec.Code != http.StatusOK {
+		t.Fatalf("zero status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	updated, _ = manager.GetByID("auth.json")
+	if _, exists := updated.Metadata["max_concurrent"]; exists {
+		t.Fatal("max_concurrent=0 should delete the key")
+	}
+
+	if rec := patch(`{"name":"auth.json","max_rpm":null}`); rec.Code != http.StatusOK {
+		t.Fatalf("null status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	updated, _ = manager.GetByID("auth.json")
+	if _, exists := updated.Metadata["max_rpm"]; exists {
+		t.Fatal("max_rpm=null should delete the key")
+	}
+
+	for _, body := range []string{
+		`{"name":"auth.json","max_concurrent":-1}`,
+		`{"name":"auth.json","max_concurrent":"abc"}`,
+		`{"name":"auth.json","max_concurrent":{"foo":1}}`,
+		`{"name":"auth.json","max_rpm":10001}`,
+	} {
+		if rec := patch(body); rec.Code != http.StatusBadRequest {
+			t.Fatalf("body %s status = %d, want 400; body=%s", body, rec.Code, rec.Body.String())
+		}
+	}
+}

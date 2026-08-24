@@ -61,6 +61,10 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+
+	// ContentGuard optionally intercepts model requests before credential selection.
+	// A nil value means the section is absent and must not be written back.
+	ContentGuard *ContentGuardConfig `yaml:"content-guard,omitempty" json:"content-guard,omitempty"`
 }
 
 // ClaudeCodeConfig configures Claude Code compatibility behavior.

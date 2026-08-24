@@ -494,6 +494,43 @@ func (a *Auth) RequestRetryOverride() (int, bool) {
 	return 0, false
 }
 
+// MaxConcurrentOverride returns the per-auth in-flight concurrency cap.
+// Canonical key is "max_concurrent"; "max-concurrent" is a legacy alias.
+// Missing, non-numeric, or <= 0 values mean unlimited.
+func (a *Auth) MaxConcurrentOverride() (int, bool) {
+	return a.positiveLimitOverride("max_concurrent", "max-concurrent")
+}
+
+// MaxRPMOverride returns the per-auth requests-per-minute cap.
+// Canonical key is "max_rpm"; "max-rpm" is a legacy alias.
+// Missing, non-numeric, or <= 0 values mean unlimited.
+func (a *Auth) MaxRPMOverride() (int, bool) {
+	return a.positiveLimitOverride("max_rpm", "max-rpm")
+}
+
+func (a *Auth) positiveLimitOverride(canonical, legacy string) (int, bool) {
+	if a == nil || a.Metadata == nil {
+		return 0, false
+	}
+	if val, ok := a.Metadata[canonical]; ok {
+		if parsed, okParse := parseIntAny(val); okParse {
+			if parsed <= 0 {
+				return 0, false
+			}
+			return parsed, true
+		}
+	}
+	if val, ok := a.Metadata[legacy]; ok {
+		if parsed, okParse := parseIntAny(val); okParse {
+			if parsed <= 0 {
+				return 0, false
+			}
+			return parsed, true
+		}
+	}
+	return 0, false
+}
+
 func parseBoolAny(val any) (bool, bool) {
 	switch typed := val.(type) {
 	case bool:

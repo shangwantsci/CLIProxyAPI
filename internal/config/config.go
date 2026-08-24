@@ -88,6 +88,10 @@ type Config struct {
 	// forbids positive cooldown waits; it does not disable same-round credential
 	// failover or immediate additional rounds allowed by RequestRetry.
 	MaxRetryInterval int `yaml:"max-retry-interval" json:"max-retry-interval"`
+	// AccountLimitWaitSeconds is how long a request waits when every eligible
+	// credential is at its per-auth concurrency or RPM cap. Nil uses the default
+	// of 5 seconds. 0 returns 429 immediately. Values above 10 are clamped to 10.
+	AccountLimitWaitSeconds *int `yaml:"account-limit-wait-seconds,omitempty" json:"account-limit-wait-seconds,omitempty"`
 
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`

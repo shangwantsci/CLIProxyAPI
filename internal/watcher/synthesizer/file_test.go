@@ -80,6 +80,8 @@ func TestFileSynthesizer_Synthesize_ValidAuthFile(t *testing.T) {
 		},
 		"disable_cooling": true,
 		"request_retry":   2,
+		"max_concurrent":  2,
+		"max_rpm":         20,
 	}
 	data, _ := json.Marshal(authData)
 	err := os.WriteFile(filepath.Join(tempDir, "claude-auth.json"), data, 0644)
@@ -126,6 +128,12 @@ func TestFileSynthesizer_Synthesize_ValidAuthFile(t *testing.T) {
 	}
 	if v, ok := auths[0].Metadata["request_retry"].(float64); !ok || int(v) != 2 {
 		t.Errorf("expected request_retry 2, got %v", auths[0].Metadata["request_retry"])
+	}
+	if got, ok := auths[0].MaxConcurrentOverride(); !ok || got != 2 {
+		t.Errorf("expected max_concurrent override 2, got (%d, %t)", got, ok)
+	}
+	if got, ok := auths[0].MaxRPMOverride(); !ok || got != 20 {
+		t.Errorf("expected max_rpm override 20, got (%d, %t)", got, ok)
 	}
 	if auths[0].Status != coreauth.StatusActive {
 		t.Errorf("expected status active, got %s", auths[0].Status)

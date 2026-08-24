@@ -19,6 +19,8 @@ import (
 	codexmodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/models"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/client/grokbuild"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/contentguard"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -36,6 +38,13 @@ import (
 const oauthCallbackSuccessHTML = `<html><head><meta charset="utf-8"><title>Authentication successful</title><script>setTimeout(function(){window.close();},5000);</script></head><body><h1>Authentication successful!</h1><p>You can close this window.</p><p>This window will close automatically in 5 seconds.</p></body></html>`
 
 const codexAlphaSearchSourceFormat = "codex-alpha-search"
+
+func serverSDKConfig(s *Server) *config.SDKConfig {
+	if s == nil || s.cfg == nil {
+		return nil
+	}
+	return &s.cfg.SDKConfig
+}
 
 // setupRoutes configures the API routes for the server.
 // It defines the endpoints and associates them with their respective handlers.
@@ -332,6 +341,14 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		selectionHeaders.Set("X-Session-ID", sessionID)
 	}
 	ctx := context.WithValue(c.Request.Context(), "gin", c)
+	if errMsg := contentguard.Intercept(ctx, serverSDKConfig(s), contentguard.SourceFormatAlphaSearch, strings.TrimSpace(routing.Model), strings.TrimSpace(routing.Model), body); errMsg != nil {
+		if s.handlers != nil {
+			s.handlers.WriteErrorResponse(c, errMsg)
+			return
+		}
+		c.Data(http.StatusForbidden, "application/json", errMsg.Body)
+		return
+	}
 	selectionModel, errRoute := s.codexAlphaSearchSelectionModel(ctx, c, body, strings.TrimSpace(routing.Model))
 	if errRoute != nil {
 		log.WithError(errRoute).Warn("codex alpha search: model router returned an unsupported target")

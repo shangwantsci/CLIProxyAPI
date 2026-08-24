@@ -119,6 +119,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 	streamStart := time.Now()
 	go func() {
 		defer close(out)
+		defer leaseFromContext(ctx).Release()
 		var failed bool
 		forward := true
 		var rewriter *StreamRewriter

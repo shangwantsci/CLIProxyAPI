@@ -271,6 +271,13 @@ func (h *Handler) PutMaxRetryInterval(c *gin.Context) {
 	h.updateIntField(c, func(v int) { h.cfg.MaxRetryInterval = v })
 }
 
+func (h *Handler) GetAccountLimitWaitSeconds(c *gin.Context) {
+	c.JSON(200, gin.H{"account-limit-wait-seconds": h.cfg.AccountLimitWaitSecondsValue()})
+}
+func (h *Handler) PutAccountLimitWaitSeconds(c *gin.Context) {
+	h.updateIntField(c, func(v int) { h.cfg.SetAccountLimitWaitSeconds(v) })
+}
+
 // ForceModelPrefix
 func (h *Handler) GetForceModelPrefix(c *gin.Context) {
 	c.JSON(200, gin.H{"force-model-prefix": h.cfg.ForceModelPrefix})

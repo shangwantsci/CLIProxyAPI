@@ -293,6 +293,14 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			return
 		} else if fieldPath == "headers" {
 			applyAuthFileHeadersPatch(targetAuth, value)
+		} else if isAccountLimitField(fieldPath) {
+			if errLimit := applyAuthFileAccountLimitField(targetAuth.Metadata, fieldPath, value); errLimit != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": errLimit.Error()})
+				return
+			}
+		} else if root := rootAuthFileField(fieldPath); isAccountLimitField(root) && root != fieldPath {
+			c.JSON(http.StatusBadRequest, gin.H{"error": root + " does not support nested fields"})
+			return
 		} else if errSet := setAuthFileMetadataValue(targetAuth.Metadata, fieldPath, value); errSet != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": errSet.Error()})
 			return
@@ -329,6 +337,57 @@ func decodeAuthFileFieldValue(raw json.RawMessage) (any, error) {
 		return nil, err
 	}
 	return value, nil
+}
+
+func isAccountLimitField(fieldPath string) bool {
+	switch strings.TrimSpace(fieldPath) {
+	case "max_concurrent", "max-concurrent", "max_rpm", "max-rpm":
+		return true
+	default:
+		return false
+	}
+}
+
+func accountLimitCanonicalField(fieldPath string) string {
+	switch strings.TrimSpace(fieldPath) {
+	case "max_concurrent", "max-concurrent":
+		return "max_concurrent"
+	case "max_rpm", "max-rpm":
+		return "max_rpm"
+	default:
+		return ""
+	}
+}
+
+func applyAuthFileAccountLimitField(metadata map[string]any, fieldPath string, value any) error {
+	canonical := accountLimitCanonicalField(fieldPath)
+	if canonical == "" {
+		return fmt.Errorf("unsupported account limit field %s", fieldPath)
+	}
+	delete(metadata, canonical)
+	delete(metadata, strings.ReplaceAll(canonical, "_", "-"))
+	if value == nil {
+		return nil
+	}
+	number, okNumber := value.(json.Number)
+	if !okNumber {
+		return fmt.Errorf("%s must be an integer", canonical)
+	}
+	parsed, errParse := number.Int64()
+	if errParse != nil {
+		return fmt.Errorf("%s must be an integer", canonical)
+	}
+	if parsed < 0 {
+		return fmt.Errorf("%s must be a non-negative integer", canonical)
+	}
+	if parsed > 10000 {
+		return fmt.Errorf("%s exceeds the maximum of 10000", canonical)
+	}
+	if parsed == 0 {
+		return nil
+	}
+	metadata[canonical] = parsed
+	return nil
 }
 
 func rootAuthFileField(path string) string {

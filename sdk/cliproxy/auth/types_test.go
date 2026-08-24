@@ -50,6 +50,52 @@ func TestRequestRetryOverride(t *testing.T) {
 	}
 }
 
+func TestMaxConcurrentAndRPMOverride(t *testing.T) {
+	t.Parallel()
+
+	var unset *Auth
+	if got, ok := unset.MaxConcurrentOverride(); ok || got != 0 {
+		t.Fatalf("nil auth max_concurrent = (%d, %t), want (0, false)", got, ok)
+	}
+	if got, ok := unset.MaxRPMOverride(); ok || got != 0 {
+		t.Fatalf("nil auth max_rpm = (%d, %t), want (0, false)", got, ok)
+	}
+
+	auth := &Auth{}
+	if got, ok := auth.MaxConcurrentOverride(); ok || got != 0 {
+		t.Fatalf("empty auth max_concurrent = (%d, %t), want (0, false)", got, ok)
+	}
+
+	cases := []struct {
+		name   string
+		meta   map[string]any
+		call   func(*Auth) (int, bool)
+		want   int
+		wantOK bool
+	}{
+		{name: "concurrent missing", meta: map[string]any{}, call: (*Auth).MaxConcurrentOverride},
+		{name: "concurrent zero", meta: map[string]any{"max_concurrent": 0}, call: (*Auth).MaxConcurrentOverride},
+		{name: "concurrent negative", meta: map[string]any{"max_concurrent": -1}, call: (*Auth).MaxConcurrentOverride},
+		{name: "concurrent int", meta: map[string]any{"max_concurrent": 2}, call: (*Auth).MaxConcurrentOverride, want: 2, wantOK: true},
+		{name: "concurrent float", meta: map[string]any{"max_concurrent": float64(2)}, call: (*Auth).MaxConcurrentOverride, want: 2, wantOK: true},
+		{name: "concurrent string", meta: map[string]any{"max_concurrent": "2"}, call: (*Auth).MaxConcurrentOverride, want: 2, wantOK: true},
+		{name: "concurrent kebab", meta: map[string]any{"max-concurrent": 3}, call: (*Auth).MaxConcurrentOverride, want: 3, wantOK: true},
+		{name: "concurrent snake wins", meta: map[string]any{"max_concurrent": 2, "max-concurrent": 9}, call: (*Auth).MaxConcurrentOverride, want: 2, wantOK: true},
+		{name: "rpm int", meta: map[string]any{"max_rpm": 20}, call: (*Auth).MaxRPMOverride, want: 20, wantOK: true},
+		{name: "rpm kebab", meta: map[string]any{"max-rpm": 15}, call: (*Auth).MaxRPMOverride, want: 15, wantOK: true},
+		{name: "rpm zero unlimited", meta: map[string]any{"max_rpm": 0}, call: (*Auth).MaxRPMOverride},
+		{name: "rpm snake wins", meta: map[string]any{"max_rpm": 8, "max-rpm": 99}, call: (*Auth).MaxRPMOverride, want: 8, wantOK: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := tc.call(&Auth{Metadata: tc.meta})
+			if got != tc.want || ok != tc.wantOK {
+				t.Fatalf("override = (%d, %t), want (%d, %t)", got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
+
 func TestToolPrefixDisabled(t *testing.T) {
 	var a *Auth
 	if a.ToolPrefixDisabled() {

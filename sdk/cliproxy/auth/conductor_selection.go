@@ -928,6 +928,10 @@ func (m *Manager) shouldRetryAfterErrorWithHomeRetryLimit(ctx context.Context, o
 	if errors.As(err, &homeBusy) && homeBusy != nil {
 		return 0, false
 	}
+	var accountLimit *AccountLimitError
+	if errors.As(err, &accountLimit) && accountLimit != nil {
+		return 0, false
+	}
 	status := statusCodeFromError(err)
 	if status == http.StatusOK {
 		return 0, false

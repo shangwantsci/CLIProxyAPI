@@ -317,7 +317,14 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	}
 	attempted := make(map[string]struct{})
 	var lastErr error
+	var slot *limitLease
+	defer func() { slot.Release() }()
+	limitedRetryAt := make(map[string]time.Time)
+	limitWaitLeft := m.accountLimitWaitBudget()
+	waitRounds := 0
 	for {
+		slot.Release()
+		slot = nil
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
@@ -332,6 +339,14 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
 		if errPick != nil {
+			if retry, errWait := consumeAccountLimitWait(ctx, tried, limitedRetryAt, &limitWaitLeft, &waitRounds); errWait != nil {
+				return cliproxyexecutor.Response{}, errWait
+			} else if retry {
+				continue
+			}
+			if lastErr == nil && len(limitedRetryAt) > 0 {
+				return cliproxyexecutor.Response{}, newAccountLimitErrorFromMap(limitedRetryAt, time.Now())
+			}
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -353,6 +368,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAlias(auth, routeModel)
 		if len(models) == 0 {
 			continue
+		}
+		if lease, okAcquire := m.tryAccountLimitAcquire(execCtx, auth, limitedRetryAt); !okAcquire {
+			continue
+		} else {
+			slot = lease
 		}
 		attempted[auth.ID] = struct{}{}
 		var errPrepare error
@@ -676,7 +696,14 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	unauthorizedRefreshTried := make(map[string]struct{})
 	var lastErr error
 	var roundTiming homeRetryRoundTiming
+	var slot *limitLease
+	defer func() { slot.Release() }()
+	limitedRetryAt := make(map[string]time.Time)
+	limitWaitLeft := m.accountLimitWaitBudget()
+	waitRounds := 0
 	for {
+		slot.Release()
+		slot = nil
 		allowSameAuthRetry := homeMode && homeSameAuthRetryPending && lastHomeAuthID != "" && homeSameAuthRetries[lastHomeAuthID] == 0
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials && !allowSameAuthRetry {
 			if lastErr != nil {
@@ -714,6 +741,14 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if homeMode && lastErr != nil && errors.As(errPick, &homeCooldown) && homeCooldown != nil {
 				observeHomeCooldownRetryLimit(homeCooldown, homeRetryLimit, pinnedAuthIDFromMetadata(opts.Metadata) == "")
 				return nil, markHomeRetryRoundExhausted(lastErr, homeCooldown.RetryAfter(), false)
+			}
+			if retry, errWait := consumeAccountLimitWait(ctx, tried, limitedRetryAt, &limitWaitLeft, &waitRounds); errWait != nil {
+				return nil, errWait
+			} else if retry {
+				continue
+			}
+			if lastErr == nil && len(limitedRetryAt) > 0 {
+				return nil, newAccountLimitErrorFromMap(limitedRetryAt, time.Now())
 			}
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
 				if homeMode {
@@ -825,6 +860,12 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			continue
 		}
+		if lease, okAcquire := m.tryAccountLimitAcquire(execCtx, auth, limitedRetryAt); !okAcquire {
+			continue
+		} else {
+			slot = lease
+			execCtx = withLease(execCtx, slot)
+		}
 		attempted[auth.ID] = struct{}{}
 		var errPrepare error
 		if selection != nil {
@@ -934,6 +975,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			return wrapHomeStream(ctx, streamResult, selection, releaseAttempt), nil
 		}
+		slot = nil
 		return streamResult, nil
 	}
 }
