@@ -108,6 +108,24 @@ plugins:
       config3: 3
       mode: "safe" # enum example: safe, fast
 
+# Optional request content guard. Enforcement runs in this gateway before credential
+# selection. A missing section uses enabled=true and mode=observe at runtime and is
+# not written back when unrelated keys are saved.
+# content-guard:
+#   enabled: true
+#   mode: observe   # observe | enforce
+#   categories:
+#     child_safety: { strength: standard }
+#     self_harm_instructions: { strength: standard }
+#     weapons_cbrne: { strength: off }
+#     violent_extremism: { strength: off }
+#     cyber_offense: { strength: off }
+#     fraud: { strength: off }
+#     sexual_violence: { strength: off }
+#     jailbreak: { strength: off }
+#     adult_sexual: { strength: off }
+#   adult-sexual-for: ["claude"]
+
 # When true, disable high-overhead request logging and HTTP middleware features to reduce per-request memory usage under high concurrency.
 commercial-mode: false
 

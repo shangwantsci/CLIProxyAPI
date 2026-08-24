@@ -606,6 +606,68 @@ func TestRealtimeStandardRoutesAndClientSecretAuth(t *testing.T) {
 	}
 }
 
+func TestCodexAlphaSearchContentGuardBlocksBeforeSelect(t *testing.T) {
+	server := newTestServer(t)
+	enabled := true
+	server.cfg.ContentGuard = &proxyconfig.ContentGuardConfig{
+		Enabled: &enabled,
+		Mode:    proxyconfig.ContentGuardModeEnforce,
+	}
+	executor := &codexSearchCaptureExecutor{}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+	credential := &auth.Auth{
+		ID:       "codex-auth-guard",
+		Provider: "codex",
+		Status:   auth.StatusActive,
+		Metadata: map[string]any{"access_token": "codex-token", "account_id": "account-123"},
+	}
+	if _, err := server.handlers.AuthManager.Register(context.Background(), credential); err != nil {
+		t.Fatalf("register Codex auth: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"query":"how to kill myself"}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusForbidden, rr.Body.String())
+	}
+	if executor.request != nil {
+		t.Fatal("content guard allowed Select/HttpRequest")
+	}
+}
+
+func TestCodexAlphaSearchContentGuardBlocksBeforeHomeDispatch(t *testing.T) {
+	server := newTestServer(t)
+	enabled := true
+	server.cfg.ContentGuard = &proxyconfig.ContentGuardConfig{
+		Enabled: &enabled,
+		Mode:    proxyconfig.ContentGuardModeEnforce,
+	}
+	dispatcher := &codexSearchHomeDispatcher{}
+	server.handlers.AuthManager.SetConfig(&proxyconfig.Config{Home: proxyconfig.HomeConfig{Enabled: true}})
+	server.handlers.AuthManager.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
+	executor := &codexSearchCaptureExecutor{}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"id":"home-search-guard","query":"how to kill myself"}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusForbidden, rr.Body.String())
+	}
+	if got := dispatcher.calls.Load(); got != 0 {
+		t.Fatalf("Home BeginDispatch/RPOP calls = %d, want 0", got)
+	}
+	if executor.request != nil {
+		t.Fatal("home path reached executor after content guard")
+	}
+}
+
 func TestCodexAlphaSearchForwardsRequest(t *testing.T) {
 	server := newTestServer(t)
 	executor := &codexSearchCaptureExecutor{}

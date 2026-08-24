@@ -114,6 +114,28 @@ func TestUsageQueuePluginNormalizesDirectSDKUsageByProvider(t *testing.T) {
 	}
 }
 
+func TestUsageQueuePluginPreservesObserveContentPolicyFailBody(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithResponseStatusHolder(context.Background())
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		(&usageQueuePlugin{}).HandleUsage(ctx, coreusage.Record{
+			Provider:     "unknown",
+			ExecutorType: "content_guard",
+			Model:        "gpt-4",
+			Failed:       false,
+			Fail: coreusage.Failure{
+				Body: "content_policy_violation:self_harm_instructions:standard",
+			},
+		})
+
+		payload := popSinglePayload(t)
+		requireBoolField(t, payload, "failed", false)
+		requireFailField(t, payload, http.StatusOK, "content_policy_violation:self_harm_instructions:standard")
+		requireStringField(t, payload, "source", "")
+	})
+}
+
 func TestUsageQueuePluginPayloadIncludesGenerateFalse(t *testing.T) {
 	withEnabledQueue(t, func() {
 		ctx := internallogging.WithResponseStatusHolder(context.Background())

@@ -289,6 +289,13 @@ type BaseAPIHandler struct {
 	ModelRouterHost PluginModelRouterHost
 }
 
+func handlerSDKConfig(h *BaseAPIHandler) *config.SDKConfig {
+	if h == nil {
+		return nil
+	}
+	return h.Cfg
+}
+
 // NewBaseAPIHandlers creates a new API handlers instance.
 // It takes a slice of clients and configuration as input.
 //

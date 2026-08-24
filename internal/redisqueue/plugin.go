@@ -179,6 +179,13 @@ func resolveFail(ctx context.Context, record coreusage.Record, failed bool) fail
 		Body:       strings.TrimSpace(record.Fail.Body),
 	}
 	if !failed {
+		if strings.HasPrefix(fail.Body, "content_policy_violation:") {
+			status := http.StatusOK
+			if fail.StatusCode > 0 {
+				status = fail.StatusCode
+			}
+			return failDetail{StatusCode: status, Body: fail.Body}
+		}
 		return failDetail{StatusCode: 200}
 	}
 	if fail.StatusCode <= 0 {

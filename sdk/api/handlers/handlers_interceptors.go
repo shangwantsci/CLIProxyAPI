@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/contentguard"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -424,6 +425,9 @@ func interceptStreamChunk(ctx context.Context, host PluginInterceptorHost, req p
 }
 
 func (h *BaseAPIHandler) applyRequestInterceptorsBeforeAuth(ctx context.Context, handlerType, requestedModel, requestID string, req coreexecutor.Request, opts coreexecutor.Options, skipPluginID string) (coreexecutor.Request, coreexecutor.Options, *interfaces.ErrorMessage) {
+	if errMsg := contentguard.Intercept(ctx, handlerSDKConfig(h), handlerType, req.Model, requestedModel, req.Payload); errMsg != nil {
+		return req, opts, errMsg
+	}
 	host := h.interceptorHost()
 	if !requestInterceptorsEnabled(host) {
 		return req, opts, nil
